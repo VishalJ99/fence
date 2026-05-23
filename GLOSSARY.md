@@ -1,0 +1,4 @@
+- **Fence** — current product name for this fork of SelfControl.
+- **commit** — app action that makes a blocking schedule active and non-editable until expiry; not a git commit.
+- **selfcontrold** — privileged helper daemon that enforces system-level blocking.
+- **Block Management** — code path that writes hosts-file rules, PF rules, and app-kill state for an active block.

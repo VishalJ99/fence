@@ -1,0 +1,8 @@
+- `SelfControl.xcodeproj/` — Xcode project containing the macOS app, daemon, CLI, helper, and test targets. The generated `SelfControl.xcworkspace` should be used after `pod install`.
+- `Common/` — shared Objective-C code used across app and daemon targets, including licensing, XPC, and utility code.
+- `Block Management/` — blocking engine responsible for hosts-file, packet-filter, and app-block enforcement.
+- `Daemon/` — privileged helper implementation (`selfcontrold`) and related launch/install logic.
+- `SelfControlTests/` — XCTest target for project test coverage.
+- `server/` — Node/Express license activation and trial API. Runtime configuration comes from environment variables such as `DATABASE_URL` and `WEBHOOK_SECRET`.
+- `web/functions/api/` — Cloudflare Pages Functions used for checkout webhooks, license generation, and email delivery.
+- `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
