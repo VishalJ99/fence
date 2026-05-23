@@ -80,10 +80,9 @@ xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration
 **File:** `Podfile`
 
 - Updated `minVersion` from `'10.10'` to `'12.0'`
-- **Removed Sentry pod** - incompatible C++ code with macOS 26 SDK:
-  - `std::set_terminate` / `std::terminate_handler` missing `#include <exception>`
-  - `std::vector<const T>` not allowed in profiling code
-  - Sentry 8.x requires Swift which breaks static library linking
+- Restored Sentry for the main app target with `pod 'Sentry', '9.14.0'`
+  - Sentry 9.14.0 builds with the macOS 26 SDK in the `SelfControl` app target
+  - CLI/helper targets remain without Sentry; the main app owns crash and structured-log reporting
 - Added `post_install` hook to patch TransformerKit imports:
   ```ruby
   # Fixes for TransformerKit @import statements
@@ -101,22 +100,23 @@ xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration
 - Updated `MACOSX_DEPLOYMENT_TARGET` from `10.10` to `12.0` in all build configurations
 - Modified 3 shell script build phases to prevent PCH race condition (see below)
 
-### 3. Sentry Removal (Conditional Compilation)
+### 3. Sentry Integration (Conditional Compilation)
 
 **Files:** `Common/SCSentry.m`, `Common/SCSettings.m`
 
-Added conditional compilation to disable Sentry when not available:
+Sentry remains conditionally compiled so unit tests and dependency-free builds can still compile. With Sentry 9.x, Objective-C files that reference `SentrySDK` must import the generated Swift header after the umbrella header:
 
 ```objc
 #if !defined(TESTING) && __has_include(<Sentry/Sentry.h>)
 #define SENTRY_ENABLED 1
 #import <Sentry/Sentry.h>
+#import <Sentry/Sentry-Swift.h>
 #else
 #define SENTRY_ENABLED 0
 #endif
-
-// Then use: #if SENTRY_ENABLED ... #endif
 ```
+
+Structured logs are enabled with `options.enableLogs = YES` in `SCSentry`, and `options.beforeSendLog` drops all logs when `EnableErrorReporting` is disabled. Log call sites should go through `SCSentry` so user opt-in and attribute sanitization are applied consistently.
 
 ### 4. PCH Race Condition Fix
 
@@ -159,15 +159,15 @@ if [ ! -f "$FILE" ] || ! grep -qF "$NEW" "$FILE"; then echo "$NEW" > "$FILE"; fi
 
 ---
 
-## Why Sentry Was Removed
+## Sentry Compatibility Notes
 
-Sentry SDK versions 7.x and 8.x have C++ code incompatible with macOS 26's stricter libc++:
+Older Sentry SDK versions 7.x and 8.x had C++ or Swift integration problems with the macOS 26 toolchain:
 
 1. **Missing includes:** `std::set_terminate` and `std::terminate_handler` require `#include <exception>` which Sentry doesn't include
 2. **Invalid template:** `std::vector<const T>` is not allowed (const elements can't be moved/copied properly)
 3. **Swift requirement:** Sentry 8.x requires Swift runtime, which breaks static library linking for CLI tools
 
-The app builds and runs without crash reporting. To re-enable Sentry, wait for a version compatible with macOS 26 SDK.
+Sentry 9.14.0 is compatible with the current setup when installed only in the main app target. If a future SDK upgrade breaks Objective-C imports, check that `Common/SCSentry.m` and `Common/SCSettings.m` import both `<Sentry/Sentry.h>` and `<Sentry/Sentry-Swift.h>`.
 
 ---
 
@@ -200,9 +200,10 @@ git submodule update --init --recursive
 
 | File | Change |
 |------|--------|
-| `Podfile` | minVersion 12.0, removed Sentry, TransformerKit patches |
+| `Podfile` | minVersion 12.0, Sentry 9.14 for the app target, TransformerKit patches |
 | `SelfControl.xcodeproj/project.pbxproj` | Deployment target 12.0, PCH-safe version scripts |
-| `Common/SCSentry.m` | Conditional Sentry compilation |
-| `Common/SCSettings.m` | Conditional Sentry compilation |
+| `Common/SCSentry.m` | Conditional Sentry compilation, structured logs, opt-in filtering |
+| `Common/SCLogger.m` | Support-log export status events sent through `SCSentry` |
+| `Common/SCSettings.m` | Conditional Sentry compilation with Swift header import |
 | `tr.lproj/PreferencesGeneralViewController.strings` | Added (copied from de.lproj) |
 | `tr.lproj/PreferencesAdvancedViewController.strings` | Added (copied from de.lproj) |

@@ -14,7 +14,7 @@ target "SelfControl" do
     pod 'TransformerKit', :git => 'https://github.com/MacPass/TransformerKit.git', :branch => 'master'
     pod 'FormatterKit/TimeIntervalFormatter', '~> 1.8.0'
     pod 'LetsMove', '~> 1.24'
-    # Sentry removed - incompatible with macOS 26 C++ toolchain
+    pod 'Sentry', '9.14.0'
 
     # Add test target
     target 'SelfControlTests' do

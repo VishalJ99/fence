@@ -12,6 +12,7 @@
 #if !defined(TESTING) && __has_include(<Sentry/Sentry.h>)
 #define SENTRY_ENABLED 1
 #import <Sentry/Sentry.h>
+#import <Sentry/Sentry-Swift.h>
 #else
 #define SENTRY_ENABLED 0
 #endif

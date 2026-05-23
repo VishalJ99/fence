@@ -7,6 +7,7 @@
 
 #import "SCLogger.h"
 #import "SCLogExportWindowController.h"
+#import "SCSentry.h"
 
 @implementation SCLogger
 
@@ -27,6 +28,7 @@
 
 + (void)exportLogsForSupport {
     NSLog(@"SCLogger: exportLogsForSupport called");
+    [SCSentry logMessage:@"Support log export requested" category:@"support-logs"];
 
     // Show loading window immediately (on main thread)
     [[SCLogExportWindowController sharedController] show];
@@ -34,8 +36,13 @@
     // Run log collection on background thread
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSLog(@"SCLogger: Starting log collection on background thread");
+        [SCSentry logMessage:@"Support log collection started" level:SCSentryLogLevelDebug category:@"support-logs" attributes:nil];
         NSString* logOutput = [self collectLogs];
         NSLog(@"SCLogger: Log collection complete, length=%lu", (unsigned long)logOutput.length);
+        [SCSentry logMessage:@"Support log collection completed"
+                       level:SCSentryLogLevelInfo
+                    category:@"support-logs"
+                  attributes:@{@"contentLength": @(logOutput.length)}];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             NSLog(@"SCLogger: Back on main thread, closing loading window");
@@ -87,6 +94,13 @@
 
         NSLog(@"SCLogger: log command finished with status %d, data length=%lu",
               task.terminationStatus, (unsigned long)data.length);
+        [SCSentry logMessage:@"Unified log command completed"
+                       level:(task.terminationStatus == 0 ? SCSentryLogLevelInfo : SCSentryLogLevelWarning)
+                    category:@"support-logs"
+                  attributes:@{
+                      @"terminationStatus": @(task.terminationStatus),
+                      @"outputLength": @(data.length)
+                  }];
         NSString* logContent = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 
         if (logContent.length > 0) {
@@ -100,6 +114,10 @@
     } @catch (NSException* exception) {
         [output appendFormat:@"=== Error Collecting Logs ===\n"];
         [output appendFormat:@"Failed to collect system logs: %@\n", exception.reason];
+        [SCSentry logMessage:@"Unified log command failed"
+                       level:SCSentryLogLevelError
+                    category:@"support-logs"
+                  attributes:@{@"exceptionName": exception.name ?: @"unknown"}];
     }
 
     // Add current block status
@@ -151,6 +169,14 @@
 
     if (!success) {
         NSLog(@"SCLogger: Failed to write file: %@", error);
+        [SCSentry logMessage:@"Support log export write failed"
+                       level:SCSentryLogLevelError
+                    category:@"support-logs"
+                  attributes:@{
+                      @"errorName": error.domain ?: @"unknown",
+                      @"errorCode": @(error.code),
+                      @"contentLength": @(logContent.length)
+                  }];
         NSAlert* alert = [[NSAlert alloc] init];
         alert.messageText = NSLocalizedString(@"Export Failed", @"Error alert title");
         alert.informativeText = [NSString stringWithFormat:@"Could not save logs: %@", error.localizedDescription];
@@ -161,6 +187,13 @@
     }
 
     NSLog(@"SCLogger: File written successfully to %@", filePath);
+    [SCSentry logMessage:@"Support log export file saved"
+                   level:SCSentryLogLevelInfo
+                category:@"support-logs"
+              attributes:@{
+                  @"filename": filename,
+                  @"contentLength": @(logContent.length)
+              }];
 
     // Reveal in Finder
     NSLog(@"SCLogger: Revealing in Finder...");
@@ -185,6 +218,10 @@
     NSLog(@"SCLogger: Opening mailto URL...");
     BOOL opened = [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:mailtoURL]];
     NSLog(@"SCLogger: mailto openURL returned %@", opened ? @"YES" : @"NO");
+    [SCSentry logMessage:@"Support mail compose requested"
+                   level:(opened ? SCSentryLogLevelInfo : SCSentryLogLevelWarning)
+                category:@"support-logs"
+              attributes:@{@"opened": @(opened)}];
 }
 
 @end

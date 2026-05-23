@@ -12,6 +12,7 @@
 #if !defined(TESTING) && __has_include(<Sentry/Sentry.h>)
 #define SENTRY_ENABLED 1
 #import <Sentry/Sentry.h>
+#import <Sentry/Sentry-Swift.h>
 #else
 #define SENTRY_ENABLED 0
 #endif
@@ -25,12 +26,20 @@
         options.dsn = @"https://58fbe7145368418998067f88896007b2@o504820.ingest.sentry.io/5592195";
         options.releaseName = [NSString stringWithFormat: @"%@%@", componentId, SELFCONTROL_VERSION_STRING];
         options.enableAutoSessionTracking = NO;
+        options.enableLogs = YES;
         options.environment = @"dev";
 
         // make sure no data leaves the device if error reporting isn't enabled
         options.beforeSend = ^SentryEvent * _Nullable(SentryEvent * _Nonnull event) {
             if ([SCSentry errorReportingEnabled]) {
                 return event;
+            } else {
+                return NULL;
+            }
+        };
+        options.beforeSendLog = ^SentryLog * _Nullable(SentryLog * _Nonnull log) {
+            if ([SCSentry errorReportingEnabled]) {
+                return log;
             } else {
                 return NULL;
             }
@@ -131,6 +140,65 @@
     crumb.message = message;
     [SentrySDK addBreadcrumb: crumb];
 #endif
+}
+
++ (NSDictionary<NSString*, id>*)sanitizedLogAttributes:(NSDictionary<NSString*, id>*)attributes category:(NSString*)category {
+    NSMutableDictionary* sanitizedAttributes = [NSMutableDictionary dictionaryWithObject:category forKey:@"category"];
+    NSArray<NSString*>* sensitiveKeyFragments = @[@"blocklist", @"host", @"domain", @"url", @"path"];
+
+    [attributes enumerateKeysAndObjectsUsingBlock:^(NSString* key, id value, BOOL* stop) {
+        if (![key isKindOfClass:[NSString class]] || value == nil || value == [NSNull null]) {
+            return;
+        }
+
+        NSString* lowercaseKey = key.lowercaseString;
+        for (NSString* fragment in sensitiveKeyFragments) {
+            if ([lowercaseKey containsString:fragment] && ![lowercaseKey containsString:@"count"] && ![lowercaseKey containsString:@"length"]) {
+                return;
+            }
+        }
+
+        if ([value isKindOfClass:[NSString class]]) {
+            NSString* stringValue = (NSString*)value;
+            sanitizedAttributes[key] = stringValue.length > 256 ? [stringValue substringToIndex:256] : stringValue;
+        } else if ([value isKindOfClass:[NSNumber class]]) {
+            sanitizedAttributes[key] = value;
+        } else {
+            sanitizedAttributes[key] = [[value description] substringToIndex:MIN([[value description] length], 256)];
+        }
+    }];
+
+    return sanitizedAttributes;
+}
+
++ (void)logMessage:(NSString*)message level:(SCSentryLogLevel)level category:(NSString*)category attributes:(nullable NSDictionary<NSString*, id>*)attributes {
+    if (![SCSentry errorReportingEnabled]) {
+        return;
+    }
+
+#if SENTRY_ENABLED
+    NSDictionary* sanitizedAttributes = [SCSentry sanitizedLogAttributes:attributes ?: @{} category:category ?: @"app"];
+    SentryLogger* logger = [SentrySDK logger];
+    switch (level) {
+        case SCSentryLogLevelDebug:
+            [logger debug:message attributes:sanitizedAttributes];
+            break;
+        case SCSentryLogLevelWarning:
+            [logger warn:message attributes:sanitizedAttributes];
+            break;
+        case SCSentryLogLevelError:
+            [logger error:message attributes:sanitizedAttributes];
+            break;
+        case SCSentryLogLevelInfo:
+        default:
+            [logger info:message attributes:sanitizedAttributes];
+            break;
+    }
+#endif
+}
+
++ (void)logMessage:(NSString*)message category:(NSString*)category {
+    [SCSentry logMessage:message level:SCSentryLogLevelInfo category:category attributes:nil];
 }
 
 + (void)captureError:(NSError*)error {
