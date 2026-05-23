@@ -28,7 +28,14 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - The pinned `ArgumentParser` commit may no longer be fetchable from GitHub. If submodule init fails with `not our ref 61a9bbbd234bae51ea798f9752ffe582042aefda`, fetch it from the MacBook reference checkout: `git -C ArgumentParser fetch macbook:/Users/vishaljain/selfcontrol/ArgumentParser 61a9bbbd234bae51ea798f9752ffe582042aefda && git -C ArgumentParser checkout --detach 61a9bbbd234bae51ea798f9752ffe582042aefda`.
 - `Sparkle.framework/` is ignored but required at the repo root for app compilation. If missing, copy it from the MacBook reference checkout or install the matching framework before building.
 - Install CocoaPods prerequisites, then run `pod install` and work from `SelfControl.xcworkspace`, not `SelfControl.xcodeproj`.
-- On the Mac mini, unsigned compile/test checks use `CODE_SIGNING_ALLOWED=NO` because the machine can compile without the `org.eyebeam.Fence` provisioning profile.
+- On the Mac mini, unsigned compile/test checks can still use `CODE_SIGNING_ALLOWED=NO` for quick verification.
+- Signed Debug builds are configured on the Mac mini for team `L5YX8CH3F5` with bundle id `org.eyebeam.Fence`. App Store Connect API metadata lives in `/Users/dross/.private/appstoreconnect/env` (`ASC_KEY_PATH`, `ASC_KEY_ID`, `ASC_ISSUER_ID`); do not print the `.p8` key contents.
+- The known ASC issuer id is `b448403b-58ff-4d88-a7ea-271ecaec8403`.
+- Xcode created/downloaded the local profile `Mac Team Provisioning Profile: org.eyebeam.Fence` with UUID `9da03862-304b-45ab-9255-6d7192f8641c`; the Mac mini device UDID `00008132-001479C20EA2401C` is registered as enabled.
+- Signed Debug build check:
+  `set -a; source /Users/dross/.private/appstoreconnect/env; set +a; xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug -allowProvisioningUpdates -allowProvisioningDeviceRegistration -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" build`
+- If signing fails with `errSecInternalComponent`, unlock the login keychain locally with `security unlock-keychain ~/Library/Keychains/login.keychain-db`, then rerun the build. Never ask the user to paste a keychain password into chat.
+- `xcrun notarytool` profile `AC_PASSWORD` is stored in the keychain using the ASC API key and validates successfully; the existing release script can use it for notarization.
 - Main app compile check: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO build`
 - Tests: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' test`
 - License server dev loop: `cd server && npm install && npm start`
