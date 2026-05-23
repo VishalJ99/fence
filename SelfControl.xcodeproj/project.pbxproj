@@ -10,6 +10,7 @@
 		07CCB4F5C9424725B598B04E /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		167A631F7107878D77965A24 /* MenuBarFence@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = AA5F3568C5F305D28DF0F7AC /* MenuBarFence@2x.png */; };
 		1869042B4D754EE781990073 /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
+		1AF1BBB2332DC8645D42B5C7 /* SCXPCClient.m in Sources */ = {isa = PBXBuildFile; fileRef = CB62FC3A24B124B900ADBC40 /* SCXPCClient.m */; };
 		1BD67B4BD6AD4D2390C3C1ED /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		1F27973C853B40AD9E95BB1E /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		1FEB91F11AD92FF528C0B287 /* SCStartupSafetyCheck.m in Sources */ = {isa = PBXBuildFile; fileRef = 3F481A9B3BB13815269D74D1 /* SCStartupSafetyCheck.m */; };
@@ -66,6 +67,7 @@
 		2934E75ACAD30A9C99C7A2D3 /* SCScheduleLaunchdBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = CF1441F5703140F3C25B9C5E /* SCScheduleLaunchdBridge.m */; };
 		2C6099A14B934A17B6C0087E /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
 		2E8D61630CBF4913A09D51DA /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
+		33AFD334DF935851EF24F64F /* SCXPCAuthorization.m in Sources */ = {isa = PBXBuildFile; fileRef = CB69C4ED25A3FD8A0030CFCD /* SCXPCAuthorization.m */; };
 		3B4BFB93FDE4E699EBAA9BC1 /* SCScheduleLaunchdBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = CF1441F5703140F3C25B9C5E /* SCScheduleLaunchdBridge.m */; };
 		3F838215472444C2AFF3BAF1 /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		540B226FDF11861FAE35D654 /* SCVersionTracker.m in Sources */ = {isa = PBXBuildFile; fileRef = 8BFF51A1C4A177184F1D9ACF /* SCVersionTracker.m */; };
@@ -4046,6 +4048,8 @@
 				CB0EEF7820FE49030024D27B /* SCUtilityTests.m in Sources */,
 				CB81A94D25B7B5B6006956F7 /* SCMigrationUtilities.m in Sources */,
 				2934E75ACAD30A9C99C7A2D3 /* SCScheduleLaunchdBridge.m in Sources */,
+				1AF1BBB2332DC8645D42B5C7 /* SCXPCClient.m in Sources */,
+				33AFD334DF935851EF24F64F /* SCXPCAuthorization.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

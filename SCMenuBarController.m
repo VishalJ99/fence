@@ -550,7 +550,11 @@
 
     if (!parentWindow) {
         // No window available, open the app first
-        [self.delegate menuBarControllerDidRequestOpenApp:self];
+        if (self.delegate) {
+            [self.delegate menuBarControllerDidRequestOpenApp:self];
+        } else if (self.onEnterLicense) {
+            self.onEnterLicense();
+        }
         // Delay slightly to let window appear
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self showLicenseWindow];

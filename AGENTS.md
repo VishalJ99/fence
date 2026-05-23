@@ -25,9 +25,12 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - DVC is intentionally not used for this repo. Do not require `dvc status` or DVC artifact tracking unless the user explicitly decides to introduce DVC later.
 - If local build setup is unclear or broken, the user has approved SSHing into their MacBook to inspect `~/selfcontrol`, which is known to build and compile. Treat that checkout as a reference for setup comparison, not as the source of truth for commits here unless explicitly instructed.
 - Fresh clones require `git submodule update --init --recursive` to populate `ArgumentParser/`.
+- The pinned `ArgumentParser` commit may no longer be fetchable from GitHub. If submodule init fails with `not our ref 61a9bbbd234bae51ea798f9752ffe582042aefda`, fetch it from the MacBook reference checkout: `git -C ArgumentParser fetch macbook:/Users/vishaljain/selfcontrol/ArgumentParser 61a9bbbd234bae51ea798f9752ffe582042aefda && git -C ArgumentParser checkout --detach 61a9bbbd234bae51ea798f9752ffe582042aefda`.
+- `Sparkle.framework/` is ignored but required at the repo root for app compilation. If missing, copy it from the MacBook reference checkout or install the matching framework before building.
 - Install CocoaPods prerequisites, then run `pod install` and work from `SelfControl.xcworkspace`, not `SelfControl.xcodeproj`.
-- Main app build: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug build`
-- Tests: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControlTests -configuration Debug test`
+- On the Mac mini, unsigned compile/test checks use `CODE_SIGNING_ALLOWED=NO` because the machine can compile without the `org.eyebeam.Fence` provisioning profile.
+- Main app compile check: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+- Tests: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' test`
 - License server dev loop: `cd server && npm install && npm start`
 - Local macOS builds may require code-signing updates and `Secrets.xcconfig`; see `SETUP.md` and `BUILD_MACOS26.md`.
 - GUI smoke tests can be automated locally with `peekaboo` once the app is built and launchable.

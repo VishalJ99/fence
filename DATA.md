@@ -1,4 +1,6 @@
 - `SelfControl.xcodeproj/` — Xcode project containing the macOS app, daemon, CLI, helper, and test targets. The generated `SelfControl.xcworkspace` should be used after `pod install`.
+- `ArgumentParser/` — git submodule used by the CLI target for argument parsing.
+- `Sparkle.framework/` — ignored local binary framework required at the repo root for app compilation; copy or install it during local setup.
 - `Common/` — shared Objective-C code used across app and daemon targets, including licensing, XPC, and utility code.
 - `Block Management/` — blocking engine responsible for hosts-file, packet-filter, and app-block enforcement.
 - `Daemon/` — privileged helper implementation (`selfcontrold`) and related launch/install logic.

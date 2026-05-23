@@ -32,6 +32,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Action blocks for menu items
 @property (nonatomic, copy, nullable) void (^onShowSchedule)(void);
 @property (nonatomic, copy, nullable) void (^onShowBlocklist)(void);
+@property (nonatomic, copy, nullable) void (^onEnterLicense)(void);
 
 /// Shared instance
 + (instancetype)sharedController;

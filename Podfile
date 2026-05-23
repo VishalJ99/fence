@@ -52,12 +52,10 @@ post_install do |pi|
 
    # Fix MASPreferences resource path for macOS frameworks (CocoaPods bug)
    # The generated script looks for .framework/en.lproj but macOS frameworks use .framework/Resources/en.lproj
-   resource_script = "Pods/Target Support Files/Pods-SelfControl/Pods-SelfControl-resources.sh"
-   if File.exist?(resource_script)
+   Dir["Pods/Target Support Files/**/**-resources.sh"].each do |resource_script|
       text = File.read(resource_script)
       text.gsub!("MASPreferences.framework/en.lproj", "MASPreferences.framework/Resources/en.lproj")
       File.write(resource_script, text)
    end
 
 end
-
