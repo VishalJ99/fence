@@ -18,6 +18,7 @@ APP_PATH="$BUILD_DIR/Fence.app"
 DMG_NAME="Fence-$VERSION.dmg"
 ZIP_NAME="Fence-$VERSION.zip"
 ENTITLEMENTS_PATH="$PROJECT_DIR/build/FenceRelease.entitlements"
+PROFILE_PATH="${FENCE_RELEASE_PROFILE_PATH:-$PROJECT_DIR/FenceDirectDistribution.provisionprofile}"
 
 echo "=== Building Fence v$VERSION ==="
 
@@ -61,6 +62,15 @@ if [ ! -d "$APP_PATH" ]; then
     exit 1
 fi
 echo "✓ Build complete"
+
+if [ ! -f "$PROFILE_PATH" ]; then
+    echo "❌ Direct Distribution provisioning profile not found."
+    echo "   Set FENCE_RELEASE_PROFILE_PATH or place FenceDirectDistribution.provisionprofile at the repo root."
+    exit 1
+fi
+
+echo "→ Embedding Direct Distribution provisioning profile..."
+cp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisionprofile"
 
 # Sign all components with hardened runtime
 echo "→ Signing app components..."
