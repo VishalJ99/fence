@@ -17,8 +17,34 @@ OUTPUT_DIR="$PROJECT_DIR/dist"
 APP_PATH="$BUILD_DIR/Fence.app"
 DMG_NAME="Fence-$VERSION.dmg"
 ZIP_NAME="Fence-$VERSION.zip"
+ENTITLEMENTS_PATH="$PROJECT_DIR/build/FenceRelease.entitlements"
 
 echo "=== Building Fence v$VERSION ==="
+
+# Prepare generated release metadata before Xcode scans precompiled headers.
+echo "→ Preparing release metadata..."
+echo "#define SELFCONTROL_VERSION_STRING @\"$VERSION\"" > "$PROJECT_DIR/version-header.h"
+mkdir -p "$(dirname "$ENTITLEMENTS_PATH")"
+cat > "$ENTITLEMENTS_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.application-identifier</key>
+    <string>${TEAM_ID}.${BUNDLE_ID}</string>
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array/>
+    <key>com.apple.developer.team-identifier</key>
+    <string>${TEAM_ID}</string>
+    <key>com.apple.developer.ubiquity-kvstore-identifier</key>
+    <string>${TEAM_ID}.${BUNDLE_ID}</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>${TEAM_ID}.app.usefence.license</string>
+    </array>
+</dict>
+</plist>
+EOF
 
 # Clean and build
 echo "→ Building release..."
@@ -26,6 +52,7 @@ cd "$PROJECT_DIR"
 xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Release \
     -derivedDataPath "$DERIVED_DATA" \
     -arch arm64 \
+    CODE_SIGNING_ALLOWED=NO \
     clean build | tail -20
 
 # Verify app exists
@@ -73,7 +100,9 @@ done
 
 # Finally sign the main app bundle
 echo "  Signing: Fence.app"
-codesign --force --sign "$DEVELOPER_ID" --options runtime,library,hard,kill --timestamp "$APP_PATH"
+codesign --force --sign "$DEVELOPER_ID" --options runtime,library,hard,kill --timestamp \
+    --entitlements "$ENTITLEMENTS_PATH" \
+    "$APP_PATH"
 
 # Verify signature
 echo "→ Verifying signature..."
