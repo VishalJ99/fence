@@ -20,6 +20,12 @@ ZIP_NAME="Fence-$VERSION.zip"
 ENTITLEMENTS_PATH="$PROJECT_DIR/build/FenceRelease.entitlements"
 PROFILE_PATH="${FENCE_RELEASE_PROFILE_PATH:-$PROJECT_DIR/FenceDirectDistribution.provisionprofile}"
 
+if [[ -n "${ASC_KEY_PATH:-}" && -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+    NOTARY_AUTH_ARGS=(--key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID")
+else
+    NOTARY_AUTH_ARGS=(--keychain-profile "AC_PASSWORD")
+fi
+
 echo "=== Building Fence v$VERSION ==="
 
 # Prepare generated release metadata before Xcode scans precompiled headers.
@@ -131,7 +137,7 @@ ditto -c -k --keepParent "Fence.app" "$OUTPUT_DIR/$ZIP_NAME"
 # Notarize
 echo "→ Submitting for notarization (this may take a few minutes)..."
 xcrun notarytool submit "$OUTPUT_DIR/$ZIP_NAME" \
-    --keychain-profile "AC_PASSWORD" \
+    "${NOTARY_AUTH_ARGS[@]}" \
     --wait
 
 # Staple the ticket
@@ -160,7 +166,7 @@ echo "✓ DMG signed"
 # Notarize the DMG too
 echo "→ Notarizing DMG..."
 xcrun notarytool submit "$OUTPUT_DIR/$DMG_NAME" \
-    --keychain-profile "AC_PASSWORD" \
+    "${NOTARY_AUTH_ARGS[@]}" \
     --wait
 
 xcrun stapler staple "$OUTPUT_DIR/$DMG_NAME"
