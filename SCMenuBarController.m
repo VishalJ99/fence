@@ -298,6 +298,12 @@
     [self.statusMenu addItem:[NSMenuItem separatorItem]];
 
     // Report Bug
+    NSMenuItem *repairPermissionsItem = [[NSMenuItem alloc] initWithTitle:@"Repair Fence Permissions"
+                                                                    action:@selector(repairPermissionsClicked:)
+                                                             keyEquivalent:@""];
+    repairPermissionsItem.target = self;
+    [self.statusMenu addItem:repairPermissionsItem];
+
     NSMenuItem *reportBugItem = [[NSMenuItem alloc] initWithTitle:@"Report Bug"
                                                            action:@selector(reportBugClicked:)
                                                     keyEquivalent:@""];
@@ -482,6 +488,12 @@
 
 - (void)reportBugClicked:(id)sender {
     [SCLogger exportLogsForSupport];
+}
+
+- (void)repairPermissionsClicked:(id)sender {
+    if (self.onRepairPermissions) {
+        self.onRepairPermissions();
+    }
 }
 
 - (void)checkForUpdates:(id)sender {

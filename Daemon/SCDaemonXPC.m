@@ -10,6 +10,7 @@
 #import "SCDaemonBlockMethods.h"
 #import "SCXPCAuthorization.h"
 #import "SCHelperToolUtilities.h"
+#import "SCErr.h"
 
 @implementation SCDaemonXPC
 
@@ -47,6 +48,15 @@
     }
     
     [SCDaemonBlockMethods updateBlocklist: newBlocklist authorization: authData reply: reply];
+}
+
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply {
+    NSLog(@"XPC method called: appendEntriesToActiveBlocklist");
+    [SCDaemonBlockMethods appendEntriesToActiveBlocklist:entries
+                               matchingExistingBlocklist:existingBlocklist
+                                                   reply:reply];
 }
 
 - (void)updateBlockEndDate:(NSDate*)newEndDate authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
@@ -226,6 +236,101 @@
 
     NSLog(@"INFO: All approved schedules cleared successfully");
     reply(nil);
+}
+
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                 entries:(NSArray<NSString*>*)entries
+                                   reply:(void(^)(NSError* error))reply {
+    NSLog(@"XPC method called: appendEntriesToApprovedSchedules");
+
+    if (![SCDaemonBlockMethods lockOrTimeout:reply]) {
+        return;
+    }
+
+    NSArray<NSString *> *sanitizedEntries = [SCDaemonBlockMethods sanitizedBlocklistEntries:entries];
+    if (expectedBlocklistsByScheduleID.count == 0 || sanitizedEntries.count == 0) {
+        NSLog(@"appendEntriesToApprovedSchedules: Nothing safe to update");
+        reply(nil);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        return;
+    }
+
+    SCSettings* settings = [SCSettings sharedSettings];
+    NSMutableDictionary* approvedSchedules = [[settings valueForKey: @"ApprovedSchedules"] mutableCopy];
+    if (approvedSchedules == nil) {
+        reply(nil);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        return;
+    }
+
+    __block NSUInteger matchedCount = 0;
+    __block NSUInteger updatedCount = 0;
+
+    [expectedBlocklistsByScheduleID enumerateKeysAndObjectsUsingBlock:^(NSString *scheduleId, NSArray<NSString *> *expectedBlocklist, BOOL *stop) {
+        if (![scheduleId isKindOfClass:[NSString class]]) {
+            return;
+        }
+
+        NSArray<NSString *> *sanitizedExpectedBlocklist = [SCDaemonBlockMethods sanitizedBlocklistEntries:expectedBlocklist];
+        if (sanitizedExpectedBlocklist.count == 0) {
+            NSLog(@"appendEntriesToApprovedSchedules: Skipping %@ because expected blocklist was empty", scheduleId);
+            return;
+        }
+
+        NSSet *expectedSet = [NSSet setWithArray:sanitizedExpectedBlocklist];
+        NSDictionary *schedule = approvedSchedules[scheduleId];
+        if (![schedule isKindOfClass:[NSDictionary class]]) {
+            return;
+        }
+
+        if ([schedule[@"isAllowlist"] boolValue]) {
+            NSLog(@"appendEntriesToApprovedSchedules: Skipping %@ because it is an allowlist schedule", scheduleId);
+            return;
+        }
+
+        NSArray *blocklist = schedule[@"blocklist"] ?: @[];
+        NSSet *blocklistSet = [NSSet setWithArray:blocklist];
+        if (blocklistSet.count != expectedSet.count || ![expectedSet isSubsetOfSet:blocklistSet]) {
+            NSLog(@"appendEntriesToApprovedSchedules: Skipping %@ because blocklist did not match expected blocklist", scheduleId);
+            return;
+        }
+        matchedCount++;
+
+        NSMutableArray *updatedBlocklist = [NSMutableArray arrayWithArray:blocklist];
+        NSUInteger beforeCount = updatedBlocklist.count;
+        for (NSString *entry in sanitizedEntries) {
+            if (![updatedBlocklist containsObject:entry]) {
+                [updatedBlocklist addObject:entry];
+            }
+        }
+
+        if (updatedBlocklist.count == beforeCount) {
+            return;
+        }
+
+        NSMutableDictionary *updatedSchedule = [schedule mutableCopy];
+        updatedSchedule[@"blocklist"] = updatedBlocklist;
+        approvedSchedules[scheduleId] = updatedSchedule;
+        updatedCount++;
+    }];
+
+    if (updatedCount > 0) {
+        [settings setValue: approvedSchedules forKey: @"ApprovedSchedules"];
+        [settings synchronizeSettings];
+    }
+
+    if (matchedCount == 0) {
+        NSError *err = [SCErr errorWithCode:500 subDescription:@"No approved schedules matched expected blocklists"];
+        [SCSentry captureError:err];
+        reply(err);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        return;
+    }
+
+    NSLog(@"appendEntriesToApprovedSchedules: Matched %lu approved schedules, updated %lu",
+          (unsigned long)matchedCount, (unsigned long)updatedCount);
+    reply(nil);
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
 }
 
 - (void)clearBlockForDebugWithAuthorization:(NSData *)authData

@@ -17,12 +17,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)connectToHelperTool;
 - (void)forceDisconnect;
 - (void)installDaemon:(void(^)(NSError*))callback;
+- (BOOL)refreshAuthorizationRights:(NSError **)error;
+- (BOOL)refreshAuthorizationRightsAllowingInteraction:(BOOL)allowInteraction error:(NSError **)error;
 - (void)refreshConnectionAndRun:(void(^)(void))callback;
 - (void)connectAndExecuteCommandBlock:(void(^)(NSError *))commandBlock;
 
 - (void)getVersion:(void(^)(NSString* version, NSError* error))reply;
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings reply:(void(^)(NSError* error))reply;
 - (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist reply:(void(^)(NSError* error))reply;
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply;
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply;
 
 // Schedule registration methods (for pre-authorized scheduled blocks)
@@ -41,6 +46,10 @@ NS_ASSUME_NONNULL_BEGIN
                            reply:(void(^)(NSError* error))reply;
 
 - (void)clearAllApprovedSchedules:(void(^)(NSError* error))reply;
+
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                  entries:(NSArray<NSString*>*)entries
+                                    reply:(void(^)(NSError* error))reply;
 
 - (void)clearBlockForDebug:(void(^)(NSError* error))reply;
 

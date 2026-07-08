@@ -8,6 +8,7 @@
 #import "SCXPCClient.h"
 #import "SCDaemonProtocol.h"
 #import <ServiceManagement/ServiceManagement.h>
+#import <Security/AuthorizationTags.h>
 #import "SCXPCAuthorization.h"
 #import "SCErr.h"
 
@@ -234,6 +235,49 @@
     }
 }
 
+- (BOOL)refreshAuthorizationRights:(NSError **)error {
+    return [self refreshAuthorizationRightsAllowingInteraction:NO error:error];
+}
+
+- (BOOL)refreshAuthorizationRightsAllowingInteraction:(BOOL)allowInteraction error:(NSError **)error {
+    [self setupAuthorization];
+    if (self->_authRef == NULL) {
+        if (error) {
+            *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:paramErr userInfo:nil];
+        }
+        return NO;
+    }
+
+    if (allowInteraction) {
+        AuthorizationItem adminRight = {
+            kAuthorizationRightExecute, 0, NULL, 0
+        };
+        AuthorizationRights authRights = {
+            1, &adminRight
+        };
+        AuthorizationFlags flags = kAuthorizationFlagDefaults |
+        kAuthorizationFlagExtendRights |
+        kAuthorizationFlagInteractionAllowed;
+
+        OSStatus status = AuthorizationCopyRights(
+            self->_authRef,
+            &authRights,
+            kAuthorizationEmptyEnvironment,
+            flags,
+            NULL
+        );
+
+        if (status != errAuthorizationSuccess) {
+            if (error) {
+                *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+            }
+            return NO;
+        }
+    }
+
+    return [SCXPCAuthorization refreshAuthorizationRights:self->_authRef error:error];
+}
+
 - (BOOL)connectionIsActive {
     return (self.daemonConnection != nil);
 }
@@ -317,6 +361,32 @@
             }] updateBlocklist: newBlocklist authorization: self.authorization reply:^(NSError* error) {
                 if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
                     NSLog(@"Blocklist update failed with error = %@\n", error);
+                    [SCSentry captureError: error];
+                }
+                reply(error);
+            }];
+        }
+    }];
+}
+
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError * connectError) {
+        if (connectError != nil) {
+            NSLog(@"Append active blocklist entries failed with connection error: %@", connectError);
+            [SCSentry captureError: connectError];
+            reply(connectError);
+        } else {
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError * proxyError) {
+                NSLog(@"Append active blocklist entries failed with remote object proxy error: %@", proxyError);
+                [SCSentry captureError: proxyError];
+                reply(proxyError);
+            }] appendEntriesToActiveBlocklist:entries
+                    matchingExistingBlocklist:existingBlocklist
+                                        reply:^(NSError* error) {
+                if (error != nil) {
+                    NSLog(@"Append active blocklist entries failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
                 reply(error);
@@ -449,6 +519,32 @@
                                                     reply:^(NSError* error) {
                 if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
                     NSLog(@"Clear all approved schedules failed with error = %@\n", error);
+                    [SCSentry captureError: error];
+                }
+                reply(error);
+            }];
+        }
+    }];
+}
+
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                  entries:(NSArray<NSString*>*)entries
+                                    reply:(void(^)(NSError* error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError * connectError) {
+        if (connectError != nil) {
+            NSLog(@"Append approved schedule entries failed with connection error: %@", connectError);
+            [SCSentry captureError: connectError];
+            reply(connectError);
+        } else {
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError * proxyError) {
+                NSLog(@"Append approved schedule entries failed with remote object proxy error: %@", proxyError);
+                [SCSentry captureError: proxyError];
+                reply(proxyError);
+            }] appendEntriesToApprovedSchedules:expectedBlocklistsByScheduleID
+                                        entries:entries
+                                          reply:^(NSError* error) {
+                if (error != nil) {
+                    NSLog(@"Append approved schedule entries failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
                 reply(error);

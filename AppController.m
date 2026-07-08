@@ -47,6 +47,12 @@
 #import "SCLicenseWindowController.h"
 #import <Sparkle/Sparkle.h>
 
+static NSString * const kRepairMigrationPER352CreditsAppliedKey = @"SCRepairMigrationPER352CreditsApplied";
+static NSString * const kRepairMigrationPER352AuthRefreshBuildKey = @"SCRepairMigrationPER352AuthRefreshBuild";
+static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
+static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnlockCreditsInitialized";
+static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
+
 @interface AppController () {}
 
 @property (atomic, strong, readwrite) SCXPCClient* xpc;
@@ -78,6 +84,38 @@
 	}
 
 	return self;
+}
+
+- (void)runPostUpdateRepairMigrations {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+    if (![defaults boolForKey:kRepairMigrationPER352CreditsAppliedKey]) {
+        NSInteger existingCredits = [defaults integerForKey:kEmergencyUnlockCreditsKey];
+        BOOL creditsInitialized = [defaults boolForKey:kEmergencyUnlockCreditsInitializedKey];
+        if (!creditsInitialized || existingCredits < kRepairMigrationEmergencyUnlockCredits) {
+            [defaults setInteger:MAX(existingCredits, kRepairMigrationEmergencyUnlockCredits) forKey:kEmergencyUnlockCreditsKey];
+        }
+        [defaults setBool:YES forKey:kEmergencyUnlockCreditsInitializedKey];
+        [defaults setBool:YES forKey:kRepairMigrationPER352CreditsAppliedKey];
+        [defaults synchronize];
+        NSLog(@"AppController: PER-352 repair migration restored emergency credits to at least %ld", (long)kRepairMigrationEmergencyUnlockCredits);
+    }
+
+    NSString *currentBuild = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
+    NSString *lastAuthRefreshBuild = [defaults stringForKey:kRepairMigrationPER352AuthRefreshBuildKey];
+    if (![lastAuthRefreshBuild isEqualToString:currentBuild]) {
+        NSError *authRepairError = nil;
+        if ([self.xpc refreshAuthorizationRights:&authRepairError]) {
+            [defaults setObject:currentBuild forKey:kRepairMigrationPER352AuthRefreshBuildKey];
+            [defaults synchronize];
+            NSLog(@"AppController: Refreshed Fence authorization rights for build %@", currentBuild);
+        } else {
+            NSLog(@"AppController: Failed to refresh Fence authorization rights: %@", authRepairError);
+            if (authRepairError) {
+                [SCSentry captureError:authRepairError];
+            }
+        }
+    }
 }
 
 - (IBAction)updateTimeSliderDisplay:(id)sender {
@@ -250,6 +288,9 @@
 			[SCMenuBarController sharedController].onEnterLicense = ^{
 				[weakSelf showWeekSchedule:weakSelf];
 			};
+            [SCMenuBarController sharedController].onRepairPermissions = ^{
+                [weakSelf repairFencePermissionsFromUserAction];
+            };
 
             // apparently, a block is running, so make sure FirstBlockStarted is true
             [defaults_ setBool: YES forKey: @"FirstBlockStarted"];
@@ -291,6 +332,9 @@
             };
             [SCMenuBarController sharedController].onEnterLicense = ^{
                 [weakSelf showWeekSchedule:weakSelf];
+            };
+            [SCMenuBarController sharedController].onRepairPermissions = ^{
+                [weakSelf repairFencePermissionsFromUserAction];
             };
         } else if (blockWasOn) {
             // Not committed + just transitioned off: show week schedule
@@ -477,7 +521,8 @@
     // start up our daemon XPC
     self.xpc = [SCXPCClient new];
     [self.xpc connectToHelperTool];
-    
+    [self runPostUpdateRepairMigrations];
+
     // if we don't have a connection within 0.5 seconds,
     // OR we get back a connection with an old daemon version
     // AND we're running a modern block (which should have a daemon running it)
@@ -713,6 +758,27 @@
 
     // Activate app to bring window to front (required for LSUIElement apps)
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)repairFencePermissionsFromUserAction {
+    NSError *error = nil;
+    BOOL repaired = [self.xpc refreshAuthorizationRightsAllowingInteraction:YES error:&error];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    if (repaired) {
+        alert.messageText = NSLocalizedString(@"Fence permissions repaired", @"Permissions repair success title");
+        alert.informativeText = NSLocalizedString(@"Try adding the site or app again. Fence will ask macOS for permission if a fresh authorization is needed.", @"Permissions repair success message");
+    } else {
+        alert.alertStyle = NSAlertStyleWarning;
+        alert.messageText = NSLocalizedString(@"Fence could not repair permissions", @"Permissions repair failure title");
+        alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, use Report Bug from this menu.", @"Permissions repair failure message");
+        if (error) {
+            [SCSentry captureError:error];
+        }
+    }
+    [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+    [NSApp activateIgnoringOtherApps:YES];
+    [alert runModal];
 }
 
 - (void)closeDomainList {

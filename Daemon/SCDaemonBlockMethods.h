@@ -15,6 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (class, readonly) NSLock* daemonMethodLock;
 
++ (BOOL)lockOrTimeout:(void(^)(NSError* error))reply;
++ (NSArray<NSString *> *)sanitizedBlocklistEntries:(NSArray<NSString *> *)entries;
+
 // Starts a block
 + (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
 
@@ -24,6 +27,12 @@ NS_ASSUME_NONNULL_BEGIN
 // updates the blocklist for the currently running block
 // (i.e. adds new sites to the list)
 + (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
+
+// Appends entries to the currently running block. This is stricter-only and
+// intentionally cannot remove existing blocklist entries.
++ (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply;
 
 // updates the block end date for the currently running block
 // (i.e. extends the block)

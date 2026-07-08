@@ -42,6 +42,17 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
                                                      weekOffset:(NSInteger)weekOffset
                                                          bridge:(SCScheduleLaunchdBridge *)bridge;
 
+- (NSArray<NSString *> *)entriesInArray:(NSArray<NSString *> *)entries notInArray:(NSArray<NSString *> *)otherEntries;
+- (BOOL)bundleIsUsedInCommittedSchedule:(NSString *)bundleID;
+- (NSArray<SCBlockBundle *> *)enabledBundlesForCommittedBlockCalculations;
+- (NSArray<NSString *> *)expectedBlocklistForSegment:(SCBlockSegment *)segment oldBundle:(SCBlockBundle *)oldBundle;
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)installedMergedScheduleIDsByStartKey;
+- (nullable NSArray<NSString *> *)expectedActiveBlocklistForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle;
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)expectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle;
+- (void)appendCommittedAdditions:(NSArray<NSString *> *)addedEntries
+                       oldBundle:(SCBlockBundle *)oldBundle
+                        toBundle:(SCBlockBundle *)bundle;
+
 @end
 
 #pragma mark - SCBlockSegment (Internal Helper Class)
@@ -148,6 +159,22 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 - (void)updateBundle:(SCBlockBundle *)bundle {
     NSInteger index = [self indexOfBundleWithID:bundle.bundleID];
     if (index != NSNotFound) {
+        SCBlockBundle *oldBundle = [self.mutableBundles[index] copy];
+        BOOL usedInCommittedSchedule = [self bundleIsUsedInCommittedSchedule:bundle.bundleID];
+        NSArray<NSString *> *removedEntries = [self entriesInArray:oldBundle.entries notInArray:bundle.entries];
+
+        if (usedInCommittedSchedule && removedEntries.count > 0) {
+            NSLog(@"SCScheduleManager: Preserving %lu removed entries for committed bundle %@",
+                  (unsigned long)removedEntries.count, bundle.name);
+            for (NSString *entry in removedEntries) {
+                if (![bundle.entries containsObject:entry]) {
+                    [bundle.entries addObject:entry];
+                }
+            }
+        }
+
+        NSArray<NSString *> *addedEntries = [self entriesInArray:bundle.entries notInArray:oldBundle.entries];
+
         self.mutableBundles[index] = bundle;
         [self save];
 
@@ -155,7 +182,7 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         // Live strictify: If committed and a block is running, update the active block
         // ═══════════════════════════════════════════════════════════════════════════
 
-        if ([self isCommittedForWeekOffset:0]) {
+        if (usedInCommittedSchedule) {
             // Always update the blocklist file for future jobs
             SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
             NSError *error = nil;
@@ -164,25 +191,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
                 NSLog(@"WARNING: Failed to update blocklist file for bundle %@: %@", bundle.name, error);
             }
 
-            // If a block is currently running, update it via XPC
-            if ([SCBlockUtilities anyBlockIsRunning]) {
-                NSLog(@"SCScheduleManager: Block is running, updating active blocklist for bundle %@", bundle.name);
-
-                SCXPCClient *xpc = [[SCXPCClient alloc] init];
-                [xpc connectAndExecuteCommandBlock:^(NSError *connectError) {
-                    if (connectError) {
-                        NSLog(@"ERROR: Failed to connect to daemon for blocklist update: %@", connectError);
-                        return;
-                    }
-
-                    [xpc updateBlocklist:bundle.entries reply:^(NSError *updateError) {
-                        if (updateError) {
-                            NSLog(@"ERROR: Failed to update active blocklist: %@", updateError);
-                        } else {
-                            NSLog(@"SCScheduleManager: Successfully updated active blocklist for bundle %@", bundle.name);
-                        }
-                    }];
-                }];
+            if (addedEntries.count > 0) {
+                [self appendCommittedAdditions:addedEntries oldBundle:oldBundle toBundle:bundle];
             }
         }
 
@@ -190,6 +200,228 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 
         [self postChangeNotification];
     }
+}
+
+- (NSArray<NSString *> *)entriesInArray:(NSArray<NSString *> *)entries notInArray:(NSArray<NSString *> *)otherEntries {
+    NSMutableOrderedSet<NSString *> *result = [NSMutableOrderedSet orderedSet];
+    NSSet<NSString *> *otherSet = [NSSet setWithArray:otherEntries ?: @[]];
+
+    for (NSString *entry in entries ?: @[]) {
+        if (![entry isKindOfClass:[NSString class]]) {
+            continue;
+        }
+
+        if (![otherSet containsObject:entry]) {
+            [result addObject:entry];
+        }
+    }
+
+    return result.array;
+}
+
+- (BOOL)bundleIsUsedInCommittedSchedule:(NSString *)bundleID {
+    for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+        if ([self isCommittedForWeekOffset:weekOffset] &&
+            [self scheduleForBundleID:bundleID weekOffset:weekOffset] != nil) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+- (NSArray<SCBlockBundle *> *)enabledBundlesForCommittedBlockCalculations {
+    NSMutableArray<SCBlockBundle *> *enabledBundles = [NSMutableArray array];
+
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (bundle.enabled) {
+            [enabledBundles addObject:bundle];
+        }
+    }
+
+    return enabledBundles;
+}
+
+- (NSArray<NSString *> *)expectedBlocklistForSegment:(SCBlockSegment *)segment oldBundle:(SCBlockBundle *)oldBundle {
+    NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+
+    for (SCBlockBundle *activeBundle in segment.activeBundles) {
+        if ([activeBundle.bundleID isEqualToString:oldBundle.bundleID]) {
+            [entries addObjectsFromArray:oldBundle.entries ?: @[]];
+        } else {
+            [entries addObjectsFromArray:activeBundle.entries ?: @[]];
+        }
+    }
+
+    return entries.array;
+}
+
+- (nullable NSArray<NSString *> *)expectedActiveBlocklistForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle {
+    if (![self isCommittedForWeekOffset:0] || ![SCBlockUtilities anyBlockIsRunning]) {
+        return nil;
+    }
+
+    SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+    NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:[self enabledBundlesForCommittedBlockCalculations]
+                                                                      weekOffset:0
+                                                                          bridge:bridge];
+    NSDate *now = [NSDate date];
+
+    for (SCBlockSegment *segment in segments) {
+        BOOL startsBeforeOrNow = ([segment.startDate compare:now] != NSOrderedDescending);
+        BOOL endsAfterOrNow = ([segment.endDate compare:now] != NSOrderedAscending);
+        if (!startsBeforeOrNow || !endsAfterOrNow) {
+            continue;
+        }
+
+        for (SCBlockBundle *activeBundle in segment.activeBundles) {
+            if ([activeBundle.bundleID isEqualToString:bundle.bundleID]) {
+                return [self expectedBlocklistForSegment:segment oldBundle:oldBundle];
+            }
+        }
+    }
+
+    return nil;
+}
+
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)installedMergedScheduleIDsByStartKey {
+    NSString *launchAgentsDir = [SCScheduleLaunchdBridge launchAgentsDirectory].path;
+    NSString *prefix = [NSString stringWithFormat:@"%@.merged-", [SCScheduleLaunchdBridge jobLabelPrefix]];
+    NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:launchAgentsDir error:nil];
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *scheduleIDsByStartKey = [NSMutableDictionary dictionary];
+
+    for (NSString *file in files) {
+        if (![file hasPrefix:prefix] || ![file hasSuffix:@".plist"]) {
+            continue;
+        }
+
+        NSString *path = [launchAgentsDir stringByAppendingPathComponent:file];
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:path];
+        NSString *label = plist[@"Label"];
+        NSArray *args = plist[@"ProgramArguments"];
+        if (![label isKindOfClass:[NSString class]] || ![args isKindOfClass:[NSArray class]]) {
+            continue;
+        }
+
+        NSArray *labelParts = [label componentsSeparatedByString:@".merged-"];
+        if (labelParts.count < 2) {
+            continue;
+        }
+
+        NSArray *remainderParts = [labelParts[1] componentsSeparatedByString:@"."];
+        if (remainderParts.count < 3) {
+            continue;
+        }
+
+        NSString *segmentID = remainderParts[0];
+        NSString *day = remainderParts[1];
+        NSString *time = remainderParts[2];
+        NSString *startDateString = nil;
+        for (NSString *arg in args) {
+            if ([arg hasPrefix:@"--startdate="]) {
+                startDateString = [arg substringFromIndex:@"--startdate=".length];
+                break;
+            }
+        }
+
+        if (segmentID.length == 0 || startDateString.length == 0) {
+            continue;
+        }
+
+        NSString *startKey = [NSString stringWithFormat:@"%@.%@.%@", startDateString, day, time];
+        if (scheduleIDsByStartKey[startKey] == nil) {
+            scheduleIDsByStartKey[startKey] = [NSMutableArray array];
+        }
+        [scheduleIDsByStartKey[startKey] addObject:segmentID];
+    }
+
+    return scheduleIDsByStartKey;
+}
+
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)expectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle {
+    SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+    NSDictionary<NSString *, NSArray<NSString *> *> *installedScheduleIDsByStartKey = [self installedMergedScheduleIDsByStartKey];
+    NSISO8601DateFormatter *isoFormatter = [[NSISO8601DateFormatter alloc] init];
+    isoFormatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *expectedBlocklistsByScheduleID = [NSMutableDictionary dictionary];
+
+    for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+        if (![self isCommittedForWeekOffset:weekOffset] ||
+            [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset] == nil) {
+            continue;
+        }
+
+        NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:[self enabledBundlesForCommittedBlockCalculations]
+                                                                          weekOffset:weekOffset
+                                                                              bridge:bridge];
+        for (SCBlockSegment *segment in segments) {
+            BOOL targetBundleIsActive = NO;
+            for (SCBlockBundle *activeBundle in segment.activeBundles) {
+                if ([activeBundle.bundleID isEqualToString:bundle.bundleID]) {
+                    targetBundleIsActive = YES;
+                    break;
+                }
+            }
+
+            if (!targetBundleIsActive) {
+                continue;
+            }
+
+            NSString *day = [[SCWeeklySchedule stringForDay:segment.day] lowercaseString];
+            NSString *time = [NSString stringWithFormat:@"%02ld%02ld",
+                              (long)(segment.startMinutes / 60),
+                              (long)(segment.startMinutes % 60)];
+            NSString *startDateString = [isoFormatter stringFromDate:segment.startDate];
+            NSString *startKey = [NSString stringWithFormat:@"%@.%@.%@", startDateString, day, time];
+            NSArray<NSString *> *matchingSegmentIDs = installedScheduleIDsByStartKey[startKey] ?: @[];
+
+            if (matchingSegmentIDs.count != 1) {
+                NSLog(@"SCScheduleManager: Skipping approved schedule append for %@ because %lu matching jobs were found",
+                      startKey, (unsigned long)matchingSegmentIDs.count);
+                continue;
+            }
+
+            expectedBlocklistsByScheduleID[matchingSegmentIDs.firstObject] = [self expectedBlocklistForSegment:segment oldBundle:oldBundle];
+        }
+    }
+
+    return expectedBlocklistsByScheduleID;
+}
+
+- (void)appendCommittedAdditions:(NSArray<NSString *> *)addedEntries
+                       oldBundle:(SCBlockBundle *)oldBundle
+                        toBundle:(SCBlockBundle *)bundle {
+    SCXPCClient *xpc = [[SCXPCClient alloc] init];
+
+    NSArray<NSString *> *expectedActiveBlocklist = [self expectedActiveBlocklistForBundle:bundle oldBundle:oldBundle];
+    if (expectedActiveBlocklist.count > 0) {
+        [xpc appendEntriesToActiveBlocklist:addedEntries
+                  matchingExistingBlocklist:expectedActiveBlocklist
+                                      reply:^(NSError *appendError) {
+            if (appendError) {
+                NSLog(@"ERROR: Failed to append active blocklist entries for bundle %@: %@", bundle.name, appendError);
+            } else {
+                NSLog(@"SCScheduleManager: Appended active blocklist entries for bundle %@", bundle.name);
+            }
+        }];
+    }
+
+    NSDictionary<NSString *, NSArray<NSString *> *> *expectedApprovedBlocklists = [self expectedApprovedScheduleBlocklistsForBundle:bundle oldBundle:oldBundle];
+    if (expectedApprovedBlocklists.count == 0) {
+        NSLog(@"SCScheduleManager: No safely identifiable approved schedules to update for bundle %@", bundle.name);
+        return;
+    }
+
+    [xpc appendEntriesToApprovedSchedules:expectedApprovedBlocklists
+                                   entries:addedEntries
+                                     reply:^(NSError *appendError) {
+        if (appendError) {
+            NSLog(@"ERROR: Failed to append approved schedule entries for bundle %@: %@", bundle.name, appendError);
+        } else {
+            NSLog(@"SCScheduleManager: Requested append to %lu approved schedules for bundle %@",
+                  (unsigned long)expectedApprovedBlocklists.count, bundle.name);
+        }
+    }];
 }
 
 - (nullable SCBlockBundle *)bundleWithID:(NSString *)bundleID {

@@ -179,6 +179,46 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
     }];
 }
 
++ (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error {
+    assert(authRef != NULL);
+
+    __block BOOL success = YES;
+    __block NSError *lastError = nil;
+
+    [SCXPCAuthorization enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
+        if (!success) {
+            return;
+        }
+
+        OSStatus removeStatus = AuthorizationRightRemove(authRef, [authRightName UTF8String]);
+        if (removeStatus != errAuthorizationSuccess && removeStatus != errAuthorizationDenied) {
+            success = NO;
+            lastError = [NSError errorWithDomain:NSOSStatusErrorDomain code:removeStatus userInfo:nil];
+            return;
+        }
+
+        OSStatus setStatus = AuthorizationRightSet(
+            authRef,
+            [authRightName UTF8String],
+            (__bridge CFTypeRef)authRightDefault,
+            (__bridge CFStringRef)authRightDesc,
+            NULL,
+            CFSTR("SCXPCAuthorization")
+        );
+
+        if (setStatus != errAuthorizationSuccess) {
+            success = NO;
+            lastError = [NSError errorWithDomain:NSOSStatusErrorDomain code:setStatus userInfo:nil];
+        }
+    }];
+
+    if (!success && error) {
+        *error = lastError;
+    }
+
+    return success;
+}
+
 + (NSString *)authorizationRightForCommand:(SEL)command
     // See comment in header.
 {

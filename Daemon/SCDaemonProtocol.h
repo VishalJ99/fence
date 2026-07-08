@@ -17,6 +17,12 @@ NS_ASSUME_NONNULL_BEGIN
 // XPC method to add to blocklist
 - (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
 
+// XPC method to append stricter entries to the active blocklist.
+// No authorization prompt: the daemon validates signed callers and this can only add entries.
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply;
+
 // XPC method to extend block
 - (void)updateBlockEndDate:(NSDate*)newEndDate authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
 
@@ -45,6 +51,12 @@ NS_ASSUME_NONNULL_BEGIN
 // XPC method to clear all approved schedules (for debug reset)
 - (void)clearAllApprovedSchedulesWithAuthorization:(NSData *)authData
                                              reply:(void(^)(NSError* error))reply;
+
+// XPC method to append stricter entries to selected pre-approved schedules.
+// Each selected schedule must contain the provided existing entries before it is changed.
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                 entries:(NSArray<NSString*>*)entries
+                                   reply:(void(^)(NSError* error))reply;
 
 // XPC method to forcibly clear an active block (DEBUG ONLY)
 - (void)clearBlockForDebugWithAuthorization:(NSData *)authData

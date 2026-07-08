@@ -48,6 +48,25 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     return [self lockOrTimeout: reply timeout: METHOD_LOCK_TIMEOUT];
 }
 
++ (NSArray<NSString *> *)sanitizedBlocklistEntries:(NSArray<NSString *> *)entries {
+    NSMutableOrderedSet<NSString *> *sanitized = [NSMutableOrderedSet orderedSet];
+
+    for (id entry in entries) {
+        if (![entry isKindOfClass:[NSString class]]) {
+            continue;
+        }
+
+        NSString *trimmed = [(NSString *)entry stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) {
+            continue;
+        }
+
+        [sanitized addObject:trimmed];
+    }
+
+    return sanitized.array;
+}
+
 
 + (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
@@ -233,6 +252,112 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
     [SCSentry addBreadcrumb: @"Daemon updated blocklist successfully" category: @"daemon"];
     NSLog(@"INFO: Blocklist successfully updated.");
+    reply(nil);
+
+    [[SCDaemon sharedDaemon] resetInactivityTimer];
+    [self.daemonMethodLock unlock];
+}
+
++ (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                                 reply:(void(^)(NSError* error))reply {
+    if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
+        return;
+    }
+
+    [SCSentry addBreadcrumb: @"Daemon method appendEntriesToActiveBlocklist called" category: @"daemon"];
+
+    if ([SCBlockUtilities legacyBlockIsRunning]) {
+        NSLog(@"ERROR: Can't append entries because a legacy block is running");
+        NSError* err = [SCErr errorWithCode: 303];
+        [SCSentry captureError: err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    if (![SCBlockUtilities modernBlockIsRunning]) {
+        NSLog(@"ERROR: Can't append entries since block isn't running");
+        NSError* err = [SCErr errorWithCode: 304];
+        [SCSentry captureError: err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    SCSettings* settings = [SCSettings sharedSettings];
+
+    if ([settings boolForKey: @"ActiveBlockAsWhitelist"]) {
+        NSLog(@"ERROR: Attempting to append entries, but current block uses an allowlist");
+        NSError* err = [SCErr errorWithCode: 305];
+        [SCSentry captureError: err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    NSArray<NSString *> *sanitizedEntries = [self sanitizedBlocklistEntries:entries];
+    NSArray<NSString *> *sanitizedExistingBlocklist = [self sanitizedBlocklistEntries:existingBlocklist];
+    if (sanitizedEntries.count == 0) {
+        NSLog(@"SCDaemonBlockMethods: No valid entries to append; treating as success");
+        reply(nil);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    if (sanitizedExistingBlocklist.count == 0) {
+        NSLog(@"ERROR: Refusing active append without an expected existing blocklist");
+        NSError* err = [SCErr errorWithCode: 500 subDescription: @"Missing expected active blocklist"];
+        [SCSentry captureError: err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    NSArray* activeBlocklist = [settings valueForKey: @"ActiveBlocklist"] ?: @[];
+    NSSet *activeSet = [NSSet setWithArray:activeBlocklist];
+    NSSet *expectedSet = [NSSet setWithArray:sanitizedExistingBlocklist];
+    if (activeSet.count != expectedSet.count || ![expectedSet isSubsetOfSet:activeSet]) {
+        NSLog(@"ERROR: Refusing active append because active blocklist did not match expected blocklist");
+        NSError* err = [SCErr errorWithCode: 500 subDescription: @"Active blocklist did not match expected schedule"];
+        [SCSentry captureError: err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    NSMutableArray* added = [NSMutableArray arrayWithArray:sanitizedEntries];
+    [added removeObjectsInArray:activeBlocklist];
+
+    if (added.count == 0) {
+        NSLog(@"SCDaemonBlockMethods: Entries already present in active blocklist");
+        reply(nil);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist:NO
+                                                            allowLocal:[settings boolForKey:@"AllowLocalNetworks"]
+                                               includeCommonSubdomains:[settings boolForKey:@"EvaluateCommonSubdomains"]
+                                                  includeLinkedDomains:[settings boolForKey:@"IncludeLinkedDomains"]];
+    [blockManager enterAppendMode];
+    [blockManager addBlockEntriesFromStrings:added];
+    [blockManager finishAppending];
+
+    NSMutableArray *newActiveBlocklist = [NSMutableArray arrayWithArray:activeBlocklist];
+    [newActiveBlocklist addObjectsFromArray:added];
+    [settings setValue:newActiveBlocklist forKey:@"ActiveBlocklist"];
+
+    NSError* syncErr = [settings syncSettingsAndWait:5];
+    if (syncErr != nil) {
+        NSLog(@"WARNING: Sync failed or timed out with error %@ after appending active blocklist entries", syncErr);
+        [SCSentry captureError:syncErr];
+    }
+
+    [SCHelperToolUtilities sendConfigurationChangedNotification];
+    [SCHelperToolUtilities clearCachesIfRequested];
+
+    NSLog(@"INFO: Appended %lu entries to active blocklist.", (unsigned long)added.count);
     reply(nil);
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];

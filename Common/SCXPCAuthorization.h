@@ -19,6 +19,10 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)setupAuthorizationRights:(AuthorizationRef)authRef;
     // Set up the default authorization rights in the authorization database.
 
++ (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error;
+    // Rewrites Fence-managed authorization rights. Used after app updates to
+    // clear stale code requirements tied to older signed builds.
+
 @end
 
 NS_ASSUME_NONNULL_END

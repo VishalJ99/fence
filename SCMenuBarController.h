@@ -33,6 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) void (^onShowSchedule)(void);
 @property (nonatomic, copy, nullable) void (^onShowBlocklist)(void);
 @property (nonatomic, copy, nullable) void (^onEnterLicense)(void);
+@property (nonatomic, copy, nullable) void (^onRepairPermissions)(void);
 
 /// Shared instance
 + (instancetype)sharedController;
