@@ -6,6 +6,7 @@
 //
 
 #import "SCDaemonBlockMethods.h"
+#import "SCDaemonProtocol.h"
 #import "SCSettings.h"
 #import "SCHelperToolUtilities.h"
 #import "PacketFilter.h"
@@ -14,6 +15,141 @@
 #import "LaunchctlHelper.h"
 #import "HostFileBlockerSet.h"
 #import "AppBlocker.h"
+#import "SCMiscUtilities.h"
+#import "SCTelemetrySpool.h"
+
+static NSString *SCBlockApplyFailureLayer(NSDictionary<NSString *, id> *applyResult) {
+    NSDictionary *hosts = [applyResult[@"hosts"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"hosts"] : @{};
+    NSDictionary *packetFilter = [applyResult[@"packet_filter"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"packet_filter"] : @{};
+    NSDictionary *apps = [applyResult[@"apps"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"apps"] : @{};
+    BOOL (^failed)(id) = ^BOOL(id value) {
+        return [value isKindOfClass:[NSString class]] && [value isEqualToString:@"failed"];
+    };
+    if (failed(hosts[@"ready"]) || failed(hosts[@"write"]) || failed(hosts[@"verify"])) return @"hosts";
+    if (failed(packetFilter[@"anchor_open"]) || failed(packetFilter[@"anchor_write"]) ||
+        failed(packetFilter[@"main_config_write"]) || failed(packetFilter[@"verify"]) ||
+        [packetFilter[@"exit_code"] integerValue] != 0) return @"pf";
+    if ([apps[@"kill_failure_count"] unsignedIntegerValue] > 0 ||
+        ([apps[@"blocked_count"] unsignedIntegerValue] > 0 && ![apps[@"monitoring_after"] boolValue])) {
+        return @"apps";
+    }
+    return @"verification";
+}
+
+static uid_t SCTelemetryUIDForCurrentBlock(void) {
+    NSNumber *owner = [[SCSettings sharedSettings] valueForKey:@"ActiveBlockControllingUID"];
+    uid_t uid = [owner isKindOfClass:[NSNumber class]] ? owner.unsignedIntValue : 0;
+    return uid > 0 ? uid : [SCMiscUtilities consoleUserUID];
+}
+
+static void SCSpoolBlockApplyFailure(uid_t uid,
+                                     SCBlockApplyResult *result,
+                                     BOOL isAllowlist,
+                                     BOOL settingsPersisted) {
+    if (uid == 0 || result == nil || (result.succeeded && settingsPersisted)) return;
+    NSDictionary *rawResult = [result dictionaryRepresentation];
+    NSDictionary *fields = [SCSentry telemetryFieldsForBlockApplyResultDictionary:rawResult
+                                                                         eventName:@"block.apply_failed"
+                                                                supplementalFields:@{
+        @"layer": settingsPersisted ? SCBlockApplyFailureLayer(rawResult) : @"settings",
+        @"is_allowlist": @(isAllowlist),
+        @"settings_persisted": @(settingsPersisted),
+    }];
+    if (fields == nil) return;
+    NSError *spoolError = nil;
+    [[[SCTelemetrySpool alloc] init] appendEventName:@"block.apply_failed"
+                                               level:SCTelemetryEventLevelError
+                                              fields:fields
+                                              origin:SCTelemetryOriginDaemon
+                                              forUID:uid
+                                               error:&spoolError];
+    if (spoolError != nil) {
+        NSLog(@"Daemon telemetry apply record failed (domain=%@ code=%ld)",
+              spoolError.domain, (long)spoolError.code);
+    }
+}
+
+static void SCSpoolBlockTeardownFailure(uid_t uid, NSDictionary<NSString *, id> *result) {
+    if (uid == 0 || ![result isKindOfClass:[NSDictionary class]] || [result[@"verified"] boolValue]) return;
+    NSString *layer = ![result[@"hosts_removed"] boolValue] ? @"hosts" :
+        (![result[@"pf_removed"] boolValue] ? @"pf" :
+         (![result[@"app_monitoring_stopped"] boolValue] ? @"apps" : @"settings"));
+    NSMutableDictionary *fields = [@{
+        @"layer": layer,
+        @"hosts_removed": @([result[@"hosts_removed"] boolValue]),
+        @"pf_removed": @([result[@"pf_removed"] boolValue]),
+        @"app_monitoring_stopped": @([result[@"app_monitoring_stopped"] boolValue]),
+        @"settings_cleared": @([result[@"settings_cleared"] boolValue]),
+        @"verified": @NO,
+        @"duration_milliseconds": @([result[@"duration_milliseconds"] unsignedIntegerValue]),
+    } mutableCopy];
+    if ([result[@"error_code"] isKindOfClass:[NSNumber class]]) fields[@"error_code"] = result[@"error_code"];
+    NSDictionary *safeFields = [SCSentry sanitizedTelemetryFields:fields forEventName:@"block.teardown_failed"];
+    if (safeFields == nil) return;
+    NSError *spoolError = nil;
+    [[[SCTelemetrySpool alloc] init] appendEventName:@"block.teardown_failed"
+                                               level:SCTelemetryEventLevelError
+                                              fields:safeFields
+                                              origin:SCTelemetryOriginDaemon
+                                              forUID:uid
+                                               error:&spoolError];
+    if (spoolError != nil) {
+        NSLog(@"Daemon telemetry teardown record failed (domain=%@ code=%ld)",
+              spoolError.domain, (long)spoolError.code);
+    }
+}
+
+static void SCSpoolUnexpectedBlockRemnants(uid_t uid,
+                                           BOOL hostsRemnant,
+                                           BOOL pfRemnant,
+                                           BOOL appMonitoring,
+                                           BOOL teardownVerified,
+                                           NSUInteger settingsVersion) {
+    if (uid == 0 || (!hostsRemnant && !pfRemnant && !appMonitoring)) return;
+    NSUInteger layerCount = (hostsRemnant ? 1 : 0) + (pfRemnant ? 1 : 0) + (appMonitoring ? 1 : 0);
+    NSString *remnants = layerCount > 1 ? @"multiple" :
+        (hostsRemnant ? @"hosts" : (pfRemnant ? @"pf" : @"apps"));
+
+    static BOOL recordedThisDaemonRun = NO;
+    @synchronized (SCDaemonBlockMethods.class) {
+        if (recordedThisDaemonRun) return;
+    }
+    NSError *spoolError = nil;
+    BOOL recorded = [[[SCTelemetrySpool alloc] init] appendEventName:@"tamper.no_block_found"
+                                                               level:teardownVerified
+                                                                   ? SCTelemetryEventLevelWarning
+                                                                   : SCTelemetryEventLevelError
+                                                              fields:@{
+        @"remnants": remnants,
+        @"hosts_remnant": @(hostsRemnant),
+        @"pf_remnant": @(pfRemnant),
+        @"app_monitoring": @(appMonitoring),
+        @"teardown_verified": @(teardownVerified),
+        @"settings_version": @(settingsVersion),
+    }
+                                                              origin:SCTelemetryOriginDaemon
+                                                              forUID:uid
+                                                               error:&spoolError];
+    if (recorded) {
+        @synchronized (SCDaemonBlockMethods.class) {
+            recordedThisDaemonRun = YES;
+        }
+    } else if (spoolError != nil) {
+        NSLog(@"Daemon telemetry remnant record failed (domain=%@ code=%ld)",
+              spoolError.domain, (long)spoolError.code);
+    }
+}
+
+static BOOL SCRemoveBlockWithTelemetry(void) {
+    uid_t uid = SCTelemetryUIDForCurrentBlock();
+    NSDictionary<NSString *, id> *result = nil;
+    BOOL verified = [SCHelperToolUtilities removeBlockWithResult:&result];
+    if (!verified) SCSpoolBlockTeardownFailure(uid, result ?: @{});
+    return verified;
+}
 
 NSTimeInterval METHOD_LOCK_TIMEOUT = 5.0;
 NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for checkups, because we'd prefer not to have tons pile up
@@ -48,6 +184,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     return [self lockOrTimeout: reply timeout: METHOD_LOCK_TIMEOUT];
 }
 
++ (BOOL)removeBlockWithTelemetry {
+    return SCRemoveBlockWithTelemetry();
+}
+
 + (NSArray<NSString *> *)sanitizedBlocklistEntries:(NSArray<NSString *> *)entries {
     NSMutableOrderedSet<NSString *> *sanitized = [NSMutableOrderedSet orderedSet];
 
@@ -56,20 +196,47 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
             continue;
         }
 
-        NSString *trimmed = [(NSString *)entry stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length == 0) {
-            continue;
-        }
-
-        [sanitized addObject:trimmed];
+        NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:(NSString*)entry];
+        if (canonical != nil) [sanitized addObject:canonical];
     }
 
     return sanitized.array;
 }
 
++ (NSArray<NSString*>*)comparableExistingBlocklistEntries:(NSArray*)entries {
+    NSMutableOrderedSet<NSString*> *comparable = [NSMutableOrderedSet orderedSet];
+    for (id rawEntry in entries ?: @[]) {
+        if (![rawEntry isKindOfClass:[NSString class]]) continue;
+        NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+        if (canonical != nil) {
+            [comparable addObject:canonical];
+            continue;
+        }
+        NSString *trimmed = [rawEntry stringByTrimmingCharactersInSet:
+                             NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (trimmed.length > 0 &&
+            [trimmed rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location == NSNotFound) {
+            [comparable addObject:trimmed];
+        }
+    }
+    return comparable.array;
+}
 
-+ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
+
++ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData * _Nullable)authData reply:(void(^)(NSError* _Nullable error))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
+        return;
+    }
+
+    // A corrupt or unreadable secured plist may be the only remaining record
+    // of an active block. Never replace that unknown authoritative state with
+    // a new request; preserve the file and physical layers for repair.
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        NSLog(@"ERROR: Refusing block start because secured settings are unavailable");
+        NSError *err = [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode];
+        reply(err);
+        [self.daemonMethodLock unlock];
         return;
     }
     
@@ -88,6 +255,33 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [self.daemonMethodLock unlock];
         return;
     }
+
+    NSArray<NSString*> *canonicalBlocklist = [self sanitizedBlocklistEntries:blocklist ?: @[]];
+    NSUInteger requestedEntryCount = [blocklist isKindOfClass:[NSArray class]] ? blocklist.count : 0;
+    NSUInteger validInputCount = 0;
+    for (id rawEntry in blocklist ?: @[]) {
+        if ([rawEntry isKindOfClass:[NSString class]] &&
+            [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] != nil) validInputCount += 1;
+    }
+    NSUInteger rejectedEntryCount = requestedEntryCount - MIN(requestedEntryCount, validInputCount);
+    if (rejectedEntryCount > 0) {
+        NSLog(@"ERROR: Refusing block start because %lu entries were invalid",
+              (unsigned long)rejectedEntryCount);
+        NSError *err = [SCErr errorWithCode:500 subDescription:@"Blocklist contained invalid entries"];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    if ((canonicalBlocklist.count == 0 && !isAllowlist) ||
+        ![endDate isKindOfClass:[NSDate class]] || [endDate timeIntervalSinceNow] <= 0) {
+        NSLog(@"ERROR: Refusing block start because the canonical list is empty or the end date is invalid");
+        NSError* err = [SCErr errorWithCode:302];
+        [SCSentry captureError:err];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
     
     // clear any legacy block information - no longer useful and could potentially confuse things
     // but first, copy it over one more time (this should've already happened once in the app, but you never know)
@@ -100,10 +294,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [LaunchctlHelper unloadLaunchdJobWithPlistAt: @"/Library/LaunchDaemons/org.eyebeam.SelfControl.plist"];
     }
 
-    SCSettings* settings = [SCSettings sharedSettings];
     // update SCSettings with the blocklist and end date that've been requested
-    [settings setValue: blocklist forKey: @"ActiveBlocklist"];
+    [settings setValue: canonicalBlocklist forKey: @"ActiveBlocklist"];
     [settings setValue: @(isAllowlist) forKey: @"ActiveBlockAsWhitelist"];
+    [settings setValue: @(controllingUID) forKey:@"ActiveBlockControllingUID"];
     [settings setValue: endDate forKey: @"BlockEndDate"];
     
     // update all the settings for the block, which we're basically just copying from defaults to settings
@@ -119,49 +313,26 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     BOOL isTestBlock = [blockSettings[@"IsTestBlock"] boolValue];
     [settings setValue: @(isTestBlock) forKey: @"IsTestBlock"];
 
-    if(([blocklist count] <= 0 && !isAllowlist) || [SCBlockUtilities currentBlockIsExpired]) {
-        NSLog(@"ERROR: Blocklist is empty, or block end date is in the past");
-        NSLog(@"Block End Date: %@ (%@), vs now is %@", [settings valueForKey: @"BlockEndDate"], [[settings valueForKey: @"BlockEndDate"] class], [NSDate date]);
-        NSError* err = [SCErr errorWithCode: 302];
-        [SCSentry captureError: err];
-        reply(err);
-        [self.daemonMethodLock unlock];
-        return;
+    NSUInteger appEntryCount = 0;
+    for (NSString *entry in canonicalBlocklist) {
+        if ([entry hasPrefix:@"app:"]) appEntryCount += 1;
     }
-
-    // Log block summary for debugging
-    NSMutableArray *appEntries = [NSMutableArray array];
-    NSMutableArray *siteEntries = [NSMutableArray array];
-    for (id entry in blocklist) {
-        NSString *entryStr = nil;
-        if ([entry isKindOfClass:[NSString class]]) {
-            entryStr = entry;
-        } else if ([entry isKindOfClass:[NSDictionary class]]) {
-            entryStr = [entry objectForKey:@"HostName"];
-        }
-        if (entryStr) {
-            if ([entryStr hasPrefix:@"app:"]) {
-                [appEntries addObject:[entryStr substringFromIndex:4]];
-            } else {
-                [siteEntries addObject:entryStr];
-            }
-        }
-    }
-    NSLog(@"═══════════════════════════════════════════════════════════════");
-    NSLog(@"BLOCK STARTING - End: %@", [settings valueForKey:@"BlockEndDate"]);
-    NSLog(@"  Apps (%lu): %@", (unsigned long)appEntries.count,
-          appEntries.count > 0 ? [appEntries componentsJoinedByString:@", "] : @"(none)");
-    NSLog(@"  Sites (%lu): %@", (unsigned long)siteEntries.count,
-          siteEntries.count > 0 ? [siteEntries componentsJoinedByString:@", "] : @"(none)");
-    NSLog(@"═══════════════════════════════════════════════════════════════");
+    NSLog(@"Starting block with %lu entries (%lu apps, %lu sites)",
+          (unsigned long)canonicalBlocklist.count,
+          (unsigned long)appEntryCount,
+          (unsigned long)(canonicalBlocklist.count - appEntryCount));
 
     NSLog(@"Adding firewall rules...");
-    [SCHelperToolUtilities installBlockRulesFromSettings];
+    SCBlockApplyResult *applyResult = [SCHelperToolUtilities installBlockRulesFromSettings];
+    // Even a failed result may have installed a subset of stricter rules. Keep
+    // the daemon state active so integrity repair can retry and expiry can
+    // remove those rules; never orphan a partial physical block.
     [settings setValue: @YES forKey: @"BlockIsRunning"];
 
     NSError* syncErr = [settings syncSettingsAndWait: 5]; // synchronize ASAP since BlockIsRunning is a really important one
     if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after starting block", syncErr);
+        NSLog(@"WARNING: Settings sync failed after starting block (domain=%@ code=%ld)",
+              syncErr.domain, (long)syncErr.code);
         [SCSentry captureError: syncErr];
     }
 
@@ -173,9 +344,17 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     // that blocked pages are not loaded from a cache.
     [SCHelperToolUtilities clearCachesIfRequested];
 
-    [SCSentry addBreadcrumb: @"Daemon added block successfully" category: @"daemon"];
-    NSLog(@"INFO: Block successfully added.");
-    reply(nil);
+    NSError *resultError = nil;
+    if (!applyResult.succeeded || syncErr != nil) {
+        SCSpoolBlockApplyFailure(controllingUID, applyResult, isAllowlist, syncErr == nil);
+        NSString *failureStage = !applyResult.succeeded ? @"physical apply verification failed" : @"settings persistence failed";
+        resultError = [SCErr errorWithCode:500 subDescription:failureStage];
+        NSLog(@"ERROR: Block start completed with an unverified result");
+    } else {
+        [SCSentry addBreadcrumb:@"Daemon added block successfully" category:@"daemon"];
+        NSLog(@"INFO: Block successfully added and verified.");
+    }
+    reply(resultError);
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [[SCDaemon sharedDaemon] startCheckupTimer];
@@ -216,31 +395,52 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         return;
     }
     
-    NSArray* activeBlocklist = [settings valueForKey: @"ActiveBlocklist"];
-    NSMutableArray* added = [NSMutableArray arrayWithArray: newBlocklist];
+    NSArray<NSString*> *canonicalNewBlocklist = [self sanitizedBlocklistEntries:newBlocklist ?: @[]];
+    NSUInteger requestedEntryCount = [newBlocklist isKindOfClass:[NSArray class]] ? newBlocklist.count : 0;
+    NSUInteger validInputCount = 0;
+    for (id rawEntry in newBlocklist ?: @[]) {
+        if ([rawEntry isKindOfClass:[NSString class]] &&
+            [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] != nil) validInputCount += 1;
+    }
+    if (validInputCount != requestedEntryCount) {
+        NSLog(@"ERROR: Refusing blocklist update containing invalid entries");
+        NSError *err = [SCErr errorWithCode:500 subDescription:@"Blocklist update contained invalid entries"];
+        reply(err);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    NSArray* activeBlocklist = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
+    NSMutableArray* added = [NSMutableArray arrayWithArray:canonicalNewBlocklist];
     [added removeObjectsInArray: activeBlocklist];
     NSMutableArray* removed = [NSMutableArray arrayWithArray: activeBlocklist];
-    [removed removeObjectsInArray: newBlocklist];
+    [removed removeObjectsInArray:canonicalNewBlocklist];
     
     // throw a warning if something got removed for some reason, since we ignore them
     if (removed.count > 0) {
-        NSLog(@"WARNING: Active blocklist has removed items; these will not be updated. Removed items are %@", removed);
+        NSLog(@"WARNING: Ignoring %lu attempted removals from the active blocklist",
+              (unsigned long)removed.count);
     }
     
-    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist: [settings boolForKey: @"ActiveBlockAsWhitelist"]
-                                                            allowLocal: [settings boolForKey: @"EvaluateCommonSubdomains"]
-                                               includeCommonSubdomains: [settings boolForKey: @"AllowLocalNetworks"]
-                                                  includeLinkedDomains: [settings boolForKey: @"IncludeLinkedDomains"]];
+    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist:[settings boolForKey:@"ActiveBlockAsWhitelist"]
+                                                            allowLocal:[settings boolForKey:@"AllowLocalNetworks"]
+                                               includeCommonSubdomains:[settings boolForKey:@"EvaluateCommonSubdomains"]
+                                                  includeLinkedDomains:[settings boolForKey:@"IncludeLinkedDomains"]];
     [blockManager enterAppendMode];
     [blockManager addBlockEntriesFromStrings: added];
-    [blockManager finishAppending];
+    SCBlockApplyResult *applyResult = [blockManager finishAppending];
     
-    [settings setValue: newBlocklist forKey: @"ActiveBlocklist"];
+    // Preserve removals during an active denylist block; only the strict
+    // additions are allowed to change daemon state.
+    NSMutableOrderedSet *strictList = [NSMutableOrderedSet orderedSetWithArray:activeBlocklist];
+    [strictList addObjectsFromArray:added];
+    [settings setValue:strictList.array forKey:@"ActiveBlocklist"];
     
     // make sure everyone knows about our new list
     NSError* syncErr = [settings syncSettingsAndWait: 5];
     if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after updating blocklist", syncErr);
+        NSLog(@"WARNING: Settings sync failed after updating blocklist (domain=%@ code=%ld)",
+              syncErr.domain, (long)syncErr.code);
         [SCSentry captureError: syncErr];
     }
 
@@ -250,9 +450,21 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     // that blocked pages are not loaded from a cache.
     [SCHelperToolUtilities clearCachesIfRequested];
 
-    [SCSentry addBreadcrumb: @"Daemon updated blocklist successfully" category: @"daemon"];
-    NSLog(@"INFO: Blocklist successfully updated.");
-    reply(nil);
+    NSError *resultError = nil;
+    if (!applyResult.succeeded || syncErr != nil) {
+        SCSpoolBlockApplyFailure(SCTelemetryUIDForCurrentBlock(),
+                                 applyResult,
+                                 [settings boolForKey:@"ActiveBlockAsWhitelist"],
+                                 syncErr == nil);
+        resultError = [SCErr errorWithCode:500 subDescription:(!applyResult.succeeded
+            ? @"Blocklist physical apply verification failed"
+            : @"Blocklist settings persistence failed")];
+        NSLog(@"ERROR: Blocklist update completed with an unverified result");
+    } else {
+        [SCSentry addBreadcrumb:@"Daemon updated blocklist successfully" category:@"daemon"];
+        NSLog(@"INFO: Blocklist update applied and verified.");
+    }
+    reply(resultError);
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [self.daemonMethodLock unlock];
@@ -261,9 +473,36 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 + (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
              matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
                                  reply:(void(^)(NSError* error))reply {
-    if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
-        return;
-    }
+    [self appendEntriesToActiveBlocklist:entries
+               matchingExistingBlocklist:existingBlocklist
+                              resultReply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        reply(error);
+    }];
+}
+
++ (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                            resultReply:(void(^)(NSDictionary<NSString*, id>* result, NSError* error))reply {
+    NSUInteger requestedCount = [entries isKindOfClass:[NSArray class]] ? entries.count : 0;
+    __block NSMutableDictionary<NSString*, id> *result = [@{
+        @"schema_version": @1,
+        @"outcome": @"failed",
+        @"failed_stage": @"precondition",
+        @"requested_count": @(requestedCount),
+        @"canonical_count": @0,
+        @"rejected_count": @0,
+        @"duplicate_count": @0,
+        @"active_before_count": @0,
+        @"active_after_count": @0,
+        @"settings_persisted": @NO,
+        @"active_verified": @NO,
+        @"physical_reapply_attempted": @NO
+    } mutableCopy];
+
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *lockError) {
+        result[@"failed_stage"] = @"lock";
+        reply([result copy], lockError);
+    }]) return;
 
     [SCSentry addBreadcrumb: @"Daemon method appendEntriesToActiveBlocklist called" category: @"daemon"];
 
@@ -271,7 +510,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSLog(@"ERROR: Can't append entries because a legacy block is running");
         NSError* err = [SCErr errorWithCode: 303];
         [SCSentry captureError: err];
-        reply(err);
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
         return;
     }
@@ -280,7 +519,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSLog(@"ERROR: Can't append entries since block isn't running");
         NSError* err = [SCErr errorWithCode: 304];
         [SCSentry captureError: err];
-        reply(err);
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
         return;
     }
@@ -291,17 +530,40 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSLog(@"ERROR: Attempting to append entries, but current block uses an allowlist");
         NSError* err = [SCErr errorWithCode: 305];
         [SCSentry captureError: err];
-        reply(err);
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
         return;
     }
 
     NSArray<NSString *> *sanitizedEntries = [self sanitizedBlocklistEntries:entries];
-    NSArray<NSString *> *sanitizedExistingBlocklist = [self sanitizedBlocklistEntries:existingBlocklist];
-    if (sanitizedEntries.count == 0) {
-        NSLog(@"SCDaemonBlockMethods: No valid entries to append; treating as success");
-        reply(nil);
+    NSArray<NSString *> *sanitizedExistingBlocklist = [self comparableExistingBlocklistEntries:existingBlocklist];
+    NSUInteger validInputCount = 0;
+    for (id rawEntry in entries ?: @[]) {
+        if ([rawEntry isKindOfClass:[NSString class]] &&
+            [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] != nil) validInputCount += 1;
+    }
+    NSUInteger rejectedCount = requestedCount - MIN(requestedCount, validInputCount);
+    NSUInteger duplicateCount = validInputCount - MIN(validInputCount, sanitizedEntries.count);
+    result[@"canonical_count"] = @(sanitizedEntries.count);
+    result[@"rejected_count"] = @(rejectedCount);
+    result[@"duplicate_count"] = @(duplicateCount);
+
+    if (rejectedCount > 0) {
+        NSLog(@"ERROR: Refusing active append containing %lu invalid entries", (unsigned long)rejectedCount);
+        NSError *err = [SCErr errorWithCode:500 subDescription:@"Active append contained invalid entries"];
+        result[@"failed_stage"] = @"canonicalize";
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
+        return;
+    }
+
+    if (sanitizedEntries.count == 0) {
+        result[@"outcome"] = @"verified";
+        result[@"failed_stage"] = @"none";
+        result[@"settings_persisted"] = @YES;
+        result[@"active_verified"] = @YES;
+        [self.daemonMethodLock unlock];
+        reply([result copy], nil);
         return;
     }
 
@@ -309,32 +571,50 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSLog(@"ERROR: Refusing active append without an expected existing blocklist");
         NSError* err = [SCErr errorWithCode: 500 subDescription: @"Missing expected active blocklist"];
         [SCSentry captureError: err];
-        reply(err);
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
         return;
     }
 
-    NSArray* activeBlocklist = [settings valueForKey: @"ActiveBlocklist"] ?: @[];
+    NSArray* activeBlocklist = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
+    result[@"active_before_count"] = @(activeBlocklist.count);
+    result[@"active_after_count"] = @(activeBlocklist.count);
     NSSet *activeSet = [NSSet setWithArray:activeBlocklist];
     NSSet *expectedSet = [NSSet setWithArray:sanitizedExistingBlocklist];
-    if (activeSet.count != expectedSet.count || ![expectedSet isSubsetOfSet:activeSet]) {
+    NSMutableOrderedSet<NSString *> *expectedAfterAppend =
+        [NSMutableOrderedSet orderedSetWithArray:sanitizedExistingBlocklist];
+    [expectedAfterAppend addObjectsFromArray:sanitizedEntries];
+    NSSet *expectedAfterSet = [NSSet setWithArray:expectedAfterAppend.array];
+    BOOL matchesOriginalPrecondition = activeSet.count == expectedSet.count &&
+        [expectedSet isSubsetOfSet:activeSet];
+    BOOL matchesPriorPartialAppend = activeSet.count == expectedAfterSet.count &&
+        [expectedAfterSet isSubsetOfSet:activeSet];
+    BOOL isRetryState = !matchesOriginalPrecondition && matchesPriorPartialAppend;
+    if (!matchesOriginalPrecondition && !matchesPriorPartialAppend) {
         NSLog(@"ERROR: Refusing active append because active blocklist did not match expected blocklist");
         NSError* err = [SCErr errorWithCode: 500 subDescription: @"Active blocklist did not match expected schedule"];
         [SCSentry captureError: err];
-        reply(err);
+        reply([result copy], err);
         [self.daemonMethodLock unlock];
         return;
     }
 
+    // A prior attempt may have persisted the stricter settings but failed a
+    // physical postcondition. In that exact union state, reapply the requested
+    // rules instead of getting stuck on the old precondition forever.
     NSMutableArray* added = [NSMutableArray arrayWithArray:sanitizedEntries];
-    [added removeObjectsInArray:activeBlocklist];
+    if (!isRetryState) [added removeObjectsInArray:activeBlocklist];
 
-    if (added.count == 0) {
-        NSLog(@"SCDaemonBlockMethods: Entries already present in active blocklist");
-        reply(nil);
-        [self.daemonMethodLock unlock];
-        return;
+    BOOL physicalReapplyAttempted = SCDaemonActiveStrictifyRequiresPhysicalReapply(
+        sanitizedEntries.count, added.count, matchesOriginalPrecondition, isRetryState);
+    if (physicalReapplyAttempted && added.count == 0) {
+        // Settings already contain the request, but that is not a physical
+        // postcondition. Exercise hosts/PF/apps again and return the same typed
+        // apply result used for a newly-added entry.
+        NSLog(@"SCDaemonBlockMethods: Reapplying entries already present in active blocklist");
+        [added addObjectsFromArray:sanitizedEntries];
     }
+    result[@"physical_reapply_attempted"] = @(physicalReapplyAttempted);
 
     BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist:NO
                                                             allowLocal:[settings boolForKey:@"AllowLocalNetworks"]
@@ -342,26 +622,48 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
                                                   includeLinkedDomains:[settings boolForKey:@"IncludeLinkedDomains"]];
     [blockManager enterAppendMode];
     [blockManager addBlockEntriesFromStrings:added];
-    [blockManager finishAppending];
+    SCBlockApplyResult *applyResult = [blockManager finishAppending];
+    result[@"apply_result"] = [applyResult dictionaryRepresentation];
 
-    NSMutableArray *newActiveBlocklist = [NSMutableArray arrayWithArray:activeBlocklist];
-    [newActiveBlocklist addObjectsFromArray:added];
-    [settings setValue:newActiveBlocklist forKey:@"ActiveBlocklist"];
+    NSMutableOrderedSet *newActiveBlocklist = [NSMutableOrderedSet orderedSetWithArray:activeBlocklist];
+    [newActiveBlocklist addObjectsFromArray:sanitizedEntries];
+    [settings setValue:newActiveBlocklist.array forKey:@"ActiveBlocklist"];
+    result[@"active_after_count"] = @(newActiveBlocklist.count);
 
     NSError* syncErr = [settings syncSettingsAndWait:5];
     if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after appending active blocklist entries", syncErr);
+        NSLog(@"WARNING: Settings sync failed after active append (domain=%@ code=%ld)",
+              syncErr.domain, (long)syncErr.code);
         [SCSentry captureError:syncErr];
     }
+    result[@"settings_persisted"] = @(syncErr == nil);
+
+    NSArray *persistedActiveBlocklist = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
+    NSSet *persistedSet = [NSSet setWithArray:persistedActiveBlocklist];
+    NSSet *newSet = [NSSet setWithArray:newActiveBlocklist.array];
+    BOOL activeVerified = persistedSet.count == newSet.count && [newSet isSubsetOfSet:persistedSet];
+    result[@"active_verified"] = @(activeVerified);
 
     [SCHelperToolUtilities sendConfigurationChangedNotification];
     [SCHelperToolUtilities clearCachesIfRequested];
 
-    NSLog(@"INFO: Appended %lu entries to active blocklist.", (unsigned long)added.count);
-    reply(nil);
+    NSError *resultError = nil;
+    if (applyResult.succeeded && syncErr == nil && activeVerified) {
+        result[@"outcome"] = @"verified";
+        result[@"failed_stage"] = @"none";
+        NSLog(@"INFO: Appended and verified %lu active blocklist entries.", (unsigned long)added.count);
+    } else {
+        SCSpoolBlockApplyFailure(SCTelemetryUIDForCurrentBlock(), applyResult, NO, syncErr == nil);
+        result[@"outcome"] = @"failed";
+        result[@"failed_stage"] = !applyResult.succeeded ? @"physical_apply" :
+            (syncErr != nil ? @"settings_sync" : @"verification");
+        resultError = [SCErr errorWithCode:500 subDescription:@"Active blocklist append did not verify"];
+        NSLog(@"ERROR: Active blocklist append completed without verified postconditions");
+    }
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [self.daemonMethodLock unlock];
+    reply([result copy], resultError);
 }
 
 + (void)updateBlockEndDate:(NSDate*)newEndDate authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
@@ -414,7 +716,8 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     // make sure everyone knows about our new end date
     NSError* syncErr = [settings syncSettingsAndWait: 5];
     if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after extending block", syncErr);
+        NSLog(@"WARNING: Settings sync failed after extending block (domain=%@ code=%ld)",
+              syncErr.domain, (long)syncErr.code);
         [SCSentry captureError: syncErr];
     }
 
@@ -435,6 +738,18 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
     [SCSentry addBreadcrumb: @"Daemon method checkupBlock called" category: @"daemon"];
 
+    SCSettings *authoritativeSettings = [SCSettings sharedSettings];
+    if (!authoritativeSettings.settingsStateAvailableForEnforcement) {
+        // Physical remnants plus unavailable declared state are ambiguous. An
+        // automatic teardown here could silently end a still-active committed
+        // block. Keep the timer alive and retry after SCSettings recovers a
+        // valid snapshot from disk; emergency/debug teardown remains explicit.
+        NSLog(@"CHECKUP: Secured settings are unavailable; preserving physical block layers");
+        [[SCDaemon sharedDaemon] resetInactivityTimer];
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
     NSTimeInterval integrityCheckIntervalSecs = 15.0;
     static NSDate* lastBlockIntegrityCheck;
     static NSDate* lastCheckupLog;
@@ -450,11 +765,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     if (shouldLogCheckup) {
         lastCheckupLog = [NSDate date];
         SCSettings* settings = [SCSettings sharedSettings];
-        NSDate* blockEndDate = [settings valueForKey:@"BlockEndDate"];
         NSArray* blocklist = [settings valueForKey:@"ActiveBlocklist"];
-        NSLog(@"CHECKUP: blockIsRunning=%d, blockEndDate=%@, blocklist count=%lu",
+        NSLog(@"CHECKUP: blockIsRunning=%d blockEndState=%@ blocklistCount=%lu",
               [SCBlockUtilities anyBlockIsRunning],
-              blockEndDate,
+              [SCBlockUtilities currentBlockIsExpired] ? @"expired" : @"future",
               (unsigned long)blocklist.count);
     }
 
@@ -470,7 +784,14 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
         [SCSentry captureMessage: @"Checkup ran and no active block found! Removing block, tampering suspected..."];
 
-        [SCHelperToolUtilities removeBlock];
+        BOOL pfRemnant = [PacketFilter blockFoundInPF];
+        BOOL hostsRemnant = [[HostFileBlockerSet new].defaultBlocker containsSelfControlBlock];
+        BOOL appMonitoring = [AppBlocker sharedBlocker].isMonitoring;
+        NSUInteger settingsVersion = [[[SCSettings sharedSettings] valueForKey:@"SettingsVersionNumber"] unsignedIntegerValue];
+        uid_t telemetryUID = SCTelemetryUIDForCurrentBlock();
+        BOOL teardownVerified = SCRemoveBlockWithTelemetry();
+        SCSpoolUnexpectedBlockRemnants(telemetryUID, hostsRemnant, pfRemnant,
+                                       appMonitoring, teardownVerified, settingsVersion);
 
         [SCHelperToolUtilities sendConfigurationChangedNotification];
 
@@ -483,27 +804,32 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         //
 
         // once the checkups stop, the daemon will clear itself in a while due to inactivity
-        NSLog(@"CHECKUP: Stopping checkup timer");
-        [[SCDaemon sharedDaemon] stopCheckupTimer];
+        if (teardownVerified) {
+            NSLog(@"CHECKUP: Stopping checkup timer");
+            [[SCDaemon sharedDaemon] stopCheckupTimer];
+        } else {
+            NSLog(@"CHECKUP: Teardown incomplete; retaining timer for retry");
+        }
     } else if ([SCBlockUtilities currentBlockIsExpired]) {
         SCSettings* settings = [SCSettings sharedSettings];
-        NSDate* blockEndDate = [settings valueForKey:@"BlockEndDate"];
         NSArray* blocklist = [settings valueForKey:@"ActiveBlocklist"];
 
         NSLog(@"=== CHECKUP: BLOCK EXPIRED ===");
-        NSLog(@"CHECKUP: blockEndDate was %@", blockEndDate);
-        NSLog(@"CHECKUP: blocklist had %lu entries: %@", (unsigned long)blocklist.count, blocklist);
+        NSLog(@"CHECKUP: expired block had %lu entries", (unsigned long)blocklist.count);
         NSLog(@"CHECKUP: Removing expired block...");
 
-        [SCHelperToolUtilities removeBlock];
+        BOOL teardownVerified = SCRemoveBlockWithTelemetry();
 
         [SCHelperToolUtilities sendConfigurationChangedNotification];
 
-        [SCSentry addBreadcrumb: @"Daemon found and cleared expired block" category: @"daemon"];
-
-        // once the checkups stop, the daemon will clear itself in a while due to inactivity
-        NSLog(@"CHECKUP: Stopping checkup timer (next segment should start via launchd job)");
-        [[SCDaemon sharedDaemon] stopCheckupTimer];
+        if (teardownVerified) {
+            [SCSentry addBreadcrumb: @"Daemon found and cleared expired block" category: @"daemon"];
+            // once the checkups stop, the daemon will clear itself in a while due to inactivity
+            NSLog(@"CHECKUP: Stopping checkup timer (next segment should start via launchd job)");
+            [[SCDaemon sharedDaemon] stopCheckupTimer];
+        } else {
+            NSLog(@"CHECKUP: Expired teardown incomplete; retaining timer for retry");
+        }
     } else if ([[NSDate date] timeIntervalSinceDate: lastBlockIntegrityCheck] > integrityCheckIntervalSecs) {
         lastBlockIntegrityCheck = [NSDate date];
         // The block is still on.  Every once in a while, we should
@@ -574,7 +900,13 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [hostFileBlockerSet deleteBackupHostsFile];
 
         // Perform the re-add of the rules
-        [SCHelperToolUtilities installBlockRulesFromSettings];
+        SCBlockApplyResult *integrityResult = [SCHelperToolUtilities installBlockRulesFromSettings];
+        if (!integrityResult.succeeded) {
+            SCSpoolBlockApplyFailure(SCTelemetryUIDForCurrentBlock(),
+                                     integrityResult,
+                                     [settings boolForKey:@"ActiveBlockAsWhitelist"],
+                                     YES);
+        }
         
         [SCHelperToolUtilities clearCachesIfRequested];
 
@@ -607,7 +939,14 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     NSLog(@"INFO: Stopping test block (user requested)");
 
     // Remove the block (same as removeBlock in other contexts)
-    [SCHelperToolUtilities removeBlock];
+    BOOL teardownVerified = SCRemoveBlockWithTelemetry();
+    if (!teardownVerified) {
+        NSError *teardownError = [SCErr errorWithCode:500 subDescription:@"Test block teardown did not verify"];
+        reply(teardownError);
+        [[SCDaemon sharedDaemon] resetInactivityTimer];
+        [self.daemonMethodLock unlock];
+        return;
+    }
 
     // Clear the test block flag
     [settings setValue: @NO forKey: @"IsTestBlock"];
@@ -615,7 +954,8 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     // Synchronize settings
     NSError* syncErr = [settings syncSettingsAndWait: 5];
     if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after stopping test block", syncErr);
+        NSLog(@"WARNING: Settings sync failed after stopping test block (domain=%@ code=%ld)",
+              syncErr.domain, (long)syncErr.code);
     }
 
     [SCHelperToolUtilities sendConfigurationChangedNotification];

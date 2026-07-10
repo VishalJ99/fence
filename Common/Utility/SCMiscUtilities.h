@@ -20,6 +20,11 @@
 
 + (BOOL)systemThirdPartyCrashReportingEnabled;
 
+/// Returns a deterministic storage form for one block entry, or nil when the
+/// input cannot be represented safely. URL paths, queries, and fragments are
+/// discarded because Fence blocks hosts rather than individual pages.
++ (NSString*)canonicalBlockEntryFromString:(NSString*)rawEntry;
+
 + (NSArray<NSString*>*)cleanBlocklistEntry:(NSString*)rawEntry;
 
 + (NSArray<NSString*>*)cleanBlocklist:(NSArray<NSString*>*)blocklist;

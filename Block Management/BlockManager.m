@@ -25,18 +25,168 @@
 #import "SCBlockEntry.h"
 #include <sys/socket.h>
 #include <netdb.h>
+#include <math.h>
 #import "HostFileBlockerSet.h"
 #import "AppBlocker.h"
 #import "SCSettings.h"
 #import "SCBlockUtilities.h"
 
+SCBlockApplyOperation const SCBlockApplyOperationFresh = @"fresh";
+SCBlockApplyOperation const SCBlockApplyOperationStrictify = @"strictify";
+SCBlockApplyOperation const SCBlockApplyOperationIntegrity = @"integrity_reapply";
+
+static NSString* SCApplyStatusForNumber(NSNumber* value) {
+    if (value == nil) return @"not_attempted";
+    return value.boolValue ? @"succeeded" : @"failed";
+}
+
+static BOOL SCOptionalApplyStatusSucceeded(NSNumber* value) {
+    return value == nil || value.boolValue;
+}
+
+@interface SCBlockApplyResult ()
+
+@property (nonatomic, copy, readwrite) SCBlockApplyOperation operation;
+@property (nonatomic, readwrite) BOOL succeeded;
+@property (nonatomic, readwrite) BOOL completed;
+@property (nonatomic, strong) NSDate* startedAt;
+@property (nonatomic, readwrite) NSUInteger durationMilliseconds;
+
+@property (nonatomic, readwrite) NSUInteger inputEntryCount;
+@property (nonatomic, readwrite) NSUInteger validEntryCount;
+@property (nonatomic, readwrite) NSUInteger rejectedEntryCount;
+@property (nonatomic, readwrite) NSUInteger appEntryCount;
+@property (nonatomic, readwrite) NSUInteger siteEntryCount;
+@property (nonatomic, readwrite) NSUInteger dnsLookupCount;
+@property (nonatomic, readwrite) NSUInteger dnsResolvedHostCount;
+@property (nonatomic, readwrite) NSUInteger dnsResolvedAddressCount;
+@property (nonatomic, readwrite) NSUInteger dnsFailureCount;
+@property (nonatomic, readwrite) NSUInteger unappliedEntryCount;
+
+@property (nonatomic, strong, readwrite) NSNumber* hostsReady;
+@property (nonatomic, strong, readwrite) NSNumber* hostsWriteSucceeded;
+@property (nonatomic, strong, readwrite) NSNumber* hostsVerificationSucceeded;
+@property (nonatomic, strong, readwrite) NSNumber* hostsErrorCode;
+
+@property (nonatomic, strong, readwrite) NSNumber* pfAnchorOpenSucceeded;
+@property (nonatomic, strong, readwrite) NSNumber* pfAnchorWriteSucceeded;
+@property (nonatomic, strong, readwrite) NSNumber* pfMainConfigurationWriteSucceeded;
+@property (nonatomic, copy, readwrite) NSString* pfCommand;
+@property (nonatomic, strong, readwrite) NSNumber* pfExitCode;
+@property (nonatomic, strong, readwrite) NSNumber* pfVerificationSucceeded;
+@property (nonatomic, strong, readwrite) NSNumber* pfErrorCode;
+
+@property (nonatomic, readwrite) NSUInteger blockedAppCount;
+@property (nonatomic, readwrite) BOOL appMonitoringBefore;
+@property (nonatomic, readwrite) BOOL appMonitoringAfter;
+@property (nonatomic, readwrite) NSUInteger appKillAttemptCount;
+@property (nonatomic, readwrite) NSUInteger appTerminateSuccessCount;
+@property (nonatomic, readwrite) NSUInteger appForceKillCount;
+@property (nonatomic, readwrite) NSUInteger appKillFailureCount;
+@property (nonatomic, strong, readwrite) NSNumber* appScanErrorCode;
+@property (nonatomic, strong, readwrite) NSNumber* appKillErrorCode;
+
+- (void)complete;
+
+@end
+
+@implementation SCBlockApplyResult
+
+- (instancetype)initWithOperation:(SCBlockApplyOperation)operation {
+    if (self = [super init]) {
+        _operation = [operation copy] ?: SCBlockApplyOperationFresh;
+        _startedAt = [NSDate date];
+    }
+    return self;
+}
+
+- (void)complete {
+    @synchronized (self) {
+        NSTimeInterval duration = [[NSDate date] timeIntervalSinceDate:self.startedAt];
+        self.durationMilliseconds = (NSUInteger)llround(MAX(0, duration) * 1000.0);
+
+        BOOL statusLayersSucceeded =
+            SCOptionalApplyStatusSucceeded(self.hostsReady) &&
+            SCOptionalApplyStatusSucceeded(self.hostsWriteSucceeded) &&
+            SCOptionalApplyStatusSucceeded(self.hostsVerificationSucceeded) &&
+            SCOptionalApplyStatusSucceeded(self.pfAnchorOpenSucceeded) &&
+            SCOptionalApplyStatusSucceeded(self.pfAnchorWriteSucceeded) &&
+            SCOptionalApplyStatusSucceeded(self.pfMainConfigurationWriteSucceeded) &&
+            SCOptionalApplyStatusSucceeded(self.pfVerificationSucceeded);
+        BOOL commandSucceeded = self.pfExitCode == nil || self.pfExitCode.integerValue == 0;
+        BOOL appLayerSucceeded = (self.blockedAppCount == 0 || self.appMonitoringAfter) &&
+            self.appKillFailureCount == 0 && self.appScanErrorCode == nil;
+
+        self.succeeded = self.rejectedEntryCount == 0 && self.unappliedEntryCount == 0 && statusLayersSucceeded &&
+            commandSucceeded && appLayerSucceeded;
+        self.completed = YES;
+    }
+}
+
+- (NSDictionary<NSString*, id>*)dictionaryRepresentation {
+    @synchronized (self) {
+        NSMutableDictionary* hosts = [@{
+            @"ready": SCApplyStatusForNumber(self.hostsReady),
+            @"write": SCApplyStatusForNumber(self.hostsWriteSucceeded),
+            @"verify": SCApplyStatusForNumber(self.hostsVerificationSucceeded),
+        } mutableCopy];
+        if (self.hostsErrorCode) hosts[@"error_code"] = self.hostsErrorCode;
+
+        NSMutableDictionary* packetFilter = [@{
+            @"anchor_open": SCApplyStatusForNumber(self.pfAnchorOpenSucceeded),
+            @"anchor_write": SCApplyStatusForNumber(self.pfAnchorWriteSucceeded),
+            @"main_config_write": SCApplyStatusForNumber(self.pfMainConfigurationWriteSucceeded),
+            @"verify": SCApplyStatusForNumber(self.pfVerificationSucceeded),
+        } mutableCopy];
+        if (self.pfCommand) packetFilter[@"command"] = self.pfCommand;
+        if (self.pfExitCode) packetFilter[@"exit_code"] = self.pfExitCode;
+        if (self.pfErrorCode) packetFilter[@"error_code"] = self.pfErrorCode;
+
+        NSMutableDictionary* apps = [@{
+            @"blocked_count": @(self.blockedAppCount),
+            @"monitoring_before": @(self.appMonitoringBefore),
+            @"monitoring_after": @(self.appMonitoringAfter),
+            @"kill_attempt_count": @(self.appKillAttemptCount),
+            @"terminate_success_count": @(self.appTerminateSuccessCount),
+            @"force_kill_count": @(self.appForceKillCount),
+            @"kill_failure_count": @(self.appKillFailureCount),
+        } mutableCopy];
+        if (self.appScanErrorCode) apps[@"scan_error_code"] = self.appScanErrorCode;
+        if (self.appKillErrorCode) apps[@"kill_error_code"] = self.appKillErrorCode;
+
+        return @{
+            @"schema_version": @1,
+            @"operation": self.operation,
+            @"status": self.completed ? (self.succeeded ? @"succeeded" : @"failed") : @"in_progress",
+            @"duration_ms": @(self.durationMilliseconds),
+            @"entries": @{
+                @"input_count": @(self.inputEntryCount),
+                @"valid_count": @(self.validEntryCount),
+                @"rejected_count": @(self.rejectedEntryCount),
+                @"app_count": @(self.appEntryCount),
+                @"site_count": @(self.siteEntryCount),
+                @"dns_lookup_count": @(self.dnsLookupCount),
+                @"dns_resolved_host_count": @(self.dnsResolvedHostCount),
+                @"dns_resolved_address_count": @(self.dnsResolvedAddressCount),
+                @"dns_failure_count": @(self.dnsFailureCount),
+                @"unapplied_count": @(self.unappliedEntryCount),
+            },
+            @"hosts": hosts,
+            @"packet_filter": packetFilter,
+            @"apps": apps,
+        };
+    }
+}
+
+@end
+
 @interface BlockManager ()
 @property (nonatomic, strong, readwrite) AppBlocker* appBlocker;
+@property (nonatomic, strong, readwrite) SCBlockApplyResult* lastApplyResult;
+@property (nonatomic, copy, readwrite) NSDictionary<NSString *, id>* lastTeardownResult;
 @end
 
 @implementation BlockManager
-
-BOOL appendMode = NO;
 
 - (BlockManager*)init {
 	return [self initAsAllowlist: NO allowLocal: YES includeCommonSubdomains: YES];
@@ -54,6 +204,14 @@ BOOL appendMode = NO;
 }
 
 - (BlockManager*)initAsAllowlist:(BOOL)allowlist allowLocal:(BOOL)local includeCommonSubdomains:(BOOL)blockCommon includeLinkedDomains:(BOOL)includeLinked {
+	return [self initAsAllowlist:allowlist
+                     allowLocal:local
+        includeCommonSubdomains:blockCommon
+           includeLinkedDomains:includeLinked
+                      operation:SCBlockApplyOperationFresh];
+}
+
+- (BlockManager*)initAsAllowlist:(BOOL)allowlist allowLocal:(BOOL)local includeCommonSubdomains:(BOOL)blockCommon includeLinkedDomains:(BOOL)includeLinked operation:(SCBlockApplyOperation)operation {
 	if(self = [super init]) {
 		opQueue = [[NSOperationQueue alloc] init];
 		[opQueue setMaxConcurrentOperationCount: 35];
@@ -65,48 +223,149 @@ BOOL appendMode = NO;
 		isAllowlist = allowlist;
 		allowLocal = local;
 		includeCommonSubdomains = blockCommon;
-		includeLinkedDomains = includeLinked;
+        includeLinkedDomains = includeLinked;
         addedBlockEntries = [NSMutableSet set];
+        appendMode = NO;
 
         // Initialize app blocker for blocking applications
         _appBlocker = [AppBlocker sharedBlocker];
+        _lastApplyResult = [[SCBlockApplyResult alloc] initWithOperation:operation];
+        _lastApplyResult.appMonitoringBefore = _appBlocker.isMonitoring;
 	}
 
 	return self;
 }
 
-- (void)prepareToAddBlock {
+- (void)recordHostsErrorIfNeeded:(NSError*)error {
+    if (error == nil) return;
+    @synchronized (self.lastApplyResult) {
+        if (self.lastApplyResult.hostsErrorCode == nil) {
+            self.lastApplyResult.hostsErrorCode = @(error.code);
+        }
+    }
+}
+
+- (void)recordPacketFilterErrorIfNeeded {
+    NSError* error = pf.lastApplyError;
+    if (error == nil) return;
+    @synchronized (self.lastApplyResult) {
+        if (self.lastApplyResult.pfErrorCode == nil) {
+            self.lastApplyResult.pfErrorCode = @(error.code);
+        }
+    }
+}
+
+- (NSNumber*)statusByCombiningStatus:(NSNumber*)existing withSuccess:(BOOL)success {
+    return @((existing == nil || existing.boolValue) && success);
+}
+
+- (void)recordAppScanResult:(NSDictionary<NSString*, NSNumber*>*)scanResult {
+    @synchronized (self.lastApplyResult) {
+        self.lastApplyResult.appKillAttemptCount += [scanResult[@"attempt_count"] unsignedIntegerValue];
+        self.lastApplyResult.appTerminateSuccessCount += [scanResult[@"terminate_success_count"] unsignedIntegerValue];
+        self.lastApplyResult.appForceKillCount += [scanResult[@"force_kill_count"] unsignedIntegerValue];
+        self.lastApplyResult.appKillFailureCount += [scanResult[@"failure_count"] unsignedIntegerValue];
+
+        NSInteger scanErrorCode = [scanResult[@"scan_error_code"] integerValue];
+        if (scanErrorCode != 0 && self.lastApplyResult.appScanErrorCode == nil) {
+            self.lastApplyResult.appScanErrorCode = @(scanErrorCode);
+        }
+        NSInteger killErrorCode = [scanResult[@"kill_error_code"] integerValue];
+        if (killErrorCode != 0 && self.lastApplyResult.appKillErrorCode == nil) {
+            self.lastApplyResult.appKillErrorCode = @(killErrorCode);
+        }
+    }
+}
+
+- (void)applyAppBlockingAndRecordResult {
+    NSUInteger blockedAppCount = self.appBlocker.blockedBundleIDs.count;
+    self.lastApplyResult.blockedAppCount = blockedAppCount;
+
+    if (blockedAppCount > 0) {
+        NSDictionary<NSString*, NSNumber*>* scanResult = nil;
+        if (self.appBlocker.isMonitoring) {
+            scanResult = [self.appBlocker findAndKillBlockedAppsResult];
+        } else {
+            // This is essential for strictification: adding the first app to an
+            // active site-only block must start the monitor, not merely run a
+            // one-shot process scan.
+            scanResult = [self.appBlocker startMonitoring];
+        }
+        [self recordAppScanResult:scanResult];
+    }
+    self.lastApplyResult.appMonitoringAfter = self.appBlocker.isMonitoring;
+}
+
+- (SCBlockApplyResult*)prepareToAddBlock {
+    BOOL cleanupAttempted = NO;
+    BOOL cleanupSucceeded = YES;
     for (HostFileBlocker* blocker in hostBlockerSet.blockers) {
         if([blocker containsSelfControlBlock]) {
+            cleanupAttempted = YES;
             [blocker removeSelfControlBlock];
-            [blocker writeNewFileContents];
+            NSError* writeError = nil;
+            BOOL writeSucceeded = [blocker writeNewFileContentsWithError:&writeError];
+            NSError* verifyError = nil;
+            BOOL verifySucceeded = writeSucceeded && [blocker verifyNewFileContentsWithError:&verifyError];
+            cleanupSucceeded = cleanupSucceeded && writeSucceeded && verifySucceeded;
+            [self recordHostsErrorIfNeeded:writeError ?: verifyError];
         }
     }
 
+    if (cleanupAttempted) {
+        self.lastApplyResult.hostsWriteSucceeded = @(cleanupSucceeded);
+        self.lastApplyResult.hostsVerificationSucceeded = @(cleanupSucceeded);
+    }
+
 	if(!isAllowlist && ![hostBlockerSet.defaultBlocker containsSelfControlBlock]) {
-        [hostBlockerSet createBackupHostsFile];
+		NSError* backupError = nil;
+        BOOL backupSucceeded = [hostBlockerSet createBackupHostsFileWithError:&backupError];
 		[hostBlockerSet addSelfControlBlockHeader];
-		hostsBlockingEnabled = YES;
+        BOOL headerReady = [hostBlockerSet.defaultBlocker containsSelfControlBlock];
+		hostsBlockingEnabled = headerReady;
+        self.lastApplyResult.hostsReady = @(cleanupSucceeded && backupSucceeded && headerReady);
+        [self recordHostsErrorIfNeeded:backupError];
 	} else {
 		hostsBlockingEnabled = NO;
+        if (!isAllowlist) {
+            self.lastApplyResult.hostsReady = @NO;
+        } else if (cleanupAttempted) {
+            self.lastApplyResult.hostsReady = @(cleanupSucceeded);
+        }
 	}
+    return self.lastApplyResult;
 }
 
-- (void)enterAppendMode {
+- (SCBlockApplyResult*)enterAppendMode {
+    self.lastApplyResult = [[SCBlockApplyResult alloc] initWithOperation:SCBlockApplyOperationStrictify];
+    self.lastApplyResult.appMonitoringBefore = self.appBlocker.isMonitoring;
+
     if (isAllowlist) {
         NSLog(@"ERROR: can't append to allowlist block");
-        return;
+        self.lastApplyResult.hostsReady = @NO;
+        return self.lastApplyResult;
     }
     if(![hostBlockerSet.defaultBlocker containsSelfControlBlock]) {
         NSLog(@"ERROR: can't append to hosts block that doesn't yet exist");
-        return;
+        self.lastApplyResult.hostsReady = @NO;
+        return self.lastApplyResult;
+    }
+
+    BOOL hostsBlockComplete = [hostBlockerSet.defaultBlocker containsCompleteSelfControlBlock];
+    if (!hostsBlockComplete) {
+        NSLog(@"ERROR: hosts block is missing its footer; PF append will still be attempted");
+        self.lastApplyResult.hostsErrorCode = @(SCHostFileBlockerErrorIncompleteBlock);
     }
     
     hostsBlockingEnabled = YES;
     appendMode = YES;
-    [pf enterAppendMode];
+    self.lastApplyResult.hostsReady = @(hostsBlockComplete);
+    BOOL anchorOpened = [pf enterAppendMode];
+    self.lastApplyResult.pfAnchorOpenSucceeded = @(anchorOpened);
+    [self recordPacketFilterErrorIfNeeded];
+    return self.lastApplyResult;
 }
-- (void)finishAppending {
+- (SCBlockApplyResult*)finishAppending {
     NSLog(@"BlockManager: About to run operation queue for appending...");
     NSDate* startedRunning  = [NSDate date];
     [opQueue waitUntilAllOperationsAreFinished];
@@ -114,17 +373,34 @@ BOOL appendMode = NO;
     NSTimeInterval runTime = [finishedRunning timeIntervalSinceDate: startedRunning];
     NSLog(@"BlockManager: Operation queue ran in %f seconds!", runTime);
 
-    [hostBlockerSet writeNewFileContents];
-    [pf finishAppending];
-    [pf refreshPFRules];
+    if (hostsBlockingEnabled) {
+        NSError* writeError = nil;
+        BOOL hostsWritten = [hostBlockerSet writeNewFileContentsWithError:&writeError];
+        self.lastApplyResult.hostsWriteSucceeded = [self statusByCombiningStatus:self.lastApplyResult.hostsWriteSucceeded
+                                                                      withSuccess:hostsWritten];
+        NSError* verifyError = nil;
+        BOOL hostsVerified = hostsWritten && [hostBlockerSet verifyNewFileContentsWithError:&verifyError];
+        self.lastApplyResult.hostsVerificationSucceeded = [self statusByCombiningStatus:self.lastApplyResult.hostsVerificationSucceeded
+                                                                              withSuccess:hostsVerified];
+        [self recordHostsErrorIfNeeded:writeError ?: verifyError];
+    }
 
-    // Kill any newly-added blocked apps immediately (app entries are added via addBlockEntry:)
-    [self.appBlocker findAndKillBlockedApps];
+    BOOL anchorWritten = [pf finishAppending];
+    self.lastApplyResult.pfAnchorWriteSucceeded = @(anchorWritten);
+    self.lastApplyResult.pfCommand = @"refresh";
+    int pfExitCode = [pf refreshPFRules];
+    self.lastApplyResult.pfExitCode = @(pfExitCode);
+    self.lastApplyResult.pfVerificationSucceeded = @(pf.lastVerificationSucceeded);
+    [self recordPacketFilterErrorIfNeeded];
+
+    [self applyAppBlockingAndRecordResult];
 
     appendMode = NO;
+    [self.lastApplyResult complete];
+    return self.lastApplyResult;
 }
 
-- (void)finalizeBlock {
+- (SCBlockApplyResult*)finalizeBlock {
     NSLog(@"BlockManager: About to run operation queue...");
     NSDate* startedRunning  = [NSDate date];
 	[opQueue waitUntilAllOperationsAreFinished];
@@ -134,20 +410,32 @@ BOOL appendMode = NO;
 
 	if(hostsBlockingEnabled) {
 		[hostBlockerSet addSelfControlBlockFooter];
-		[hostBlockerSet writeNewFileContents];
+		NSError* writeError = nil;
+        BOOL hostsWritten = [hostBlockerSet writeNewFileContentsWithError:&writeError];
+        self.lastApplyResult.hostsWriteSucceeded = [self statusByCombiningStatus:self.lastApplyResult.hostsWriteSucceeded
+                                                                      withSuccess:hostsWritten];
+        NSError* verifyError = nil;
+        BOOL hostsVerified = hostsWritten && [hostBlockerSet verifyNewFileContentsWithError:&verifyError];
+        self.lastApplyResult.hostsVerificationSucceeded = [self statusByCombiningStatus:self.lastApplyResult.hostsVerificationSucceeded
+                                                                              withSuccess:hostsVerified];
+        [self recordHostsErrorIfNeeded:writeError ?: verifyError];
 	}
 
-	[pf startBlock];
+	self.lastApplyResult.pfCommand = @"load";
+	int pfExitCode = [pf startBlock];
+    self.lastApplyResult.pfAnchorWriteSucceeded = @(pf.lastConfigurationWriteSucceeded);
+    self.lastApplyResult.pfMainConfigurationWriteSucceeded = @(pf.lastMainConfigurationWriteSucceeded);
+    self.lastApplyResult.pfExitCode = @(pfExitCode);
+    self.lastApplyResult.pfVerificationSucceeded = @(pf.lastVerificationSucceeded);
+    [self recordPacketFilterErrorIfNeeded];
 
     // Start app blocker monitoring if any apps are blocked
-    NSLog(@"BlockManager: finalizeBlock - appBlocker has %lu apps: %@",
-          (unsigned long)self.appBlocker.blockedBundleIDs.count,
-          self.appBlocker.blockedBundleIDs);
-    if (self.appBlocker.blockedBundleIDs.count > 0) {
-        [self.appBlocker startMonitoring];
-        NSLog(@"BlockManager: Started app blocking for %lu apps",
-              (unsigned long)self.appBlocker.blockedBundleIDs.count);
-    }
+    NSLog(@"BlockManager: finalizeBlock - appBlocker has %lu apps",
+          (unsigned long)self.appBlocker.blockedBundleIDs.count);
+    [self applyAppBlockingAndRecordResult];
+
+    [self.lastApplyResult complete];
+    return self.lastApplyResult;
 }
 
 - (void)enqueueBlockEntry:(SCBlockEntry*)entry {
@@ -177,12 +465,14 @@ BOOL appendMode = NO;
     }
 
 	BOOL isIP = [entry.hostname isValidIPAddress];
-	BOOL isIPv4 = [entry.hostname isValidIPv4Address];
+    BOOL physicalRuleAdded = NO;
 
 	if([entry.hostname isEqualToString: @"*"]) {
 		[pf addRuleWithIP: nil port: entry.port maskLen: 0];
-	} else if(isIPv4) { // current we do NOT do ipfw blocking for IPv6
+		physicalRuleAdded = YES;
+	} else if(isIP) {
 		[pf addRuleWithIP: entry.hostname port: entry.port maskLen: entry.maskLen];
+		physicalRuleAdded = YES;
 	} else if(!isIP) { // domain name
         // Google requires special handling
         if ([self domainIsGoogle: entry.hostname]) {
@@ -190,40 +480,90 @@ BOOL appendMode = NO;
                 // just add the whole Google IP range, it's way too error-prone to do an allowlist block of Google any other way
                 // last updated: 9/23/21 from https://www.gstatic.com/ipranges/goog.json
                 [self addGoogleIPsToPF];
+                physicalRuleAdded = YES;
             }
             // for blocklist blocks, just skip blocking Google by IP
             // because we'd end up blocking more than the user wants (i.e. Search/Mail)
             // rely on the domain-level blocking instead
         } else {
             // non-Google domains just get looked up and blocked by IP
+            @synchronized (self.lastApplyResult) {
+                self.lastApplyResult.dnsLookupCount += 1;
+            }
             NSArray* addresses = [BlockManager ipAddressesForDomainName: entry.hostname];
+
+            @synchronized (self.lastApplyResult) {
+                if (addresses.count > 0) {
+                    self.lastApplyResult.dnsResolvedHostCount += 1;
+                    self.lastApplyResult.dnsResolvedAddressCount += addresses.count;
+                } else {
+                    self.lastApplyResult.dnsFailureCount += 1;
+                }
+            }
 
             for(NSUInteger i = 0; i < [addresses count]; i++) {
                 NSString* ip = addresses[i];
 
                 [pf addRuleWithIP: ip port: entry.port maskLen: entry.maskLen];
+                physicalRuleAdded = YES;
             }
         }
 	}
 
 	if(hostsBlockingEnabled && ![entry.hostname isEqualToString: @"*"] && !entry.port && !isIP) {
         if (appendMode) {
-            [hostBlockerSet appendExistingBlockWithRuleForDomain: entry.hostname];
+            BOOL hostsAppended = [hostBlockerSet appendExistingBlockWithRuleForDomain:entry.hostname];
+            physicalRuleAdded = physicalRuleAdded || hostsAppended;
+            if (!hostsAppended) {
+                @synchronized (self.lastApplyResult) {
+                    self.lastApplyResult.hostsReady = @NO;
+                    if (self.lastApplyResult.hostsErrorCode == nil) {
+                        self.lastApplyResult.hostsErrorCode = @(SCHostFileBlockerErrorIncompleteBlock);
+                    }
+                }
+            }
         } else {
             [hostBlockerSet addRuleBlockingDomain: entry.hostname];
+            physicalRuleAdded = YES;
         }
 	}
+
+    if (!physicalRuleAdded) {
+        @synchronized (self.lastApplyResult) {
+            self.lastApplyResult.unappliedEntryCount += 1;
+        }
+    }
 }
 
 - (void)addBlockEntryFromString:(NSString*)entryString {
-    SCBlockEntry* entry = [SCBlockEntry entryFromString: entryString];
+    @synchronized (self.lastApplyResult) {
+        self.lastApplyResult.inputEntryCount += 1;
+    }
+
+    SCBlockEntry* entry = [entryString isKindOfClass:[NSString class]]
+        ? [SCBlockEntry entryFromString:entryString]
+        : nil;
 
     // nil means that we don't have anything valid to block in this entry
-    if (entry == nil) return;
+    if (entry == nil) {
+        @synchronized (self.lastApplyResult) {
+            self.lastApplyResult.rejectedEntryCount += 1;
+        }
+        return;
+    }
+
+    @synchronized (self.lastApplyResult) {
+        self.lastApplyResult.validEntryCount += 1;
+        if ([entry isAppEntry]) {
+            self.lastApplyResult.appEntryCount += 1;
+        } else {
+            self.lastApplyResult.siteEntryCount += 1;
+        }
+    }
 
     // App entries don't have hostnames - route directly to addBlockEntry
     if ([entry isAppEntry]) {
-        NSLog(@"BlockManager: Processing app entry: %@", entry.appBundleID);
+        NSLog(@"BlockManager: Processing one app entry");
         [self addBlockEntry: entry];
         return;
     }
@@ -247,35 +587,46 @@ BOOL appendMode = NO;
 }
 
 - (BOOL)clearBlock {
+    NSDate *startedAt = [NSDate date];
+    BOOL appMonitoringBefore = self.appBlocker.isMonitoring;
     // Stop app blocker monitoring
     [self.appBlocker stopMonitoring];
     [self.appBlocker clearAllBlockedApps];
+    BOOL appsRemoved = !self.appBlocker.isMonitoring && self.appBlocker.blockedBundleIDs.count == 0;
 
-	[pf stopBlock: false];
+	int pfStopCode = [pf stopBlock:false];
 	BOOL pfSuccess = ![pf containsSelfControlBlock];
 
 	[hostBlockerSet removeSelfControlBlock];
-	BOOL hostSuccess = [hostBlockerSet writeNewFileContents];
+	NSError *hostsWriteError = nil;
+	BOOL hostSuccess = [hostBlockerSet writeNewFileContentsWithError:&hostsWriteError];
 	// Revert the host file blocker's file contents to disk so we can check
 	// whether or not it still contains the block (aka we messed up).
 	[hostBlockerSet revertFileContentsToDisk];
 	hostSuccess = hostSuccess && ![hostBlockerSet containsSelfControlBlock];
 
-	BOOL clearedSuccessfully = hostSuccess && pfSuccess;
+	BOOL clearedSuccessfully = hostSuccess && pfSuccess && appsRemoved;
+	BOOL forcePFRemovalAttempted = NO;
+	BOOL hostsRestoreAttempted = NO;
+	BOOL hostsRestoreSucceeded = NO;
 
 	if(clearedSuccessfully)
 		NSLog(@"INFO: Block successfully cleared.");
 	else {
 		if (!pfSuccess) {
 			NSLog(@"WARNING: Error clearing pf block. Tring to clear using force.");
-			[pf stopBlock: true];
+			forcePFRemovalAttempted = YES;
+			pfStopCode = [pf stopBlock:true];
 		}
 		if (!hostSuccess) {
 			NSLog(@"WARNING: Error removing hostfile block.  Attempting to restore host file backup.");
-			[hostBlockerSet restoreBackupHostsFile];
+			hostsRestoreAttempted = YES;
+			hostsRestoreSucceeded = [hostBlockerSet restoreBackupHostsFile];
 		}
 
-		clearedSuccessfully = ![self blockIsActive];
+		pfSuccess = ![pf containsSelfControlBlock];
+		hostSuccess = ![hostBlockerSet containsSelfControlBlock];
+		clearedSuccessfully = pfSuccess && hostSuccess && appsRemoved;
 
 		if ([hostBlockerSet.defaultBlocker containsSelfControlBlock]) {
 			NSLog(@"ERROR: Host file backup could not be restored.  This may result in a permanent block.");
@@ -291,13 +642,38 @@ BOOL appendMode = NO;
 	[hostBlockerSet deleteBackupHostsFile];
 
     // Clear all block settings to prevent stale data showing "Finishing" on next block
+    NSError *settingsSyncError = nil;
+    BOOL settingsCleared = NO;
     if (clearedSuccessfully) {
         [SCBlockUtilities removeBlockFromSettings];  // Clears BlockIsRunning, BlockEndDate, etc.
-        [[SCSettings sharedSettings] synchronizeSettings];
-        NSLog(@"INFO: Block settings cleared via removeBlockFromSettings");
+        settingsSyncError = [[SCSettings sharedSettings] syncSettingsAndWait:5.0];
+        settingsCleared = settingsSyncError == nil &&
+            ![[SCSettings sharedSettings] boolForKey:@"BlockIsRunning"];
+        NSLog(@"INFO: Block settings clear verified=%@", settingsCleared ? @"YES" : @"NO");
     }
 
-	return clearedSuccessfully;
+    NSUInteger durationMilliseconds = (NSUInteger)llround(
+        MAX(0, [[NSDate date] timeIntervalSinceDate:startedAt]) * 1000.0);
+    NSMutableDictionary<NSString *, id> *teardownResult = [@{
+        @"schema_version": @1,
+        @"outcome": (clearedSuccessfully && settingsCleared) ? @"verified" : @"failed",
+        @"hosts_removed": @(hostSuccess),
+        @"pf_removed": @(pfSuccess),
+        @"app_monitoring_before": @(appMonitoringBefore),
+        @"app_monitoring_stopped": @(appsRemoved),
+        @"settings_cleared": @(settingsCleared),
+        @"verified": @(clearedSuccessfully && settingsCleared),
+        @"force_pf_removal_attempted": @(forcePFRemovalAttempted),
+        @"hosts_restore_attempted": @(hostsRestoreAttempted),
+        @"hosts_restore_succeeded": @(hostsRestoreSucceeded),
+        @"pf_exit_code": @(pfStopCode),
+        @"duration_milliseconds": @(durationMilliseconds),
+    } mutableCopy];
+    NSError *firstError = hostsWriteError ?: settingsSyncError ?: pf.lastApplyError;
+    if (firstError != nil) teardownResult[@"error_code"] = @(firstError.code);
+    self.lastTeardownResult = [teardownResult copy];
+
+	return clearedSuccessfully && settingsCleared;
 }
 
 - (BOOL)forceClearBlock {
@@ -416,7 +792,7 @@ BOOL appendMode = NO;
     // TODO: call CFHostsScheduleWithRunLoop to put this on a background thread, so we can cancel/timeout early
     CFHostStartInfoResolution(cfHost, kCFHostAddresses, &streamErr);
     if (streamErr.error) {
-        NSLog(@"BlockManager: Warning: failed to resolve addresses for %@ with stream error", domainName);
+        NSLog(@"BlockManager: Warning: domain resolution stream failed");
         CFRelease(cfHost);
         return @[];
     }
@@ -431,18 +807,19 @@ BOOL appendMode = NO;
             if (ipStr) {
                 [stringAddresses addObject: ipStr];
             } else {
-                NSLog(@"BlockManager: Warning: Failed to parse IP struct for domain %@ with error %@", domainName, parseErr);
+                NSLog(@"BlockManager: Warning: resolved address parsing failed (domain=%@ code=%ld)",
+                      parseErr.domain, (long)parseErr.code);
             }
         }
     } else {
-        NSLog(@"BlockManager: Warning: failed to resolve addresses for %@", domainName);
+        NSLog(@"BlockManager: Warning: domain resolution returned no addresses");
     }
 
 	// log slow resolutions
 	NSDate* finishedResolving  = [NSDate date];
 	NSTimeInterval resolutionTime = [finishedResolving timeIntervalSinceDate: startedResolving];
 	if (resolutionTime > 2.5) {
-		NSLog(@"BlockManager: Warning: took %f seconds to resolve %@", resolutionTime, domainName);
+		NSLog(@"BlockManager: Warning: domain resolution took %.3f seconds", resolutionTime);
 	}
     
     CFRelease(cfHost);
@@ -480,7 +857,7 @@ BOOL appendMode = NO;
         NSDate* finishedScraping  = [NSDate date];
         NSTimeInterval resolutionTime = [finishedScraping timeIntervalSinceDate: startedScraping];
         if (resolutionTime > 5.0) {
-            NSLog(@"BlockManager: Warning: allowlist scraper took %f seconds on %@", resolutionTime, entry.hostname);
+            NSLog(@"BlockManager: Warning: allowlist scraper took %.3f seconds", resolutionTime);
         }
         [relatedEntries addObjectsFromArray: scrapedEntries];
     }

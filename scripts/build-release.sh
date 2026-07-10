@@ -60,6 +60,8 @@ xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration
     -derivedDataPath "$DERIVED_DATA" \
     -arch arm64 \
     CODE_SIGNING_ALLOWED=NO \
+    MARKETING_VERSION="$VERSION" \
+    SENTRY_DSN="${SENTRY_DSN:-}" \
     clean build | tail -20
 
 # Verify app exists
@@ -68,6 +70,35 @@ if [ ! -d "$APP_PATH" ]; then
     exit 1
 fi
 echo "✓ Build complete"
+
+# A configured production Sentry build is not releasable without its matching
+# debug symbols. The DSN is public app configuration; the auth token remains
+# release-environment-only and is never copied into Fence.app.
+if [[ -n "${SENTRY_DSN:-}" ]]; then
+    : "${SENTRY_AUTH_TOKEN:?SENTRY_AUTH_TOKEN is required when SENTRY_DSN is configured}"
+    : "${SENTRY_ORG:?SENTRY_ORG is required when SENTRY_DSN is configured}"
+    : "${SENTRY_PROJECT:?SENTRY_PROJECT is required when SENTRY_DSN is configured}"
+
+    if ! command -v sentry-cli >/dev/null 2>&1; then
+        echo "❌ sentry-cli is required when SENTRY_DSN is configured"
+        exit 1
+    fi
+
+    DSYM_PATH="$BUILD_DIR/Fence.app.dSYM"
+    if [[ ! -d "$DSYM_PATH" ]]; then
+        echo "❌ Sentry dSYM missing at $DSYM_PATH"
+        exit 1
+    fi
+
+    echo "→ Uploading Sentry debug symbols..."
+    sentry-cli debug-files upload \
+        --org "$SENTRY_ORG" \
+        --project "$SENTRY_PROJECT" \
+        "$DSYM_PATH"
+    echo "✓ Sentry debug symbols uploaded"
+else
+    echo "→ Sentry disabled for this build (SENTRY_DSN is empty)"
+fi
 
 if [ ! -f "$PROFILE_PATH" ]; then
     echo "❌ Direct Distribution provisioning profile not found."

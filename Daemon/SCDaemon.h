@@ -38,6 +38,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Cleans up a stale schedule by removing it from ApprovedSchedules
 // and deleting the corresponding launchd job plist.
 - (void)cleanupStaleScheduleWithID:(NSString *)scheduleId;
+- (void)cleanupStaleScheduleWithID:(NSString *)scheduleId controllingUID:(uid_t)controllingUID;
 
 @end
 

@@ -6,6 +6,7 @@
 //
 
 #import "SCBlockEntry.h"
+#import "SCMiscUtilities.h"
 
 @implementation SCBlockEntry
 
@@ -42,60 +43,48 @@
 }
 
 + (instancetype)entryFromString:(NSString*)hostString {
-    // don't do anything with blank hostnames, however they got on the list...
-    // otherwise they could end up screwing up the block
-    if (![[hostString stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]] length]) {
-        return nil;
-    }
+    NSString* canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:hostString];
+    if (canonicalEntry == nil) return nil;
 
     // Handle app: prefix for app blocking
-    if ([hostString hasPrefix:@"app:"]) {
-        NSString* bundleID = [[hostString substringFromIndex:4]
-            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (bundleID.length == 0) {
-            return nil;
-        }
+    if ([canonicalEntry hasPrefix:@"app:"]) {
+        NSString* bundleID = [canonicalEntry substringFromIndex:4];
         return [SCBlockEntry entryWithAppBundleID:bundleID];
     }
 
-    NSString* hostname;
-    // returning 0 for either of these values means "couldn't find it in the string"
-    int maskLen = 0;
-    int port = 0;
+    NSString* hostname = nil;
+    NSInteger maskLen = 0;
+    NSInteger port = 0;
 
-    NSArray* splitString = [hostString componentsSeparatedByString: @"/"];
-    hostname = splitString[0];
+    NSRange slash = [canonicalEntry rangeOfString:@"/"];
+    NSString* hostPort = (slash.location == NSNotFound)
+        ? canonicalEntry
+        : [canonicalEntry substringToIndex:slash.location];
 
-    NSString* stringToSearchForPort = splitString[0];
-
-    if([splitString count] >= 2) {
-        maskLen = [splitString[1] intValue];
-
-        // we expect the port number to come after the IP/masklen
-        stringToSearchForPort = splitString[1];
+    if (slash.location != NSNotFound) {
+        NSString* maskPort = [canonicalEntry substringFromIndex:NSMaxRange(slash)];
+        NSArray<NSString*>* maskPortParts = [maskPort componentsSeparatedByString:@":"];
+        maskLen = [maskPortParts[0] integerValue];
+        if (maskPortParts.count == 2) port = [maskPortParts[1] integerValue];
     }
 
-    splitString = [stringToSearchForPort componentsSeparatedByString: @":"];
-
-    // only if hostName wasn't already split off by the maskLen
-    if([stringToSearchForPort isEqualToString: hostname]) {
-        hostname = splitString[0];
+    if ([hostPort hasPrefix:@"["]) {
+        NSRange closingBracket = [hostPort rangeOfString:@"]"];
+        hostname = [hostPort substringWithRange:NSMakeRange(1, closingBracket.location - 1)];
+        NSString* suffix = [hostPort substringFromIndex:NSMaxRange(closingBracket)];
+        if (suffix.length > 1) port = [[suffix substringFromIndex:1] integerValue];
+    } else {
+        NSArray<NSString*>* colonParts = [hostPort componentsSeparatedByString:@":"];
+        if (colonParts.count == 2) {
+            hostname = colonParts[0];
+            port = [colonParts[1] integerValue];
+        } else {
+            // Zero or multiple colons means a host without a port; the multiple
+            // colon case is an unbracketed IPv6 address.
+            hostname = hostPort;
+        }
     }
 
-    if([splitString count] >= 2) {
-        port = [splitString[1] intValue];
-    }
-
-    if([hostname isEqualToString: @""]) {
-        hostname = @"*";
-    }
-
-    // we won't block host * (everywhere) without a port number... it's just too likely to be mistaken.
-    // Use a allowlist if that's what you want!
-    if ([hostname isEqualToString: @"*"] && !port) {
-        return nil;
-    }
-    
     return [SCBlockEntry entryWithHostname: hostname port: port maskLen: maskLen];
 }
 

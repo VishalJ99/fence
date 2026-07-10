@@ -58,7 +58,9 @@ OSStatus const AUTH_CANCELLED_STATUS = -60006;
             @"AllowLocalNetworks": @YES,
             // if the user has checked the box to "send crash reports to third-party developers", we'll default Sentry on
             // otherwise it defaults off, but we'll still prompt to ask them if we can send data
-            @"EnableErrorReporting": @([SCMiscUtilities systemThirdPartyCrashReportingEnabled]),
+            // Fence telemetry requires explicit Fence consent. The system-wide
+            // crash-reporting choice is not consent to send data to our Sentry.
+            @"EnableErrorReporting": @NO,
             @"ErrorReportingPromptDismissed": @NO,
             @"SuppressLongBlockWarning": @NO,
             @"SuppressRestartFirefoxWarning": @NO,

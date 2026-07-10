@@ -1,8 +1,8 @@
-# SelfControl System Architecture
+# Fence System Architecture
 
-> **Version:** 4.0.2 (Build 410)
+> **Version:** 3.4.7 (Build 647; historical targets still use SelfControl names)
 > **Purpose:** Comprehensive technical documentation for developers and AI agents
-> **Last Updated:** December 2024
+> **Last Updated:** July 2026
 
 ---
 
@@ -23,7 +23,7 @@
 
 ## 1. Executive Summary
 
-SelfControl is a macOS application that blocks access to specified websites/network resources for a defined time period. **The block cannot be disabled** until the timer expires—even restarting the computer won't help.
+Fence is a macOS application that blocks selected websites, network resources, and apps for committed schedule windows. **The block cannot be disabled** until the timer expires—even restarting the computer won't help.
 
 ### Key Architectural Decisions
 
@@ -35,6 +35,7 @@ SelfControl is a macOS application that blocks access to specified websites/netw
 | **Continuous verification** | 1-second checkup timer ensures block persists |
 | **Settings in /usr/local/etc** | Survives app deletion; requires root to modify |
 | **App blocking via process kill** | Polls running apps every 500ms, kills blocked ones |
+| **Privacy-safe remote diagnostics** | Typed app events plus a root-owned, consent-gated daemon spool; raw entries never leave the machine |
 
 ### Technology Stack
 
@@ -43,6 +44,7 @@ SelfControl is a macOS application that blocks access to specified websites/netw
 - **IPC:** XPC (Mach message-based)
 - **Firewall:** macOS Packet Filter (PF/pf.conf)
 - **DNS Override:** /etc/hosts modification
+- **Diagnostics:** Sentry in the app only; daemon records move through authenticated XPC
 
 ---
 
@@ -53,7 +55,7 @@ SelfControl is a macOS application that blocks access to specified websites/netw
 ```mermaid
 graph TB
     subgraph "User Space"
-        APP[SelfControl.app<br/>Bundle: org.eyebeam.SelfControl]
+        APP[Fence.app<br/>Bundle: org.eyebeam.Fence]
         CLI[selfcontrol-cli<br/>Command Line Tool]
     end
 
@@ -259,6 +261,42 @@ classDiagram
 | `Block Management/HostFileBlocker.m` | ~250 | /etc/hosts manipulation |
 | `Block Management/PacketFilter.m` | ~180 | PF rule generation |
 | `Block Management/SCBlockEntry.m` | ~120 | Block entry data model |
+
+### 3.4 Telemetry and consistency diagnostics
+
+The app is the only process that links Sentry. `selfcontrold` never owns a
+network transport: it writes privacy-validated records under
+`/usr/local/etc/fence-telemetry/<uid>/`, and an audit-token-authenticated Fence
+client fetches and acknowledges its own queue after explicit consent.
+
+```mermaid
+flowchart LR
+    A["Fence app state"] -->|"expected projection over signed XPC"| D["selfcontrold"]
+    D -->|"local exact comparisons"| R["counts, booleans, status enums"]
+    D -->|"typed failure records"| Q["root-owned per-UID spool"]
+    Q -->|"fetch and ack for audit-token UID"| A
+    A -->|"typed sanitizer and privacy tripwire"| S["Sentry when release gates are configured"]
+```
+
+Core boundaries:
+
+- `Common/SCSentry` owns typed schemas, consent lifecycle, SDK containment,
+  and the final serialized-payload privacy tripwire.
+- `Common/SCTelemetrySpool` owns locked/atomic per-UID queue storage, hard
+  size/count/age bounds, consent generations, fetch/ack, and opt-out purge.
+- `SCScheduleManager` builds an app-local expected active/future projection.
+  `SCDaemonXPC` compares it to root settings, validated launchd plists, loaded
+  jobs, and hosts/PF/app state, returning no entries, dates, labels, or IDs.
+- `SCBlockApplyResult` and teardown results make physical postconditions—not
+  declared settings mutation—the success authority for apply, strictify,
+  integrity reapply, and cleanup.
+- A corrupt/unreadable initial SCSettings file is an explicit unavailable
+  state. Automatic teardown and ordinary mutation/persistence pause until a
+  valid authoritative state recovers (or the narrow first-run bootstrap creates
+  a genuinely missing file).
+
+The complete privacy contract, current coverage, and production gates live in
+[`docs/TELEMETRY.md`](docs/TELEMETRY.md).
 
 ---
 

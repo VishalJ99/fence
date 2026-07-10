@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)entryWithHostname:(NSString*)hostname;
 + (instancetype)entryWithHostname:(NSString*)hostname port:(NSInteger)port maskLen:(NSInteger)maskLen;
 + (instancetype)entryWithAppBundleID:(NSString*)bundleID;
-+ (instancetype)entryFromString:(NSString*)domainString;
++ (nullable instancetype)entryFromString:(NSString*)domainString;
 
 - (BOOL)isEqualToEntry:(SCBlockEntry*)otherEntry;
 - (BOOL)isAppEntry;  // Returns YES if this is an app block entry

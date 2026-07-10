@@ -4,6 +4,7 @@
 //
 
 #import "SCBundleEditorController.h"
+#import "SCMiscUtilities.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - SCBundleEditorContentView (Private)
@@ -367,15 +368,19 @@
 
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSAlertFirstButtonReturn) {
-            NSString *domain = [input.stringValue stringByTrimmingCharactersInSet:
-                               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (domain.length > 0) {
-                // Remove http:// or https:// if present
-                if ([domain hasPrefix:@"http://"] || [domain hasPrefix:@"https://"]) {
-                    domain = [[NSURL URLWithString:domain] host] ?: domain;
-                }
-                [self.workingBundle addEntry:domain];
+            NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:input.stringValue];
+            if (canonicalEntry != nil && ![canonicalEntry hasPrefix:@"app:"]) {
+                [self.workingBundle addEntry:canonicalEntry];
                 [self.entriesTableView reloadData];
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSAlert *validationAlert = [[NSAlert alloc] init];
+                    validationAlert.messageText = @"Invalid Website";
+                    validationAlert.informativeText = @"Enter a valid domain, IP address, or HTTP/HTTPS URL. Fence blocks the whole host, so paths and query text are ignored.";
+                    validationAlert.alertStyle = NSAlertStyleWarning;
+                    [validationAlert addButtonWithTitle:@"OK"];
+                    [validationAlert beginSheetModalForWindow:self.window completionHandler:nil];
+                });
             }
         }
     }];

@@ -28,7 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)removeBlockedApp:(NSString*)bundleID;
 
 /// Start monitoring and killing blocked apps (poll every 500ms)
-- (void)startMonitoring;
+/// @return Privacy-safe counts from the initial scan. No PIDs or bundle IDs
+/// are included.
+- (NSDictionary<NSString*, NSNumber*>*)startMonitoring;
 
 /// Stop monitoring
 - (void)stopMonitoring;
@@ -36,6 +38,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Immediately scan and kill any running blocked apps
 /// @return Array of PIDs (as NSNumber) that were terminated
 - (NSArray<NSNumber*>*)findAndKillBlockedApps;
+
+/// Immediately scan and return privacy-safe outcome counts. Keys are
+/// attempt_count, terminate_success_count, force_kill_count, failure_count,
+/// scan_error_code, and kill_error_code. Error keys are zero when the related
+/// operation succeeded.
+- (NSDictionary<NSString*, NSNumber*>*)findAndKillBlockedAppsResult;
 
 /// Clear all blocked apps (used when block ends)
 - (void)clearAllBlockedApps;

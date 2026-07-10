@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 // Saves to ~/.fence/logs/fence-logs-{timestamp}.txt, reveals in Finder, opens email
 + (void)exportLogsForSupport;
 
+// Removes user-entered block entries, bundle identifiers, credentials, tokens,
+// and user-specific paths from unified-log text before it can be exported.
++ (NSString*)sanitizedSupportLogContent:(NSString*)content;
+
 @end
 
 NS_ASSUME_NONNULL_END

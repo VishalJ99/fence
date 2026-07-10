@@ -18,8 +18,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)lockOrTimeout:(void(^)(NSError* error))reply;
 + (NSArray<NSString *> *)sanitizedBlocklistEntries:(NSArray<NSString *> *)entries;
 
+/// Performs a verified teardown and emits the typed daemon-spool failure event
+/// when any physical layer remains active. Caller must hold daemonMethodLock.
++ (BOOL)removeBlockWithTelemetry;
+
 // Starts a block
-+ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
++ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData * _Nullable)authData reply:(void(^)(NSError* _Nullable error))reply;
 
 // Checks whether the block is expired or compromised, and takes action to fix
 + (void)checkupBlock;
@@ -33,6 +37,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
              matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
                                  reply:(void(^)(NSError* error))reply;
+
+/// Structured variant used by the current XPC contract. The result contains
+/// counts, enum outcomes, and the privacy-safe physical apply result only.
++ (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                            resultReply:(void(^)(NSDictionary<NSString*, id>* result, NSError* _Nullable error))reply;
 
 // updates the block end date for the currently running block
 // (i.e. extends the block)

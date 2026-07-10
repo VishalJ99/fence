@@ -16,7 +16,9 @@
 #import "Block Management/SCBlockBundle.h"
 #import "Block Management/SCWeeklySchedule.h"
 #import "Common/SCLicenseManager.h"
+#import "Common/SCSentry.h"
 #import "SCLicenseWindowController.h"
+#include <errno.h>
 
 #pragma mark - SCHoverableLinkButton (Private)
 
@@ -111,6 +113,31 @@ static BOOL const kUseCalendarUI = YES;
 @end
 
 @implementation SCWeekScheduleWindowController
+
+static void SCEmitEmergencyUnlockResult(NSString *outcome,
+                                        NSInteger creditsRemaining,
+                                        BOOL settingsCleared,
+                                        BOOL hostsClean,
+                                        BOOL pfClean,
+                                        NSDate *startedAt,
+                                        NSNumber *appleScriptErrorCode) {
+    NSUInteger durationMilliseconds = (NSUInteger)llround(
+        MAX(0, [[NSDate date] timeIntervalSinceDate:startedAt]) * 1000.0);
+    NSMutableDictionary<NSString *, id> *fields = [@{
+        @"outcome": outcome,
+        @"credits_remaining": @(MAX(0, creditsRemaining)),
+        @"settings_cleared": @(settingsCleared),
+        @"hosts_clean": @(hostsClean),
+        @"pf_check": @(pfClean),
+        @"duration_milliseconds": @(durationMilliseconds),
+    } mutableCopy];
+    if ([appleScriptErrorCode isKindOfClass:[NSNumber class]]) {
+        fields[@"apple_script_error_code"] = appleScriptErrorCode;
+    }
+    SCTelemetryEventLevel level = [outcome isEqualToString:@"success"]
+        ? SCTelemetryEventLevelInfo : SCTelemetryEventLevelError;
+    [SCSentry captureTelemetryEvent:@"emergency.unlock_result" level:level fields:fields];
+}
 
 - (instancetype)init {
     NSRect frame = NSMakeRect(0, 0, 1440, 1116);
@@ -335,6 +362,10 @@ static BOOL const kUseCalendarUI = YES;
                                              selector:@selector(scheduleDidChange:)
                                                  name:SCScheduleManagerDidChangeNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(strictifyDidComplete:)
+                                                 name:SCScheduleStrictifyDidCompleteNotification
+                                               object:nil];
 
     // Observe window resize to update grid layout
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -361,6 +392,48 @@ static BOOL const kUseCalendarUI = YES;
                                                        userInfo:nil
                                                         repeats:YES];
     [[NSRunLoop currentRunLoop] addTimer:self.refreshTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)strictifyDidComplete:(NSNotification *)notification {
+    NSString *outcome = [notification.userInfo[SCScheduleStrictifyOutcomeKey]
+        isKindOfClass:[NSString class]]
+        ? notification.userInfo[SCScheduleStrictifyOutcomeKey] : @"failed";
+    NSString *operationToken = [notification.userInfo[SCScheduleStrictifyOperationTokenKey]
+        isKindOfClass:[NSString class]]
+        ? notification.userInfo[SCScheduleStrictifyOperationTokenKey] : nil;
+    if ([outcome isEqualToString:@"verified"]) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.alertStyle = NSAlertStyleWarning;
+        alert.messageText = @"Current block update was not verified";
+        if ([outcome isEqualToString:@"skipped"]) {
+            alert.informativeText = @"Fence saved the website or app to the bundle, but could not match that bundle to the active committed schedule. Existing rules remain active; this addition may not be blocked.";
+        } else {
+            alert.informativeText = @"Fence saved the website or app, but one or more daemon, hosts, firewall, app-monitor, or persistence checks failed. Existing rules remain active; this addition may not be blocked.";
+        }
+        [alert addButtonWithTitle:@"Retry"];
+        [alert addButtonWithTitle:@"OK"];
+
+        void (^completion)(NSModalResponse) = ^(NSModalResponse response) {
+            if (response == NSAlertFirstButtonReturn) {
+                BOOL retryStarted = operationToken.length > 0
+                    ? [[SCScheduleManager sharedManager] retryStrictifyUpdateForOperationToken:operationToken]
+                    : [[SCScheduleManager sharedManager] retryLastStrictifyUpdate];
+                if (!retryStarted) NSBeep();
+            }
+        };
+        if (self.window.attachedSheet == nil) {
+            [alert beginSheetModalForWindow:self.window completionHandler:completion];
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (self.window.attachedSheet == nil) {
+                    [alert beginSheetModalForWindow:self.window completionHandler:completion];
+                }
+            });
+        }
+    });
 }
 
 - (void)showWeekScheduleWindowRequested:(NSNotification*)note {
@@ -762,11 +835,18 @@ static BOOL const kUseCalendarUI = YES;
         [self removeCmdQMonitor];
 
         if (returnCode == NSAlertFirstButtonReturn) {
-            [manager commitToWeekWithOffset:weekOffset];
+            BOOL committed = [manager commitToWeekWithOffset:weekOffset];
             [self reloadData];
             // Restore focus after auth dialog closes
             [self.window makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];
+            if (!committed) {
+                NSAlert *failureAlert = [[NSAlert alloc] init];
+                failureAlert.messageText = @"Schedule Was Not Committed";
+                failureAlert.informativeText = @"Fence could not verify every scheduled job, so it did not record the schedule as committed and attempted to remove partial jobs. Your schedule remains editable; existing active blocks are unchanged.";
+                failureAlert.alertStyle = NSAlertStyleCritical;
+                [failureAlert runModal];
+            }
         }
     }];
 }
@@ -861,6 +941,7 @@ static BOOL const kUseCalendarUI = YES;
 
 - (void)performEmergencyUnlock {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    NSDate *startedAt = [NSDate date];
 
     // Get path to emergency.sh in the app bundle or project directory
     NSString *scriptPath = [[NSBundle mainBundle] pathForResource:@"emergency" ofType:@"sh"];
@@ -877,6 +958,9 @@ static BOOL const kUseCalendarUI = YES;
     }
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:scriptPath]) {
+        SCEmitEmergencyUnlockResult(@"script_error",
+                                    [manager emergencyUnlockCreditsRemaining],
+                                    NO, NO, NO, startedAt, @(ENOENT));
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Script Not Found";
         alert.informativeText = @"Could not find emergency.sh script.";
@@ -901,6 +985,11 @@ static BOOL const kUseCalendarUI = YES;
             return;
         }
 
+        SCEmitEmergencyUnlockResult(@"script_error",
+                                    [manager emergencyUnlockCreditsRemaining],
+                                    NO, NO, NO, startedAt,
+                                    [errorNumber isKindOfClass:[NSNumber class]] ? errorNumber : @(-1));
+
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Emergency Unlock Failed";
         alert.informativeText = [NSString stringWithFormat:@"Error: %@",
@@ -910,8 +999,32 @@ static BOOL const kUseCalendarUI = YES;
         return;
     }
 
-    // Success - use credit
-    [manager useEmergencyUnlockCredit];
+    // emergency.sh performs these checks while it still has administrator
+    // privileges. Treat its fixed-format token as the postcondition contract;
+    // arbitrary script output never enters telemetry.
+    NSString *verification = [result.stringValue isKindOfClass:[NSString class]]
+        ? result.stringValue : @"";
+    BOOL settingsCleared = [verification containsString:@"settings=1"];
+    BOOL hostsClean = [verification containsString:@"hosts=1"];
+    BOOL pfClean = [verification containsString:@"pf=1"];
+    if (!settingsCleared || !hostsClean || !pfClean) {
+        SCEmitEmergencyUnlockResult(@"verify_failed",
+                                    [manager emergencyUnlockCreditsRemaining],
+                                    settingsCleared, hostsClean, pfClean, startedAt, nil);
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Emergency Unlock Could Not Be Verified";
+        alert.informativeText = @"Fence did not consume an unlock credit because one or more blocking layers may still be active. Restart Fence and try again or contact support.";
+        alert.alertStyle = NSAlertStyleCritical;
+        [alert runModal];
+        return;
+    }
+
+    // Consume a credit only after the root-side teardown postconditions pass.
+    if (![manager useEmergencyUnlockCredit]) {
+        [SCSentry captureTelemetryEvent:@"emergency.failed"
+                                  level:SCTelemetryEventLevelError
+                                 fields:@{@"stage": @"credit", @"credits_remaining": @0, @"error_code": @1}];
+    }
 
     // Clear commitment from NSUserDefaults (script clears daemon state, we clear app state)
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -929,6 +1042,7 @@ static BOOL const kUseCalendarUI = YES;
 
     // Show success message
     NSInteger remaining = [manager emergencyUnlockCreditsRemaining];
+    SCEmitEmergencyUnlockResult(@"success", remaining, YES, YES, YES, startedAt, nil);
     NSAlert *successAlert = [[NSAlert alloc] init];
     successAlert.messageText = @"Emergency Unlock Complete";
     successAlert.informativeText = [NSString stringWithFormat:

@@ -26,6 +26,7 @@
 NSString* const kHostFileBlockerPath = @"/etc/hosts";
 NSString* const kHostFileBlockerSelfControlHeader = @"# BEGIN SELFCONTROL BLOCK";
 NSString* const kHostFileBlockerSelfControlFooter = @"# END SELFCONTROL BLOCK";
+NSErrorDomain const SCHostFileBlockerErrorDomain = @"SCHostFileBlockerErrorDomain";
 NSString* const kDefaultHostsFileContents = @"##\n"
 "# Host Database\n"
 "#\n"
@@ -79,20 +80,73 @@ NSString* const kDefaultHostsFileContents = @"##\n"
 }
 
 - (BOOL)writeNewFileContents {
+    return [self writeNewFileContentsWithError:NULL];
+}
+
+- (BOOL)writeNewFileContentsWithError:(NSError**)error {
 #ifdef DEBUG
     // Check debug override - if blocking is disabled, skip hosts file modification
     if ([SCDebugUtilities isDebugBlockingDisabled]) {
         NSLog(@"DEBUG: Skipping hosts file modification - debug override enabled");
+        if (error) *error = nil;
         return YES;
     }
 #endif
 
 	[strLock lock];
 
-	BOOL ret = [newFileContents writeToFile: hostFilePath atomically: YES encoding: stringEnc error: NULL];
+	NSError* writeError = nil;
+	BOOL ret = [newFileContents writeToFile: hostFilePath atomically: YES encoding: stringEnc error: &writeError];
 
 	[strLock unlock];
+
+    if (!ret && writeError == nil) {
+        writeError = [NSError errorWithDomain:SCHostFileBlockerErrorDomain
+                                         code:SCHostFileBlockerErrorUnknownWriteFailure
+                                     userInfo:nil];
+    }
+    if (error) *error = writeError;
 	return ret;
+}
+
+- (BOOL)verifyNewFileContentsWithError:(NSError**)error {
+#ifdef DEBUG
+    if ([SCDebugUtilities isDebugBlockingDisabled]) {
+        if (error) *error = nil;
+        return YES;
+    }
+#endif
+
+    [strLock lock];
+    NSString* expectedContents = [newFileContents copy];
+    [strLock unlock];
+
+    NSError* readError = nil;
+    NSStringEncoding diskEncoding = NSUTF8StringEncoding;
+    NSString* diskContents = [NSString stringWithContentsOfFile:hostFilePath
+                                                   usedEncoding:&diskEncoding
+                                                          error:&readError];
+    if (diskContents == nil) {
+        if (readError == nil) {
+            readError = [NSError errorWithDomain:SCHostFileBlockerErrorDomain
+                                            code:SCHostFileBlockerErrorFileNotReadable
+                                        userInfo:nil];
+        }
+        if (error) *error = readError;
+        return NO;
+    }
+
+    if (![diskContents isEqualToString:expectedContents]) {
+        if (error) {
+            *error = [NSError errorWithDomain:SCHostFileBlockerErrorDomain
+                                         code:SCHostFileBlockerErrorContentsMismatch
+                                     userInfo:nil];
+        }
+        return NO;
+    }
+
+    if (error) *error = nil;
+    return YES;
 }
 
 - (NSString*)backupHostFilePath {
@@ -100,17 +154,41 @@ NSString* const kDefaultHostsFileContents = @"##\n"
 }
 
 - (BOOL)createBackupHostsFile {
-	[self deleteBackupHostsFile];
+	return [self createBackupHostsFileWithError:NULL];
+}
+
+- (BOOL)createBackupHostsFileWithError:(NSError**)error {
+    NSString* backupPath = [self backupHostFilePath];
+    NSError* fileError = nil;
+
+    if ([fileMan fileExistsAtPath:backupPath] &&
+        ![fileMan removeItemAtPath:backupPath error:&fileError]) {
+        if (error) *error = fileError;
+        return NO;
+    }
 
 	if (![fileMan fileExistsAtPath: hostFilePath]) {
-		[kDefaultHostsFileContents writeToFile: hostFilePath atomically:true encoding: NSUTF8StringEncoding error: NULL];
+		if (![kDefaultHostsFileContents writeToFile:hostFilePath
+                                         atomically:YES
+                                           encoding:NSUTF8StringEncoding
+                                              error:&fileError]) {
+            if (error) *error = fileError;
+            return NO;
+        }
 	}
 
-	if(![fileMan isReadableFileAtPath: hostFilePath] || [fileMan fileExistsAtPath: [self backupHostFilePath]]) {
+	if(![fileMan isReadableFileAtPath: hostFilePath]) {
+		if (error) {
+            *error = [NSError errorWithDomain:SCHostFileBlockerErrorDomain
+                                         code:SCHostFileBlockerErrorFileNotReadable
+                                     userInfo:nil];
+        }
 		return NO;
 	}
 
-	return [fileMan copyItemAtPath: hostFilePath toPath: [self backupHostFilePath] error: nil];
+	BOOL copied = [fileMan copyItemAtPath:hostFilePath toPath:backupPath error:&fileError];
+    if (error) *error = fileError;
+    return copied;
 }
 
 - (BOOL)deleteBackupHostsFile {
@@ -162,9 +240,10 @@ NSString* const kDefaultHostsFileContents = @"##\n"
 	[strLock unlock];
 }
 
-- (void)appendExistingBlockWithRuleForDomain:(NSString*)domainName {
+- (BOOL)appendExistingBlockWithRuleForDomain:(NSString*)domainName {
     [strLock lock];
     NSRange footerLocation = [newFileContents rangeOfString: kHostFileBlockerSelfControlFooter];
+    BOOL appended = NO;
     if (footerLocation.location == NSNotFound) {
         // we can't append if a block isn't in the file already!
         NSLog(@"WARNING: can't append to host block because footer can't be found");
@@ -178,8 +257,10 @@ NSString* const kDefaultHostsFileContents = @"##\n"
         }
                 
         [newFileContents insertString: combinedRuleString atIndex: footerLocation.location];
+        appended = YES;
     }
     [strLock unlock];
+    return appended;
 }
 
 - (BOOL)containsSelfControlBlock {
@@ -189,6 +270,14 @@ NSString* const kDefaultHostsFileContents = @"##\n"
 
 	[strLock unlock];
 	return ret;
+}
+
+- (BOOL)containsCompleteSelfControlBlock {
+    [strLock lock];
+    BOOL containsHeader = [newFileContents rangeOfString:kHostFileBlockerSelfControlHeader].location != NSNotFound;
+    BOOL containsFooter = [newFileContents rangeOfString:kHostFileBlockerSelfControlFooter].location != NSNotFound;
+    [strLock unlock];
+    return containsHeader && containsFooter;
 }
 
 - (void)removeSelfControlBlock {

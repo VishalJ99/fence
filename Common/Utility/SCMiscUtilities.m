@@ -5,11 +5,188 @@
 //  Created by Charles Stigler on 07/07/2018.
 //
 
+#import "SCMiscUtilities.h"
 #import "SCHelperToolUtilities.h"
 #import "SCSettings.h"
 #import <CommonCrypto/CommonCrypto.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #include <IOKit/IOKitLib.h>
+#include <arpa/inet.h>
+
+static BOOL SCParsePositiveInteger(NSString* string, NSInteger maximum, NSInteger* valueOut) {
+    if (string.length == 0) return NO;
+
+    NSInteger value = 0;
+    for (NSUInteger i = 0; i < string.length; i++) {
+        unichar character = [string characterAtIndex:i];
+        if (character < '0' || character > '9') return NO;
+
+        NSInteger digit = character - '0';
+        if (value > (maximum - digit) / 10) return NO;
+        value = (value * 10) + digit;
+    }
+
+    if (value < 1 || value > maximum) return NO;
+    if (valueOut != NULL) *valueOut = value;
+    return YES;
+}
+
+static int SCIPAddressFamily(NSString* string) {
+    struct in_addr ipv4Address;
+    if (inet_pton(AF_INET, string.UTF8String, &ipv4Address) == 1) return AF_INET;
+
+    struct in6_addr ipv6Address;
+    if (inet_pton(AF_INET6, string.UTF8String, &ipv6Address) == 1) return AF_INET6;
+
+    return AF_UNSPEC;
+}
+
+static NSString* SCNormalizedHost(NSString* rawHost, int* addressFamilyOut) {
+    NSString* host = [rawHost lowercaseString];
+    if (host.length == 0) return nil;
+
+    // A single terminal dot is the valid fully-qualified form of a DNS name.
+    // More than one terminal dot is malformed and must not be normalized into
+    // a different, apparently valid hostname.
+    if ([host hasSuffix:@"."]) {
+        if ([host hasSuffix:@".."] || host.length == 1) return nil;
+        host = [host substringToIndex:host.length - 1];
+    }
+
+    int addressFamily = SCIPAddressFamily(host);
+    if (addressFamily != AF_UNSPEC) {
+        if (addressFamilyOut != NULL) *addressFamilyOut = addressFamily;
+        return host;
+    }
+
+    // Normalize internationalized hostnames to the ASCII form used by DNS,
+    // /etc/hosts, and PF. NSURL performs IDNA conversion without retaining any
+    // URL path/query/user data.
+    if (![host canBeConvertedToEncoding:NSASCIIStringEncoding]) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:
+            [@"https://" stringByAppendingString:host]];
+        NSString *asciiHost = components.URL.host.lowercaseString;
+        if (asciiHost.length == 0 || ![asciiHost canBeConvertedToEncoding:NSASCIIStringEncoding]) return nil;
+        host = asciiHost;
+    }
+
+    if (host.length > 253) return nil;
+
+    NSArray<NSString*>* labels = [host componentsSeparatedByString:@"."];
+    if (labels.count == 0) return nil;
+
+    BOOL containsOnlyDigitsAndDots = YES;
+    for (NSString* label in labels) {
+        if (label.length == 0 || label.length > 63 ||
+            [label hasPrefix:@"-"] || [label hasSuffix:@"-"]) {
+            return nil;
+        }
+
+        for (NSUInteger i = 0; i < label.length; i++) {
+            unichar character = [label characterAtIndex:i];
+            BOOL isASCIILetter = (character >= 'a' && character <= 'z');
+            BOOL isDigit = (character >= '0' && character <= '9');
+            // Underscores are not valid in ordinary host labels, but browsers
+            // and existing Fence lists can resolve them. Preserve support so an
+            // update never silently removes an already-enforced entry.
+            if (!isASCIILetter && !isDigit && character != '-' && character != '_') return nil;
+            if (!isDigit) containsOnlyDigitsAndDots = NO;
+        }
+    }
+
+    // A dotted numeric value is intended to be an IP address. Requiring it to
+    // pass inet_pton avoids treating values such as 999.999.999.999 as DNS.
+    if (labels.count > 1 && containsOnlyDigitsAndDots) return nil;
+
+    if (addressFamilyOut != NULL) *addressFamilyOut = AF_UNSPEC;
+    return host;
+}
+
+static BOOL SCParseNetworkAuthority(NSString* rawAuthority,
+                                    NSString** hostnameOut,
+                                    NSInteger* portOut,
+                                    int* addressFamilyOut) {
+    NSString* authority = rawAuthority;
+
+    // Keep compatibility with pasted URLs containing credentials, but never
+    // retain or emit the credentials themselves.
+    NSRange atRange = [authority rangeOfString:@"@" options:NSBackwardsSearch];
+    if (atRange.location != NSNotFound) {
+        authority = [authority substringFromIndex:NSMaxRange(atRange)];
+    }
+
+    if (authority.length == 0) return NO;
+
+    NSString* rawHost = nil;
+    NSInteger port = 0;
+    int addressFamily = AF_UNSPEC;
+
+    if ([authority hasPrefix:@"["]) {
+        NSRange closingBracket = [authority rangeOfString:@"]"];
+        if (closingBracket.location == NSNotFound || closingBracket.location < 2) return NO;
+
+        rawHost = [authority substringWithRange:NSMakeRange(1, closingBracket.location - 1)];
+        NSString* suffix = [authority substringFromIndex:NSMaxRange(closingBracket)];
+        if (suffix.length > 0) {
+            if (![suffix hasPrefix:@":"] ||
+                !SCParsePositiveInteger([suffix substringFromIndex:1], 65535, &port)) {
+                return NO;
+            }
+        }
+
+        rawHost = SCNormalizedHost(rawHost, &addressFamily);
+        if (rawHost == nil || addressFamily != AF_INET6) return NO;
+    } else {
+        // An unbracketed IPv6 address has colons but no port. Try it as a whole
+        // before interpreting a single colon as the host/port delimiter.
+        NSString* wholeHost = SCNormalizedHost(authority, &addressFamily);
+        if (wholeHost != nil && addressFamily == AF_INET6) {
+            rawHost = wholeHost;
+        } else {
+            NSArray<NSString*>* colonParts = [authority componentsSeparatedByString:@":"];
+            if (colonParts.count > 2) return NO;
+
+            if (colonParts.count == 2) {
+                rawHost = colonParts[0];
+                if (!SCParsePositiveInteger(colonParts[1], 65535, &port)) return NO;
+            } else {
+                rawHost = authority;
+            }
+
+            if (rawHost.length == 0 && port > 0) rawHost = @"*";
+            if ([rawHost isEqualToString:@"*"]) {
+                addressFamily = AF_UNSPEC;
+            } else {
+                rawHost = SCNormalizedHost(rawHost, &addressFamily);
+                if (rawHost == nil) return NO;
+            }
+        }
+    }
+
+    if ([rawHost isEqualToString:@"*"] && port == 0) return NO;
+
+    if (hostnameOut != NULL) *hostnameOut = rawHost;
+    if (portOut != NULL) *portOut = port;
+    if (addressFamilyOut != NULL) *addressFamilyOut = addressFamily;
+    return YES;
+}
+
+static BOOL SCValidAppBundleID(NSString* bundleID) {
+    if (bundleID.length == 0 || bundleID.length > 255) return NO;
+
+    NSArray<NSString*>* components = [bundleID componentsSeparatedByString:@"."];
+    for (NSString* component in components) {
+        if (component.length == 0) return NO;
+        for (NSUInteger i = 0; i < component.length; i++) {
+            unichar character = [component characterAtIndex:i];
+            BOOL isASCIILetter = ((character >= 'a' && character <= 'z') ||
+                                  (character >= 'A' && character <= 'Z'));
+            BOOL isDigit = (character >= '0' && character <= '9');
+            if (!isASCIILetter && !isDigit && character != '-') return NO;
+        }
+    }
+    return YES;
+}
 
 @implementation SCMiscUtilities
 
@@ -69,18 +246,109 @@
     return [appleCrashReporter boolForKey: @"ThirdPartyDataSubmit"];
 }
 
++ (NSString*)canonicalBlockEntryFromString:(NSString*)rawEntry {
+    if (rawEntry == nil) return nil;
+
+    NSString* trimmedEntry = [rawEntry stringByTrimmingCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmedEntry.length == 0 ||
+        [trimmedEntry rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location != NSNotFound) {
+        return nil;
+    }
+
+    if (trimmedEntry.length >= 4 &&
+        [[trimmedEntry substringToIndex:4] caseInsensitiveCompare:@"app:"] == NSOrderedSame) {
+        NSString* bundleID = [[trimmedEntry substringFromIndex:4]
+                              stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!SCValidAppBundleID(bundleID)) return nil;
+
+        // Bundle identifiers are compared with the running process's identifier,
+        // so preserve their case even though network entries are lowercased.
+        return [@"app:" stringByAppendingString:bundleID];
+    }
+
+    NSString* networkEntry = [trimmedEntry lowercaseString];
+    NSString* authority = nil;
+    NSInteger maskLength = 0;
+    NSInteger port = 0;
+    NSString* hostname = nil;
+    int addressFamily = AF_UNSPEC;
+
+    NSRange schemeSeparator = [networkEntry rangeOfString:@"://"];
+    if (schemeSeparator.location != NSNotFound) {
+        NSString* scheme = [networkEntry substringToIndex:schemeSeparator.location];
+        if (scheme.length == 0) return nil;
+
+        for (NSUInteger i = 0; i < scheme.length; i++) {
+            unichar character = [scheme characterAtIndex:i];
+            BOOL isLetter = (character >= 'a' && character <= 'z');
+            BOOL isDigit = (character >= '0' && character <= '9');
+            if ((!isLetter && (i == 0 || (!isDigit && character != '+' && character != '-' && character != '.')))) {
+                return nil;
+            }
+        }
+
+        NSString* remainder = [networkEntry substringFromIndex:NSMaxRange(schemeSeparator)];
+        NSRange delimiter = [remainder rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/?#"]];
+        authority = (delimiter.location == NSNotFound) ? remainder : [remainder substringToIndex:delimiter.location];
+        if (!SCParseNetworkAuthority(authority, &hostname, &port, &addressFamily)) return nil;
+    } else {
+        NSRange queryOrFragment = [networkEntry rangeOfCharacterFromSet:
+                                   [NSCharacterSet characterSetWithCharactersInString:@"?#"]];
+        NSString* withoutQuery = (queryOrFragment.location == NSNotFound)
+            ? networkEntry
+            : [networkEntry substringToIndex:queryOrFragment.location];
+
+        NSRange slash = [withoutQuery rangeOfString:@"/"];
+        authority = (slash.location == NSNotFound)
+            ? withoutQuery
+            : [withoutQuery substringToIndex:slash.location];
+
+        if (!SCParseNetworkAuthority(authority, &hostname, &port, &addressFamily)) return nil;
+
+        if (slash.location != NSNotFound && addressFamily != AF_UNSPEC) {
+            NSString* suffix = [withoutQuery substringFromIndex:NSMaxRange(slash)];
+            BOOL hasAnotherSlash = [suffix rangeOfString:@"/"].location != NSNotFound;
+            NSArray<NSString*>* maskAndPort = [suffix componentsSeparatedByString:@":"];
+
+            // A numeric suffix on an IP address is CIDR rather than a URL path.
+            // If it looks like CIDR, reject invalid masks/ports rather than
+            // silently dropping them.
+            BOOL looksLikeCIDR = suffix.length > 0 &&
+                [suffix characterAtIndex:0] >= '0' && [suffix characterAtIndex:0] <= '9' &&
+                !hasAnotherSlash && maskAndPort.count <= 2;
+            if (looksLikeCIDR) {
+                NSInteger maximumMask = (addressFamily == AF_INET) ? 32 : 128;
+                if (!SCParsePositiveInteger(maskAndPort[0], maximumMask, &maskLength)) return nil;
+
+                if (maskAndPort.count == 2) {
+                    NSInteger trailingPort = 0;
+                    if (port > 0 || !SCParsePositiveInteger(maskAndPort[1], 65535, &trailingPort)) return nil;
+                    port = trailingPort;
+                }
+            }
+        }
+    }
+
+    BOOL requiresIPv6Brackets = (addressFamily == AF_INET6 && port > 0);
+    NSString* canonicalHost = requiresIPv6Brackets
+        ? [NSString stringWithFormat:@"[%@]", hostname]
+        : hostname;
+    NSMutableString* canonicalEntry = [canonicalHost mutableCopy];
+    if (maskLength > 0) [canonicalEntry appendFormat:@"/%ld", (long)maskLength];
+    if (port > 0) [canonicalEntry appendFormat:@":%ld", (long)port];
+    return canonicalEntry;
+}
+
 // Standardize and clean up the input value so it'll block properly (and look good doing it)
 // note that if the user entered line breaks, we'll split it into many entries, so this can return multiple
 // cleaned entries in the NSArray it returns
 + (NSArray<NSString*>*) cleanBlocklistEntry:(NSString*)rawEntry {
     if (rawEntry == nil) return @[];
-    
-	// This'll remove whitespace and lowercase the string.
-	NSString* str = [[rawEntry stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
 
     // if there are newlines in the string, split it and process it as many strings
-	if([str rangeOfCharacterFromSet: [NSCharacterSet newlineCharacterSet]].location != NSNotFound) {
-		NSArray* splitEntries = [str componentsSeparatedByCharactersInSet: [NSCharacterSet newlineCharacterSet]];
+	if([rawEntry rangeOfCharacterFromSet: [NSCharacterSet newlineCharacterSet]].location != NSNotFound) {
+		NSArray* splitEntries = [rawEntry componentsSeparatedByCharactersInSet: [NSCharacterSet newlineCharacterSet]];
         
         NSMutableArray* returnArr = [NSMutableArray new];
         for (NSString* splitEntry in splitEntries) {
@@ -90,101 +358,22 @@
         }
         return returnArr;
     }
-    
-    // if the user entered a scheme (https://, http://, etc) remove it.
-    // We only block hostnames so scheme is ignored anyway and it can gunk up the blocking
-    NSArray* separatedStr = [str componentsSeparatedByString: @"://"];
-    str = [separatedStr lastObject];
-    
-	// Remove URL login names/passwords (username:password@host) if a user tried to put that in
-	separatedStr = [str componentsSeparatedByString: @"@"];
-	str = [separatedStr lastObject];
-    
-    // now here's where it gets tricky. Besides just hostnames, we also support CIDR IP ranges, for example: 83.0.1.2/24
-    // so we are gonna keep track of whether we might have received a valid CIDR IP range instead of hostname as we go...
-    // we also take port numbers, so keep track of whether we have one of those
-	int cidrMaskBits = -1;
-	int portNum = -1;
 
-    // first pull off everything after a slash
-    // discard the end if it's just a path, but check to see if it might be our CIDR mask length
-	separatedStr = [str componentsSeparatedByString: @"/"];
-    str = [separatedStr firstObject];
-    
-    // if the part after a slash is an integer between 1 and 128, it could be our mask length
-    if (separatedStr.count > 1) {
-        int potentialMaskLen = [[separatedStr lastObject] intValue];
-        if (potentialMaskLen > 0 && potentialMaskLen <= 128) cidrMaskBits = potentialMaskLen;
-    }
-
-    // check for the port
-    separatedStr = [str componentsSeparatedByString: @":"];
-    str = [separatedStr firstObject];
-    
-    if (separatedStr.count > 1) {
-        int potentialPort = [[separatedStr lastObject] intValue];
-        if (potentialPort > 0 && potentialPort <= 65535) {
-            portNum = potentialPort;
-        }
-    }
-    
-    // remove invalid characters from the hostname
-    // hostnames are 1-253 characters long, and can contain only a-z, A-Z, 0-9, -, and ., and maybe _ (mostly not but kinda)
-    // for some reason [NSCharacterSet URLHostAllowedCharacterSet] has tons of other characters that aren't actually valid
-    NSMutableCharacterSet* invalidHostnameChars = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
-    [invalidHostnameChars addCharactersInString: @"-._"];
-    [invalidHostnameChars invert];
-
-    NSMutableString* validCharsOnly = [NSMutableString stringWithCapacity: str.length];
-    for (NSUInteger i = 0; i < str.length && i < 253; i++) {
-        unichar c = [str characterAtIndex: i];
-        if (![invalidHostnameChars characterIsMember: c]) {
-            [validCharsOnly appendFormat: @"%C", c];
-        }
-    }
-    str = validCharsOnly;
-    
-    // allow blocking an empty hostname IFF we're only blocking a single port number (i.e. :80)
-    // otherwise, empty hostname = nothing to do
-    if (str.length < 1 && portNum < 0) {
-        return @[];
-    }
-
-    NSString* maskString;
-    NSString* portString;
-
-    // create a mask string if we have one
-    if (cidrMaskBits < 0) {
-        maskString = @"";
-    } else {
-        maskString = [NSString stringWithFormat: @"/%d", cidrMaskBits];
-    }
-    
-    // create a port string if we have one
-    if (portNum < 0) {
-        portString = @"";
-    } else {
-        portString = [NSString stringWithFormat: @":%d", portNum];
-    }
-
-    // combine em together and you got something!
-    return @[[NSString stringWithFormat: @"%@%@%@", str, maskString, portString]];
+    NSString* canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+    return canonicalEntry == nil ? @[] : @[canonicalEntry];
 }
 
 + (NSArray<NSString*>*)cleanBlocklist:(NSArray<NSString*>*)blocklist {
-    NSMutableArray<NSString*>* cleanedList = [NSMutableArray arrayWithCapacity: blocklist.count];
+    NSMutableOrderedSet<NSString*>* cleanedList = [NSMutableOrderedSet orderedSet];
 
-    // for now, we just remove whitespace and then remove empty entries
-    // in the future, this method could do more thorough cleaning
-    for (NSString* blockString in blocklist) {
-        NSString* cleanedString = [blockString stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-        if (cleanedString.length > 0) {
-            [cleanedList addObject: cleanedString];
+    for (id blockString in blocklist ?: @[]) {
+        if (![blockString isKindOfClass:[NSString class]]) continue;
+        for (NSString *canonicalEntry in [SCMiscUtilities cleanBlocklistEntry:blockString]) {
+            [cleanedList addObject:canonicalEntry];
         }
     }
 
-    return cleanedList;
+    return cleanedList.array;
 }
 
 + (NSDictionary*) defaultsDictForUser:(uid_t) controllingUID {

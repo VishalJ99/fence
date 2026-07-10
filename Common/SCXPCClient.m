@@ -12,6 +12,20 @@
 #import "SCXPCAuthorization.h"
 #import "SCErr.h"
 
+static NSString * const SCXPCDaemonCompatibilityErrorDomain = @"org.eyebeam.Fence.DaemonCompatibility.Handshake";
+
+typedef NS_ENUM(NSInteger, SCXPCDaemonCompatibilityErrorCode) {
+    SCXPCDaemonCompatibilityErrorConnection = 1,
+    SCXPCDaemonCompatibilityErrorHandshake = 2,
+    SCXPCDaemonCompatibilityErrorTimeout = 3,
+};
+
+static const NSTimeInterval SCXPCDaemonCompatibilityTimeout = 5.0;
+
+static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
+    return MIN(MAX(errorCode, -1000000000), 1000000000);
+}
+
 @interface SCXPCClient () {
     AuthorizationRef    _authRef;
 }
@@ -20,9 +34,156 @@
 @property (atomic, copy, readwrite) NSData* authorization;
 @property (atomic, assign, readwrite) BOOL connectionIsValid;
 
++ (BOOL)isAuthorizationFailureError:(NSError*)error;
++ (nullable NSDictionary<NSString *, id>*)authorizationRejectionTelemetryFieldsForCommand:(NSString*)command
+                                                                                       error:(NSError*)error;
++ (BOOL)shouldRecordAuthorizationRejectionForCommand:(NSString*)command
+                                                error:(NSError*)error
+                                     recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
++ (BOOL)recordAuthorizationRejectionForCommand:(NSString*)command error:(NSError*)error;
+
 @end
 
 @implementation SCXPCClient
+
++ (BOOL)isAuthorizationFailureError:(NSError*)error {
+    return [error isKindOfClass:[NSError class]] &&
+           [error.domain isEqualToString:NSOSStatusErrorDomain];
+}
+
++ (nullable NSDictionary<NSString *, id>*)authorizationRejectionTelemetryFieldsForCommand:(NSString*)command
+                                                                                       error:(NSError*)error {
+    static NSSet<NSString*> *allowedCommands;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allowedCommands = [NSSet setWithArray:@[
+            @"start", @"update", @"register_schedule", @"unregister_schedule",
+            @"clear_schedules", @"install", @"repair"
+        ]];
+    });
+
+    if (![allowedCommands containsObject:command] || ![self isAuthorizationFailureError:error] ||
+        [SCMiscUtilities errorIsAuthCanceled:error]) {
+        return nil;
+    }
+    return [SCSentry sanitizedTelemetryFields:@{
+        @"command": command,
+        @"user_cancelled": @NO,
+        @"error_code": @(SCXPCSafeTelemetryErrorCode(error.code)),
+    } forEventName:@"xpc.auth_rejected"];
+}
+
++ (BOOL)shouldRecordAuthorizationRejectionForCommand:(NSString*)command
+                                                error:(NSError*)error
+                                     recordedCommands:(NSMutableSet<NSString*>*)recordedCommands {
+    if (![recordedCommands isKindOfClass:[NSMutableSet class]] ||
+        [self authorizationRejectionTelemetryFieldsForCommand:command error:error] == nil) {
+        return NO;
+    }
+    @synchronized (recordedCommands) {
+        if ([recordedCommands containsObject:command]) return NO;
+        [recordedCommands addObject:command];
+        return YES;
+    }
+}
+
++ (BOOL)recordAuthorizationRejectionForCommand:(NSString*)command error:(NSError*)error {
+    // Return YES for cancellation too so callers do not fall back to a noisy
+    // generic error event. A user dismissing an authorization prompt is not an
+    // incident; only non-cancelled Authorization Services failures are emitted.
+    if (![self isAuthorizationFailureError:error]) return NO;
+    if ([SCMiscUtilities errorIsAuthCanceled:error]) return YES;
+    if (![SCSentry errorReportingEnabled]) return YES;
+
+    static NSMutableSet<NSString*> *recordedCommands;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ recordedCommands = [NSMutableSet set]; });
+    if (![self shouldRecordAuthorizationRejectionForCommand:command
+                                                      error:error
+                                           recordedCommands:recordedCommands]) {
+        return YES;
+    }
+
+    NSDictionary *fields = [self authorizationRejectionTelemetryFieldsForCommand:command error:error];
+    NSString *eventID = fields == nil ? nil : [SCSentry captureTelemetryEvent:@"xpc.auth_rejected"
+                                                                         level:SCTelemetryEventLevelError
+                                                                        fields:fields];
+    if (eventID == nil) {
+        // No consent/DSN means no historical report. Let a later real failure
+        // in this process try again if telemetry becomes available.
+        @synchronized (recordedCommands) {
+            [recordedCommands removeObject:command];
+        }
+    }
+    return YES;
+}
+
++ (NSString*)daemonHandshakeFailureKindForError:(NSError*)error {
+    if (![error.domain isEqualToString:SCXPCDaemonCompatibilityErrorDomain]) return @"unknown";
+    switch (error.code) {
+        case SCXPCDaemonCompatibilityErrorConnection: return @"connection";
+        case SCXPCDaemonCompatibilityErrorHandshake: return @"handshake";
+        case SCXPCDaemonCompatibilityErrorTimeout: return @"timeout";
+        default: return @"unknown";
+    }
+}
+
++ (nullable NSDictionary<NSString *, id>*)daemonUnreachableReinstallTelemetryFieldsForOutcome:(NSString*)outcome
+                                                                          initialHandshakeError:(NSError*)initialHandshakeError
+                                                                                     finalError:(nullable NSError*)finalError
+                                                                  installedHelperPresentBefore:(BOOL)installedHelperPresentBefore
+                                                                   installedHelperPresentAfter:(BOOL)installedHelperPresentAfter
+                                                                          bundledHelperPresent:(BOOL)bundledHelperPresent
+                                                                            reinstallSucceeded:(BOOL)reinstallSucceeded
+                                                                             reconnectAttempted:(BOOL)reconnectAttempted
+                                                                  postRepairHandshakeSucceeded:(BOOL)postRepairHandshakeSucceeded
+                                                                          postRepairCompatible:(BOOL)postRepairCompatible {
+    if (![initialHandshakeError isKindOfClass:[NSError class]]) return nil;
+
+    BOOL stateIsConsistent =
+        ([outcome isEqualToString:@"install_failed"] && !reinstallSucceeded && !reconnectAttempted &&
+         !postRepairHandshakeSucceeded && !postRepairCompatible && finalError != nil) ||
+        ([outcome isEqualToString:@"recovered"] && reinstallSucceeded && reconnectAttempted &&
+         postRepairHandshakeSucceeded && postRepairCompatible && finalError == nil) ||
+        ([outcome isEqualToString:@"post_repair_unreachable"] && reinstallSucceeded && reconnectAttempted &&
+         !postRepairHandshakeSucceeded && !postRepairCompatible && finalError != nil) ||
+        ([outcome isEqualToString:@"post_repair_incompatible"] && reinstallSucceeded && reconnectAttempted &&
+         postRepairHandshakeSucceeded && !postRepairCompatible && finalError == nil);
+    if (!stateIsConsistent) return nil;
+
+    NSString *finalFailure = @"none";
+    if ([outcome isEqualToString:@"post_repair_incompatible"]) {
+        finalFailure = @"incompatible";
+    } else if (finalError != nil) {
+        if ([finalError.domain isEqualToString:SCXPCDaemonCompatibilityErrorDomain]) {
+            finalFailure = [self daemonHandshakeFailureKindForError:finalError];
+        } else if ([self isAuthorizationFailureError:finalError] ||
+                   ([finalError.domain isEqualToString:kSelfControlErrorDomain] && finalError.code == 501)) {
+            finalFailure = @"authorization";
+        } else if ([outcome isEqualToString:@"install_failed"]) {
+            finalFailure = @"install";
+        } else {
+            finalFailure = @"unknown";
+        }
+    }
+
+    NSDictionary *fields = @{
+        @"outcome": outcome,
+        @"initial_failure": [self daemonHandshakeFailureKindForError:initialHandshakeError],
+        @"final_failure": finalFailure,
+        @"installed_helper_present_before": @(installedHelperPresentBefore),
+        @"installed_helper_present_after": @(installedHelperPresentAfter),
+        @"bundled_helper_present": @(bundledHelperPresent),
+        @"reinstall_attempted": @YES,
+        @"reinstall_succeeded": @(reinstallSucceeded),
+        @"reconnect_attempted": @(reconnectAttempted),
+        @"post_repair_handshake_succeeded": @(postRepairHandshakeSucceeded),
+        @"post_repair_compatible": @(postRepairCompatible),
+        @"initial_error_code": @(SCXPCSafeTelemetryErrorCode(initialHandshakeError.code)),
+        @"final_error_code": @(SCXPCSafeTelemetryErrorCode(finalError.code)),
+    };
+    return [SCSentry sanitizedTelemetryFields:fields forEventName:@"daemon.unreachable_reinstall"];
+}
 
 - (void)setupAuthorization {
     // this is mostly copied from Apple's Even Better Authorization Sample
@@ -43,7 +204,7 @@
     if (errCode) {
         NSError* err = [NSError errorWithDomain: NSOSStatusErrorDomain code: errCode userInfo: nil];
         NSLog(@"Failed to set up initial authorization with error %@", err);
-        [SCSentry captureError: err];
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:err];
     } else {
         [self updateStoredAuthorization: authRef];
     }
@@ -61,7 +222,7 @@
     if (errCode) {
         NSError* err = [NSError errorWithDomain: NSOSStatusErrorDomain code: errCode userInfo: nil];
         NSLog(@"Failed to update stored authorization with error %@", err);
-        [SCSentry captureError: err];
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:err];
     } else {
         self.authorization = [[NSData alloc] initWithBytes: &extForm length: sizeof(extForm)];
     }
@@ -181,6 +342,8 @@
                                        );
 
     if(status) {
+        NSError *authorizationError = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"install" error:authorizationError];
         // if it's just the user cancelling, make that obvious
         // to any listeners so they can ignore it appropriately
         if (status == AUTH_CANCELLED_STATUS) {
@@ -189,8 +352,6 @@
             NSLog(@"ERROR: Failed to authorize installing selfcontrold with status %d.", status);
 
             NSError* err = [SCErr errorWithCode: 501];
-            [SCSentry captureError: err];
-            
             callback(err);
         }
 
@@ -222,12 +383,15 @@
         
         NSLog(@"WARNING: Authorized installation of selfcontrold returned failure status code %d and error %@", (int)status, error);
 
-        NSError* err = [SCErr errorWithCode: 500 subDescription: error.localizedDescription];
-        if (![SCMiscUtilities errorIsAuthCanceled: error]) {
-            [SCSentry captureError: err];
+        BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"install" error:error];
+        if ([SCMiscUtilities errorIsAuthCanceled:error]) {
+            callback([SCErr errorWithCode:1]);
+        } else {
+            NSInteger wrappedCode = authorizationFailure ? 501 : 500;
+            NSError* err = [SCErr errorWithCode:wrappedCode subDescription:error.localizedDescription];
+            if (!authorizationFailure) [SCSentry captureError:err];
+            callback(err);
         }
-
-        callback(err);
         return;
     } else {
         NSLog(@"Daemon installed successfully!");
@@ -242,8 +406,10 @@
 - (BOOL)refreshAuthorizationRightsAllowingInteraction:(BOOL)allowInteraction error:(NSError **)error {
     [self setupAuthorization];
     if (self->_authRef == NULL) {
+        NSError *authorizationError = [NSError errorWithDomain:NSOSStatusErrorDomain code:paramErr userInfo:nil];
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:authorizationError];
         if (error) {
-            *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:paramErr userInfo:nil];
+            *error = authorizationError;
         }
         return NO;
     }
@@ -268,14 +434,22 @@
         );
 
         if (status != errAuthorizationSuccess) {
+            NSError *authorizationError = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+            [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:authorizationError];
             if (error) {
-                *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+                *error = authorizationError;
             }
             return NO;
         }
     }
 
-    return [SCXPCAuthorization refreshAuthorizationRights:self->_authRef error:error];
+    NSError *refreshError = nil;
+    BOOL refreshed = [SCXPCAuthorization refreshAuthorizationRights:self->_authRef error:&refreshError];
+    if (!refreshed) {
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:refreshError];
+        if (error) *error = refreshError;
+    }
+    return refreshed;
 }
 
 - (BOOL)connectionIsActive {
@@ -325,6 +499,202 @@
     }];
 }
 
+- (void)getCompatibilityInfo:(void(^)(NSInteger protocolVersion,
+                                      NSString* buildVersion,
+                                      NSString* marketingVersion,
+                                      NSArray<NSString*>* capabilities,
+                                      NSError* error))reply {
+    NSLock *completionLock = [NSLock new];
+    __block BOOL completed = NO;
+    BOOL (^finishOnce)(NSInteger, NSString*, NSString*, NSArray<NSString*>*, NSError*) =
+    ^BOOL(NSInteger protocolVersion,
+      NSString *buildVersion,
+      NSString *marketingVersion,
+      NSArray<NSString*> *capabilities,
+      NSError *error) {
+        [completionLock lock];
+        BOOL shouldReply = !completed;
+        completed = YES;
+        [completionLock unlock];
+
+        if (shouldReply) {
+            reply(protocolVersion, buildVersion, marketingVersion, capabilities, error);
+        }
+        return shouldReply;
+    };
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(SCXPCDaemonCompatibilityTimeout * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *safeError = [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                                                 code:SCXPCDaemonCompatibilityErrorTimeout
+                                             userInfo:@{NSLocalizedDescriptionKey: @"The daemon compatibility handshake timed out"}];
+        if (finishOnce(SCDaemonProtocolVersionLegacy, nil, nil, nil, safeError)) {
+            NSLog(@"Daemon compatibility handshake timed out");
+        }
+    });
+
+    [self connectAndExecuteCommandBlock:^(NSError * connectError) {
+        if (connectError != nil) {
+            NSLog(@"Failed to get daemon compatibility info with connection error: %@", connectError);
+            NSError *safeError = [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                                                     code:SCXPCDaemonCompatibilityErrorConnection
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"Could not connect for the daemon compatibility handshake"}];
+            finishOnce(SCDaemonProtocolVersionLegacy, nil, nil, nil, safeError);
+            return;
+        }
+
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError * proxyError) {
+            // Keep the potentially verbose NSXPC error local. The returned
+            // error contains no selector arguments, paths, or user data.
+            NSLog(@"Failed to get daemon compatibility info with remote object proxy error: %@", proxyError);
+            NSError *safeError = [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                                                     code:SCXPCDaemonCompatibilityErrorHandshake
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"The daemon compatibility handshake is unavailable"}];
+            finishOnce(SCDaemonProtocolVersionLegacy, nil, nil, nil, safeError);
+        }] getCompatibilityInfoWithReply:^(NSInteger protocolVersion,
+                                           NSString *buildVersion,
+                                           NSString *marketingVersion,
+                                           NSArray<NSString *> *capabilities) {
+            finishOnce(protocolVersion, buildVersion, marketingVersion, capabilities, nil);
+        }];
+    }];
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>*)capabilities
+compatibleWithCurrentAppWithReason:(NSString**)reason {
+    if (protocolVersion < SCDaemonProtocolVersionCurrent) {
+        if (reason != NULL) {
+            *reason = @"protocol-too-old";
+        }
+        return NO;
+    }
+
+    if (![capabilities isKindOfClass:[NSArray class]]) {
+        if (reason != NULL) {
+            *reason = @"capabilities-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityActiveBlocklistAppend]) {
+        if (reason != NULL) {
+            *reason = @"active-append-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityApprovedSchedulesAppend]) {
+        if (reason != NULL) {
+            *reason = @"approved-append-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityTelemetrySpool]) {
+        if (reason != NULL) {
+            // Keep the public diagnostic reason coarse. The exact required
+            // capability is static in this binary and checked above.
+            *reason = @"capabilities-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityStrictApplyResults]) {
+        if (reason != NULL) {
+            *reason = @"capabilities-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityScheduleOwnerBounds]) {
+        if (reason != NULL) {
+            *reason = @"capabilities-missing";
+        }
+        return NO;
+    }
+
+    if (![capabilities containsObject:SCDaemonCapabilityConsistencyProjection]) {
+        if (reason != NULL) {
+            *reason = @"consistency-projection-missing";
+        }
+        return NO;
+    }
+
+    if (reason != NULL) {
+        *reason = @"compatible";
+    }
+    return YES;
+}
+
+- (void)setTelemetryConsentEnabled:(BOOL)enabled
+                        generation:(NSUInteger)generation
+                             reply:(void(^)(NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(proxyError);
+        }] setTelemetryConsentEnabled:enabled generation:generation reply:reply];
+    }];
+}
+
+- (void)fetchTelemetryRecordsWithLimit:(NSUInteger)limit
+                                  reply:(void(^)(NSArray<NSDictionary<NSString *,id> *> *records,
+                                                 NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(@[], connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@[], proxyError);
+        }] fetchTelemetryRecordsWithLimit:MIN(limit, 25) reply:reply];
+    }];
+}
+
+- (void)acknowledgeTelemetryRecordIDs:(NSArray<NSString *> *)recordIDs
+                                 reply:(void(^)(NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(proxyError);
+        }] acknowledgeTelemetryRecordIDs:recordIDs reply:reply];
+    }];
+}
+
+- (void)getSanitizedDaemonSnapshot:(void(^)(NSDictionary<NSString *,id> *snapshot,
+                                             NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(@{}, connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] getSanitizedDaemonSnapshotWithReply:reply];
+    }];
+}
+
+- (void)getSanitizedDaemonSnapshotForExpectedState:(NSDictionary<NSString *,id> *)expectedState
+                                              reply:(void(^)(NSDictionary<NSString *,id> *snapshot,
+                                                             NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(@{}, connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] getSanitizedDaemonSnapshotForExpectedState:expectedState reply:reply];
+    }];
+}
+
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings reply:(void(^)(NSError* error))reply {
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
@@ -337,7 +707,8 @@
                 [SCSentry captureError: proxyError];
                 reply(proxyError);
             }] startBlockWithControllingUID: controllingUID blocklist: blocklist isAllowlist:isAllowlist endDate:endDate blockSettings: blockSettings authorization: self.authorization reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"start" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Start block failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -359,7 +730,8 @@
                 [SCSentry captureError: proxyError];
                 reply(proxyError);
             }] updateBlocklist: newBlocklist authorization: self.authorization reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"update" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Blocklist update failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -395,6 +767,23 @@
     }];
 }
 
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                            resultReply:(void(^)(NSDictionary<NSString *,id> *result,
+                                                 NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(@{}, connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] appendEntriesToActiveBlocklist:entries
+                matchingExistingBlocklist:existingBlocklist
+                               resultReply:reply];
+    }];
+}
+
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply {
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
@@ -407,7 +796,8 @@
                 [SCSentry captureError: proxyError];
                 reply(proxyError);
             }] updateBlockEndDate: newEndDate authorization: self.authorization reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"update" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Block end date update failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -424,6 +814,8 @@
                    isAllowlist:(BOOL)isAllowlist
                  blockSettings:(NSDictionary*)blockSettings
              controllingUID:(uid_t)controllingUID
+                   startDate:(NSDate*)startDate
+                     endDate:(NSDate*)endDate
                          reply:(void(^)(NSError* error))reply {
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
@@ -440,9 +832,12 @@
                           isAllowlist: isAllowlist
                         blockSettings: blockSettings
                         controllingUID: controllingUID
-                        authorization: self.authorization
+                              startDate: startDate
+                                endDate: endDate
+                                authorization: self.authorization
                                 reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"register_schedule" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Register schedule failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -454,6 +849,16 @@
 
 - (void)startScheduledBlockWithID:(NSString*)scheduleId
                           endDate:(NSDate*)endDate
+                            reply:(void(^)(NSError* error))reply {
+    [self startScheduledBlockWithID:scheduleId
+                            endDate:endDate
+                      executionPath:@"xpc_direct"
+                              reply:reply];
+}
+
+- (void)startScheduledBlockWithID:(NSString*)scheduleId
+                          endDate:(NSDate*)endDate
+                    executionPath:(NSString*)executionPath
                             reply:(void(^)(NSError* error))reply {
     // Note: This method does NOT require authorization - the schedule was pre-approved
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
@@ -468,6 +873,7 @@
                 reply(proxyError);
             }] startScheduledBlockWithID: scheduleId
                                  endDate: endDate
+                           executionPath:executionPath
                                    reply:^(NSError* error) {
                 if (error != nil) {
                     NSLog(@"Start scheduled block failed with error = %@\n", error);
@@ -494,7 +900,8 @@
             }] unregisterScheduleWithID: scheduleId
                           authorization: self.authorization
                                   reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"unregister_schedule" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Unregister schedule failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -517,7 +924,8 @@
                 reply(proxyError);
             }] clearAllApprovedSchedulesWithAuthorization: self.authorization
                                                     reply:^(NSError* error) {
-                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled: error]) {
+                BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"clear_schedules" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
                     NSLog(@"Clear all approved schedules failed with error = %@\n", error);
                     [SCSentry captureError: error];
                 }
@@ -550,6 +958,23 @@
                 reply(error);
             }];
         }
+    }];
+}
+
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                  entries:(NSArray<NSString*>*)entries
+                              resultReply:(void(^)(NSDictionary<NSString *,id> *result,
+                                                   NSError *error))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+        if (connectError != nil) {
+            reply(@{}, connectError);
+            return;
+        }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] appendEntriesToApprovedSchedules:expectedBlocklistsByScheduleID
+                                       entries:entries
+                                   resultReply:reply];
     }];
 }
 

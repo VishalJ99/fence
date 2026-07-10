@@ -29,6 +29,7 @@
 #import "SCSettings.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import "SCXPCClient.h"
+#import "SCDaemonProtocol.h"
 #import "SCBlockFileReaderWriter.h"
 #import "SCUIUtilities.h"
 #import "Common/Utility/SCBlockUtilities.h"
@@ -51,7 +52,58 @@ static NSString * const kRepairMigrationPER352CreditsAppliedKey = @"SCRepairMigr
 static NSString * const kRepairMigrationPER352AuthRefreshBuildKey = @"SCRepairMigrationPER352AuthRefreshBuild";
 static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
 static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnlockCreditsInitialized";
+static NSString * const kDaemonCompatibilityErrorDomain = @"org.eyebeam.Fence.DaemonCompatibility";
+static NSString * const kInstalledDaemonPath = @"/Library/PrivilegedHelperTools/org.eyebeam.selfcontrold";
+static NSString * const kBundledDaemonRelativePath = @"Contents/Library/LaunchServices/org.eyebeam.selfcontrold";
+static NSString * const kTelemetryConsistencyLastSignatureKey = @"SCTelemetryConsistencyLastSignature";
+static NSString * const kTelemetryConsistencyLastEmissionDateKey = @"SCTelemetryConsistencyLastEmissionDate";
 static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
+static const NSTimeInterval kTelemetryConsistencySuppressionInterval = 7.0 * 24.0 * 60.0 * 60.0;
+
+typedef NS_ENUM(NSInteger, SCDaemonCompatibilityFailureCode) {
+    SCDaemonCompatibilityFailureUnknown = 1,
+    SCDaemonCompatibilityFailureHandshakeUnavailable = 2,
+    SCDaemonCompatibilityFailureProtocolTooOld = 3,
+    SCDaemonCompatibilityFailureCapabilitiesMissing = 4,
+    SCDaemonCompatibilityFailureActiveAppendMissing = 5,
+    SCDaemonCompatibilityFailureApprovedAppendMissing = 6,
+    SCDaemonCompatibilityFailureConsistencyProjectionMissing = 7,
+};
+
+static SCDaemonCompatibilityFailureCode SCDaemonCompatibilityFailureCodeForReason(NSString *reason) {
+    if ([reason isEqualToString:@"handshake-unavailable"]) {
+        return SCDaemonCompatibilityFailureHandshakeUnavailable;
+    }
+    if ([reason isEqualToString:@"protocol-too-old"]) {
+        return SCDaemonCompatibilityFailureProtocolTooOld;
+    }
+    if ([reason isEqualToString:@"capabilities-missing"]) {
+        return SCDaemonCompatibilityFailureCapabilitiesMissing;
+    }
+    if ([reason isEqualToString:@"active-append-missing"]) {
+        return SCDaemonCompatibilityFailureActiveAppendMissing;
+    }
+    if ([reason isEqualToString:@"approved-append-missing"]) {
+        return SCDaemonCompatibilityFailureApprovedAppendMissing;
+    }
+    if ([reason isEqualToString:@"consistency-projection-missing"]) {
+        return SCDaemonCompatibilityFailureConsistencyProjectionMissing;
+    }
+    return SCDaemonCompatibilityFailureUnknown;
+}
+
+static NSString *SCDaemonCompatibilityTelemetryReason(NSString *reason) {
+    if ([reason isEqualToString:@"handshake-unavailable"]) return @"handshake_unavailable";
+    if ([reason isEqualToString:@"protocol-too-old"]) return @"protocol_too_old";
+    if ([reason isEqualToString:@"active-append-missing"]) return @"active_append_missing";
+    if ([reason isEqualToString:@"approved-append-missing"]) return @"approved_append_missing";
+    if ([reason isEqualToString:@"consistency-projection-missing"]) return @"consistency_projection_missing";
+    return @"capabilities_missing";
+}
+
+static BOOL SCFileExistsAtPath(NSString *path) {
+    return path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:path];
+}
 
 @interface AppController () {}
 
@@ -61,10 +113,34 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
 @property (nonatomic, strong, nullable) SCTestBlockWindowController* testBlockWindowController;
 @property (nonatomic, strong, readwrite) SPUStandardUpdaterController* updaterController;
 
+- (void)checkDaemonCompatibilityAllowingRepair:(BOOL)allowRepair;
+- (void)reinstallDaemon;
+- (void)emitDaemonUnreachableRepairOutcome:(NSString*)outcome
+                                finalError:(nullable NSError*)finalError
+                        reinstallSucceeded:(BOOL)reinstallSucceeded
+                         reconnectAttempted:(BOOL)reconnectAttempted
+              postRepairHandshakeSucceeded:(BOOL)postRepairHandshakeSucceeded
+                      postRepairCompatible:(BOOL)postRepairCompatible;
+- (void)runTelemetryConsistencyCheckWithDaemonProtocol:(NSInteger)protocolVersion;
+- (void)captureStartupDivergenceFields:(NSDictionary<NSString *, id> *)fields;
+- (void)synchronizeTelemetryConsentAndDrain;
+- (void)drainTelemetrySpoolWithRemainingBatches:(NSUInteger)remainingBatches;
+
 @end
 
 @implementation AppController {
     BOOL appDidFinishLaunching_;
+    BOOL daemonCompatibilityRepairAttempted_;
+    BOOL daemonCompatibilityRepairInFlight_;
+    BOOL telemetryStartupCheckCompleted_;
+    BOOL telemetryStartupCheckInFlight_;
+    NSUInteger telemetryStartupCheckAttempts_;
+    NSInteger lastCompatibleDaemonProtocol_;
+    BOOL telemetryDrainInFlight_;
+    NSError *daemonUnreachableInitialError_;
+    BOOL daemonUnreachableInstalledHelperPresentBefore_;
+    BOOL daemonUnreachableBundledHelperPresent_;
+    BOOL daemonUnreachableTelemetryEmitted_;
 }
 
 @synthesize addingBlock;
@@ -111,9 +187,6 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
             NSLog(@"AppController: Refreshed Fence authorization rights for build %@", currentBuild);
         } else {
             NSLog(@"AppController: Failed to refresh Fence authorization rights: %@", authRepairError);
-            if (authRepairError) {
-                [SCSentry captureError:authRepairError];
-            }
         }
     }
 }
@@ -481,6 +554,21 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
     [SCSentry startSentry: @"org.eyebeam.SelfControl"];
     [SCLogger ensureDirectoriesExist];
 
+    // Fence's rebrand changed the application bundle identifier and therefore
+    // its NSUserDefaults domain. Restore an orphaned calendar only when the new
+    // domain has no schedule state of its own; never overwrite a Fence calendar.
+    BOOL restoredLegacyFenceSchedule = [SCMigrationUtilities migrateLegacyFenceScheduleDefaultsIfNeeded];
+    if (restoredLegacyFenceSchedule) {
+        [SCSentry captureTelemetryEvent:@"state.app_defaults_regressed"
+                                  level:SCTelemetryEventLevelError
+                                 fields:@{
+            @"reason": @"legacy_domain_orphaned",
+            @"current_domain_has_state": @NO,
+            @"legacy_domain_has_state": @YES,
+            @"migration_applied": @YES
+        }];
+    }
+
 #ifdef DEBUG
     // Listen for debug actions from menu bar
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -521,43 +609,30 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
     // start up our daemon XPC
     self.xpc = [SCXPCClient new];
     [self.xpc connectToHelperTool];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(telemetryConsentDidChange:)
+                                                 name:SCTelemetryConsentDidChangeNotification
+                                               object:nil];
     [self runPostUpdateRepairMigrations];
 
-    // if we don't have a connection within 0.5 seconds,
-    // OR we get back a connection with an old daemon version
-    // AND we're running a modern block (which should have a daemon running it)
-    // something's wrong with our app-daemon connection. This probably means one of two things:
+    // If we don't have a connection within 0.5 seconds, or the installed daemon
+    // lacks the protocol/capabilities required by this app, repair it once.
+    // something's wrong with our app-daemon connection. This probably means one of three things:
     //   1. The daemon got unloaded somehow and failed to restart. This is a big problem because the block won't come off.
     //   2. The daemon doesn't want to talk to us anymore, potentially because we've changed our signing certificate. This is a
     //      smaller problem, but still not great because the app can't communicate anything to the daemon.
-    //   3. There's a daemon but it's an old version, and should be replaced.
+    //   3. There's a daemon but its XPC contract is incompatible and should be replaced.
     // in any case, let's go try to reinstall the daemon
     // (we debounce this call so it happens only once, after the connection has been invalidated for an extended period)
     BOOL blockIsRunning = [SCBlockUtilities modernBlockIsRunning];
-    NSLog(@"AppController: Daemon update check - modernBlockIsRunning=%@, appVersion=%@",
+    NSLog(@"AppController: Daemon compatibility check - modernBlockIsRunning=%@, appVersion=%@",
           blockIsRunning ? @"YES" : @"NO", SELFCONTROL_VERSION_STRING);
 
-    // Always check daemon version on app launch (cheap operation, ensures daemon stays up-to-date)
-    NSLog(@"AppController: Checking daemon version in 0.5s...");
+    // Marketing versions cannot be compared here: retained daemon 6.4.5 is
+    // numerically newer than app 3.4.7 but lacks the strict append selectors.
+    NSLog(@"AppController: Checking daemon protocol capabilities in 0.5s...");
     [NSTimer scheduledTimerWithTimeInterval: 0.5 repeats: NO block:^(NSTimer * _Nonnull timer) {
-        [self.xpc getVersion:^(NSString * _Nonnull daemonVersion, NSError * _Nonnull error) {
-            if (error == nil) {
-                NSLog(@"AppController: Daemon version check - daemonVersion=%@, appVersion=%@",
-                      daemonVersion, SELFCONTROL_VERSION_STRING);
-                if ([SELFCONTROL_VERSION_STRING compare: daemonVersion options: NSNumericSearch] == NSOrderedDescending) {
-                    NSLog(@"AppController: Daemon OUTDATED (%@ < %@) - reinstalling...",
-                          daemonVersion, SELFCONTROL_VERSION_STRING);
-                    [SCSentry addBreadcrumb: @"Detected out-of-date daemon" category: @"app"];
-                    [self reinstallDaemon];
-                } else {
-                    [SCSentry addBreadcrumb: @"Detected up-to-date daemon" category:@"app"];
-                    NSLog(@"AppController: Daemon UP-TO-DATE (%@) - no action needed", daemonVersion);
-                }
-            } else {
-                NSLog(@"AppController: ERROR fetching daemon version: %@ - reinstalling...", error);
-                [self reinstallDaemon];
-            }
-        }];
+        [self checkDaemonCompatibilityAllowingRepair:YES];
     }];
 
     // Register observers on both distributed and normal notification centers
@@ -702,22 +777,496 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
     }
 }
 
+- (void)checkDaemonCompatibilityAllowingRepair:(BOOL)allowRepair {
+    [self.xpc getCompatibilityInfo:^(NSInteger protocolVersion,
+                                     NSString *buildVersion,
+                                     NSString *marketingVersion,
+                                     NSArray<NSString *> *capabilities,
+                                     NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *reason = nil;
+            BOOL compatible = (error == nil &&
+                               [SCXPCClient isDaemonProtocolVersion:protocolVersion
+                                                       capabilities:capabilities
+                                  compatibleWithCurrentAppWithReason:&reason]);
+            if (error != nil) {
+                reason = @"handshake-unavailable";
+            }
+
+            NSString *safeBuildVersion = buildVersion ?: @"unknown";
+            NSString *safeMarketingVersion = marketingVersion ?: @"unknown";
+            if (compatible) {
+                NSLog(@"AppController: Daemon compatible (protocol=%ld, build=%@, marketing=%@)",
+                      (long)protocolVersion, safeBuildVersion, safeMarketingVersion);
+                [SCSentry addBreadcrumb:@"Detected up-to-date daemon" category:@"app"];
+                if (self->daemonUnreachableInitialError_ != nil) {
+                    [self emitDaemonUnreachableRepairOutcome:@"recovered"
+                                                  finalError:nil
+                                          reinstallSucceeded:YES
+                                           reconnectAttempted:YES
+                                postRepairHandshakeSucceeded:YES
+                                        postRepairCompatible:YES];
+                }
+                self->daemonCompatibilityRepairInFlight_ = NO;
+                self->lastCompatibleDaemonProtocol_ = protocolVersion;
+                [self synchronizeTelemetryConsentAndDrain];
+                [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
+                return;
+            }
+
+            NSLog(@"AppController: Daemon incompatible (reason=%@, protocol=%ld, build=%@, marketing=%@)",
+                  reason, (long)protocolVersion, safeBuildVersion, safeMarketingVersion);
+
+            if (allowRepair && !self->daemonCompatibilityRepairAttempted_ && !self->daemonCompatibilityRepairInFlight_) {
+                self->daemonCompatibilityRepairAttempted_ = YES;
+                self->daemonCompatibilityRepairInFlight_ = YES;
+                if (error != nil) {
+                    self->daemonUnreachableInitialError_ = error;
+                    self->daemonUnreachableInstalledHelperPresentBefore_ = SCFileExistsAtPath(kInstalledDaemonPath);
+                    NSString *bundledDaemonPath = [NSBundle.mainBundle.bundlePath
+                        stringByAppendingPathComponent:kBundledDaemonRelativePath];
+                    self->daemonUnreachableBundledHelperPresent_ = SCFileExistsAtPath(bundledDaemonPath);
+                }
+                [SCSentry addBreadcrumb:@"Detected out-of-date daemon" category:@"app"];
+                [self reinstallDaemon];
+                return;
+            }
+
+            self->daemonCompatibilityRepairInFlight_ = NO;
+            [SCSentry addBreadcrumb:@"Detected out-of-date daemon" category:@"app"];
+
+            if (self->daemonUnreachableInitialError_ != nil) {
+                [self emitDaemonUnreachableRepairOutcome:(error != nil ? @"post_repair_unreachable" : @"post_repair_incompatible")
+                                              finalError:error
+                                      reinstallSucceeded:YES
+                                       reconnectAttempted:YES
+                            postRepairHandshakeSucceeded:(error == nil)
+                                    postRepairCompatible:NO];
+            }
+
+            // This error contains only static binary metadata and an allowlisted
+            // reason; SCSentry may sanitize it further. The raw NSXPC error
+            // remains in the local log.
+            NSError *compatibilityError = [NSError errorWithDomain:kDaemonCompatibilityErrorDomain
+                                                               code:SCDaemonCompatibilityFailureCodeForReason(reason)
+                                                           userInfo:@{
+                NSLocalizedDescriptionKey: @"Daemon remains incompatible after one repair attempt",
+                @"reason": reason ?: @"unknown",
+                @"daemon_protocol": @(protocolVersion),
+                @"daemon_build": safeBuildVersion,
+                @"daemon_marketing_version": safeMarketingVersion,
+            }];
+            [SCSentry captureTelemetryEvent:@"daemon.incompatible"
+                                      level:SCTelemetryEventLevelError
+                                     fields:@{
+                @"reason": SCDaemonCompatibilityTelemetryReason(reason),
+                @"repair_attempted": @(self->daemonCompatibilityRepairAttempted_),
+                @"repair_succeeded": @NO,
+                @"daemon_protocol": @(MAX(0, protocolVersion)),
+                @"daemon_build": safeBuildVersion,
+                @"daemon_marketing_version": safeMarketingVersion,
+            }];
+            // Preserve the typed local NSError for the support log without
+            // sending a second unstructured remote event.
+            NSLog(@"AppController: Daemon compatibility error (domain=%@ code=%ld)",
+                  compatibilityError.domain, (long)compatibilityError.code);
+        });
+    }];
+}
+
+- (void)telemetryConsentDidChange:(NSNotification *)notification {
+    if (self.xpc == nil) return;
+    telemetryStartupCheckCompleted_ = NO;
+    telemetryStartupCheckInFlight_ = NO;
+    telemetryStartupCheckAttempts_ = 0;
+    [self synchronizeTelemetryConsentAndDrain];
+    if (lastCompatibleDaemonProtocol_ > 0) {
+        [self runTelemetryConsistencyCheckWithDaemonProtocol:lastCompatibleDaemonProtocol_];
+    }
+}
+
+- (void)synchronizeTelemetryConsentAndDrain {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSInteger storedGeneration = [defaults integerForKey:SCTelemetryConsentGenerationDefaultsKey];
+    NSUInteger generation = storedGeneration > 0 ? (NSUInteger)storedGeneration : 1;
+    if (storedGeneration <= 0) {
+        // An initial off generation lets a current build purge any historical
+        // daemon queue without treating unknown consent as enabled.
+        [defaults setInteger:(NSInteger)generation forKey:SCTelemetryConsentGenerationDefaultsKey];
+        [defaults synchronize];
+    }
+    BOOL enabled = [SCSentry errorReportingEnabled];
+    [self.xpc setTelemetryConsentEnabled:enabled generation:generation reply:^(NSError *error) {
+        if (error != nil) {
+            NSLog(@"AppController: Telemetry consent propagation failed (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
+            return;
+        }
+        if (enabled) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self drainTelemetrySpoolWithRemainingBatches:4];
+            });
+        }
+    }];
+}
+
+- (void)drainTelemetrySpoolWithRemainingBatches:(NSUInteger)remainingBatches {
+    if (remainingBatches == 0 || ![SCSentry errorReportingEnabled]) {
+        telemetryDrainInFlight_ = NO;
+        return;
+    }
+    if (telemetryDrainInFlight_ && remainingBatches == 4) return;
+    telemetryDrainInFlight_ = YES;
+
+    [self.xpc fetchTelemetryRecordsWithLimit:25
+                                       reply:^(NSArray<NSDictionary<NSString *,id> *> *records, NSError *error) {
+        if (error != nil) {
+            NSLog(@"AppController: Telemetry fetch failed (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
+            self->telemetryDrainInFlight_ = NO;
+            return;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSMutableArray<NSString *> *capturedRecordIDs = [NSMutableArray array];
+            for (NSDictionary<NSString *, id> *record in records) {
+                NSString *eventID = [SCSentry captureSpooledTelemetryRecord:record];
+                NSString *recordID = [record[@"id"] isKindOfClass:[NSString class]] ? record[@"id"] : nil;
+                if (eventID.length > 0 && recordID.length > 0) [capturedRecordIDs addObject:recordID];
+            }
+
+            if (capturedRecordIDs.count == 0) {
+                self->telemetryDrainInFlight_ = NO;
+                return;
+            }
+            [self.xpc acknowledgeTelemetryRecordIDs:capturedRecordIDs reply:^(NSError *ackError) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (ackError != nil) {
+                        NSLog(@"AppController: Telemetry acknowledgement failed (domain=%@ code=%ld)",
+                              ackError.domain, (long)ackError.code);
+                        self->telemetryDrainInFlight_ = NO;
+                        return;
+                    }
+                    if (records.count == 25 && remainingBatches > 1) {
+                        [self drainTelemetrySpoolWithRemainingBatches:remainingBatches - 1];
+                    } else {
+                        self->telemetryDrainInFlight_ = NO;
+                    }
+                });
+            }];
+        });
+    }];
+}
+
+- (void)captureStartupDivergenceFields:(NSDictionary<NSString *, id> *)fields {
+    NSString *signature = [SCSentry privacySafeTelemetrySignatureForFields:fields
+                                                                  eventName:@"state.app_daemon_diverged"];
+    if (signature == nil) {
+        NSLog(@"AppController: Rejected invalid startup divergence payload");
+        return;
+    }
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id previousSignatureValue = [defaults objectForKey:kTelemetryConsistencyLastSignatureKey];
+    NSString *previousSignature = [previousSignatureValue isKindOfClass:[NSString class]]
+        ? previousSignatureValue : nil;
+    id previousDateValue = [defaults objectForKey:kTelemetryConsistencyLastEmissionDateKey];
+    NSDate *previousEmissionDate = [previousDateValue isKindOfClass:[NSDate class]]
+        ? previousDateValue : nil;
+    NSDate *now = [NSDate date];
+    BOOL shouldEmit = [SCSentry shouldEmitTelemetrySignature:signature
+                                          previousSignature:previousSignature
+                                       previousEmissionDate:previousEmissionDate
+                                                        now:now
+                                        suppressionInterval:kTelemetryConsistencySuppressionInterval];
+    if (!shouldEmit) {
+        [SCSentry addBreadcrumb:@"Suppressed repeated startup consistency violation"
+                       category:@"telemetry.consistency"];
+        return;
+    }
+
+    NSString *eventID = [SCSentry captureTelemetryEvent:@"state.app_daemon_diverged"
+                                                  level:SCTelemetryEventLevelError
+                                                 fields:fields];
+    if (eventID.length > 0) {
+        [defaults setObject:signature forKey:kTelemetryConsistencyLastSignatureKey];
+        [defaults setObject:now forKey:kTelemetryConsistencyLastEmissionDateKey];
+        [defaults synchronize];
+    }
+}
+
+- (void)runTelemetryConsistencyCheckWithDaemonProtocol:(NSInteger)protocolVersion {
+    if (telemetryStartupCheckCompleted_ || telemetryStartupCheckInFlight_ ||
+        telemetryStartupCheckAttempts_ >= 2) return;
+    telemetryStartupCheckInFlight_ = YES;
+    telemetryStartupCheckAttempts_ += 1;
+
+    SCScheduleManager *scheduleManager = [SCScheduleManager sharedManager];
+    NSDictionary<NSString *, NSNumber *> *appSnapshot = [scheduleManager telemetryStructuralSnapshot];
+    // This projection stays inside the authenticated local XPC boundary. It
+    // may contain entries/dates; only the daemon's aggregate comparison reply
+    // is eligible for telemetry.
+    NSDictionary<NSString *, id> *expectedState = [scheduleManager daemonConsistencyProjection];
+    [self.xpc getSanitizedDaemonSnapshotForExpectedState:expectedState
+                                                   reply:^(NSDictionary<NSString *,id> *daemonSnapshot, NSError *error) {
+        self->telemetryStartupCheckInFlight_ = NO;
+        if (error != nil || daemonSnapshot.count == 0) {
+            NSLog(@"AppController: Consistency snapshot unavailable (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
+            if (self->telemetryStartupCheckAttempts_ < 2) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
+                });
+            } else {
+                self->telemetryStartupCheckCompleted_ = YES;
+                NSDictionary<NSString *, id> *divergenceFields = @{
+                    @"reason": @"projection_mismatch",
+                    @"collector_status": @"failed",
+                    @"settings_available": @NO,
+                    @"block_running": @([SCBlockUtilities modernBlockIsRunning]),
+                    @"app_has_schedule_state": appSnapshot[@"app_has_schedule_state"] ?: @NO,
+                    @"active_counts_match": @NO,
+                    @"approval_counts_match": @NO,
+                    @"plist_counts_match": @NO,
+                    @"job_counts_match": @NO,
+                    @"pf_active": @NO,
+                    @"hosts_active": @NO,
+                    @"app_monitoring": @NO,
+                    @"physical_layers_match": @NO,
+                    @"app_bundle_count": appSnapshot[@"decoded_bundle_count"] ?: @0,
+                    @"app_week_count": appSnapshot[@"decoded_schedule_count"] ?: @0,
+                    @"app_commitment_count": appSnapshot[@"commitment_count"] ?: @0,
+                    @"daemon_active_entry_count": @0,
+                    @"daemon_approval_count": @0,
+                    @"daemon_approval_entry_count": @0,
+                    @"daemon_plist_count": @0,
+                    @"daemon_job_count": @0,
+                    @"raw_bundle_count": appSnapshot[@"raw_bundle_count"] ?: @0,
+                    @"decoded_bundle_count": appSnapshot[@"decoded_bundle_count"] ?: @0,
+                    @"rendered_bundle_count": appSnapshot[@"decoded_bundle_count"] ?: @0,
+                    @"active_expected_count": @0,
+                    @"active_actual_count": @0,
+                    @"active_missing_count": @0,
+                    @"active_extra_count": @0,
+                    @"approval_expected_count": @0,
+                    @"approval_actual_count": @0,
+                    @"approval_missing_count": @0,
+                    @"approval_extra_count": @0,
+                    @"plist_expected_count": @0,
+                    @"plist_actual_count": @0,
+                    @"plist_missing_count": @0,
+                    @"plist_extra_count": @0,
+                    @"loaded_job_expected_count": @0,
+                    @"loaded_job_actual_count": @0,
+                    @"loaded_job_missing_count": @0,
+                    @"loaded_job_extra_count": @0,
+                    @"launchd_probe_failure_count": @0,
+                    @"invalid_approval_count": @0,
+                    @"invalid_plist_count": @0,
+                };
+                [self captureStartupDivergenceFields:divergenceFields];
+            }
+            return;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->telemetryStartupCheckCompleted_ = YES;
+            NSUInteger rawBundleCount = [appSnapshot[@"raw_bundle_count"] unsignedIntegerValue];
+            NSUInteger decodedBundleCount = [appSnapshot[@"decoded_bundle_count"] unsignedIntegerValue];
+            NSUInteger rawScheduleCount = [appSnapshot[@"raw_schedule_count"] unsignedIntegerValue];
+            NSUInteger decodedScheduleCount = [appSnapshot[@"decoded_schedule_count"] unsignedIntegerValue];
+            NSUInteger commitmentCount = [appSnapshot[@"commitment_count"] unsignedIntegerValue];
+            NSUInteger expectedActiveCount = [appSnapshot[@"expected_active_entry_count"] unsignedIntegerValue];
+            NSUInteger expectedActiveAppCount = [appSnapshot[@"expected_active_app_entry_count"] unsignedIntegerValue];
+            NSUInteger expectedActiveSiteCount = [appSnapshot[@"expected_active_site_entry_count"] unsignedIntegerValue];
+            BOOL expectedRequiresHosts = [appSnapshot[@"expected_requires_hosts"] boolValue];
+            BOOL expectedRequiresPacketFilter = [appSnapshot[@"expected_requires_packet_filter"] boolValue];
+            BOOL projectionAvailable = [appSnapshot[@"active_projection_available"] boolValue];
+            BOOL appHasScheduleState = [appSnapshot[@"app_has_schedule_state"] boolValue];
+
+            BOOL blockRunning = [daemonSnapshot[@"block_running"] boolValue];
+            BOOL settingsAvailable = [daemonSnapshot[@"settings_available"] boolValue];
+            BOOL pfActive = [daemonSnapshot[@"pf_active"] boolValue];
+            BOOL hostsActive = [daemonSnapshot[@"hosts_active"] boolValue];
+            BOOL appMonitoring = [daemonSnapshot[@"app_monitoring"] boolValue];
+            NSUInteger daemonActiveCount = [daemonSnapshot[@"active_entry_count"] unsignedIntegerValue];
+            NSUInteger daemonApprovalCount = [daemonSnapshot[@"approved_schedule_count"] unsignedIntegerValue];
+            NSUInteger daemonApprovalEntryCount = [daemonSnapshot[@"approved_entry_count"] unsignedIntegerValue];
+            NSUInteger daemonPlistCount = [daemonSnapshot[@"schedule_plist_count"] unsignedIntegerValue];
+            NSUInteger daemonJobCount = [daemonSnapshot[@"schedule_job_count"] unsignedIntegerValue];
+            NSString *collectorStatus = [daemonSnapshot[@"collector_status"] isKindOfClass:[NSString class]]
+                ? daemonSnapshot[@"collector_status"] : @"partial";
+            NSString *comparisonStatus = [daemonSnapshot[@"comparison_status"] isKindOfClass:[NSString class]]
+                ? daemonSnapshot[@"comparison_status"] : @"unavailable";
+
+            BOOL physicalLayersMatch = blockRunning
+                ? ((expectedActiveSiteCount == 0 ||
+                  ((!expectedRequiresHosts || hostsActive) &&
+                   (!expectedRequiresPacketFilter || pfActive))) &&
+                 (expectedActiveAppCount == 0 || appMonitoring))
+                : !(pfActive || hostsActive || appMonitoring);
+            BOOL activeCountsMatch = SCAppDaemonActiveStateMatches(
+                projectionAvailable,
+                [daemonSnapshot[@"active_comparison_available"] boolValue],
+                [daemonSnapshot[@"active_entries_match"] boolValue],
+                blockRunning,
+                expectedActiveCount > 0,
+                physicalLayersMatch);
+            BOOL approvalCountsMatch = [daemonSnapshot[@"approval_schedules_match"] boolValue];
+            BOOL plistCountsMatch = [daemonSnapshot[@"plist_schedules_match"] boolValue];
+            BOOL jobCountsMatch = [daemonSnapshot[@"loaded_jobs_match"] boolValue];
+
+            if (rawBundleCount > decodedBundleCount || rawScheduleCount > decodedScheduleCount) {
+                [SCSentry captureTelemetryEvent:@"state.app_defaults_regressed"
+                                          level:SCTelemetryEventLevelError
+                                         fields:@{
+                    @"reason": @"decode_loss",
+                    @"current_domain_has_state": @(appHasScheduleState),
+                    @"legacy_domain_has_state": @NO,
+                    @"migration_applied": @NO,
+                    @"current_bundle_count": @(decodedBundleCount),
+                    @"current_week_count": @(decodedScheduleCount),
+                    @"current_commitment_count": @(commitmentCount),
+                    @"raw_bundle_count": @(rawBundleCount),
+                    @"decoded_bundle_count": @(decodedBundleCount),
+                }];
+            }
+
+            NSString *divergenceReason = nil;
+            BOOL daemonHasScheduledState = daemonApprovalCount > 0 || daemonPlistCount > 0 || daemonJobCount > 0;
+            if ((blockRunning || daemonHasScheduledState) && !appHasScheduleState) {
+                divergenceReason = @"app_state_missing";
+            } else if (![collectorStatus isEqualToString:@"complete"] ||
+                       ![comparisonStatus isEqualToString:@"exact"]) {
+                divergenceReason = @"projection_mismatch";
+            } else if (!activeCountsMatch) {
+                divergenceReason = @"active_state_mismatch";
+            } else if (!approvalCountsMatch || !plistCountsMatch || !jobCountsMatch) {
+                divergenceReason = @"schedule_drift";
+            }
+
+            if (divergenceReason != nil) {
+                NSDictionary<NSString *, id> *divergenceFields = @{
+                    @"reason": divergenceReason,
+                    @"collector_status": collectorStatus,
+                    @"settings_available": @(settingsAvailable),
+                    @"block_running": @(blockRunning),
+                    @"app_has_schedule_state": @(appHasScheduleState),
+                    @"active_counts_match": @(activeCountsMatch),
+                    @"approval_counts_match": @(approvalCountsMatch),
+                    @"plist_counts_match": @(plistCountsMatch),
+                    @"job_counts_match": @(jobCountsMatch),
+                    @"pf_active": @(pfActive),
+                    @"hosts_active": @(hostsActive),
+                    @"app_monitoring": @(appMonitoring),
+                    @"physical_layers_match": @(physicalLayersMatch),
+                    @"app_bundle_count": @(decodedBundleCount),
+                    @"app_week_count": @(decodedScheduleCount),
+                    @"app_commitment_count": @(commitmentCount),
+                    @"daemon_active_entry_count": @(daemonActiveCount),
+                    @"daemon_approval_count": @(daemonApprovalCount),
+                    @"daemon_approval_entry_count": @(daemonApprovalEntryCount),
+                    @"daemon_plist_count": @(daemonPlistCount),
+                    @"daemon_job_count": @(daemonJobCount),
+                    @"raw_bundle_count": @(rawBundleCount),
+                    @"decoded_bundle_count": @(decodedBundleCount),
+                    @"rendered_bundle_count": @(decodedBundleCount),
+                    @"active_expected_count": daemonSnapshot[@"active_expected_count"] ?: @0,
+                    @"active_actual_count": daemonSnapshot[@"active_actual_count"] ?: @0,
+                    @"active_missing_count": daemonSnapshot[@"active_missing_count"] ?: @0,
+                    @"active_extra_count": daemonSnapshot[@"active_extra_count"] ?: @0,
+                    @"approval_expected_count": daemonSnapshot[@"approval_expected_count"] ?: @0,
+                    @"approval_actual_count": daemonSnapshot[@"approval_actual_count"] ?: @0,
+                    @"approval_missing_count": daemonSnapshot[@"approval_missing_count"] ?: @0,
+                    @"approval_extra_count": daemonSnapshot[@"approval_extra_count"] ?: @0,
+                    @"plist_expected_count": daemonSnapshot[@"plist_expected_count"] ?: @0,
+                    @"plist_actual_count": daemonSnapshot[@"plist_actual_count"] ?: @0,
+                    @"plist_missing_count": daemonSnapshot[@"plist_missing_count"] ?: @0,
+                    @"plist_extra_count": daemonSnapshot[@"plist_extra_count"] ?: @0,
+                    @"loaded_job_expected_count": daemonSnapshot[@"loaded_job_expected_count"] ?: @0,
+                    @"loaded_job_actual_count": daemonSnapshot[@"loaded_job_actual_count"] ?: @0,
+                    @"loaded_job_missing_count": daemonSnapshot[@"loaded_job_missing_count"] ?: @0,
+                    @"loaded_job_extra_count": daemonSnapshot[@"loaded_job_extra_count"] ?: @0,
+                    @"launchd_probe_failure_count": daemonSnapshot[@"launchd_probe_failure_count"] ?: @0,
+                    @"invalid_approval_count": daemonSnapshot[@"invalid_approval_count"] ?: @0,
+                    @"invalid_plist_count": daemonSnapshot[@"invalid_plist_count"] ?: @0,
+                };
+                [self captureStartupDivergenceFields:divergenceFields];
+            } else {
+                [SCSentry addBreadcrumb:@"Startup consistency checks passed"
+                               category:@"telemetry.consistency"];
+            }
+
+            NSLog(@"AppController: Consistency snapshot complete (protocol=%ld divergence=%@)",
+                  (long)protocolVersion, divergenceReason ?: @"none");
+        });
+    }];
+}
+
+- (void)emitDaemonUnreachableRepairOutcome:(NSString*)outcome
+                                finalError:(nullable NSError*)finalError
+                        reinstallSucceeded:(BOOL)reinstallSucceeded
+                         reconnectAttempted:(BOOL)reconnectAttempted
+              postRepairHandshakeSucceeded:(BOOL)postRepairHandshakeSucceeded
+                      postRepairCompatible:(BOOL)postRepairCompatible {
+    if (daemonUnreachableInitialError_ == nil || daemonUnreachableTelemetryEmitted_) return;
+
+    // The user declining an authorization prompt is not an operational
+    // incident. Clear the pending attempt without creating a noisy error.
+    if ([SCMiscUtilities errorIsAuthCanceled:finalError]) {
+        daemonUnreachableInitialError_ = nil;
+        return;
+    }
+
+    NSDictionary *fields = [SCXPCClient daemonUnreachableReinstallTelemetryFieldsForOutcome:outcome
+                                                                        initialHandshakeError:daemonUnreachableInitialError_
+                                                                                   finalError:finalError
+                                                                installedHelperPresentBefore:daemonUnreachableInstalledHelperPresentBefore_
+                                                                 installedHelperPresentAfter:SCFileExistsAtPath(kInstalledDaemonPath)
+                                                                        bundledHelperPresent:daemonUnreachableBundledHelperPresent_
+                                                                          reinstallSucceeded:reinstallSucceeded
+                                                                           reconnectAttempted:reconnectAttempted
+                                                                postRepairHandshakeSucceeded:postRepairHandshakeSucceeded
+                                                                        postRepairCompatible:postRepairCompatible];
+    if (fields != nil) {
+        [SCSentry captureTelemetryEvent:@"daemon.unreachable_reinstall"
+                                  level:SCTelemetryEventLevelError
+                                 fields:fields];
+        daemonUnreachableTelemetryEmitted_ = YES;
+    }
+    daemonUnreachableInitialError_ = nil;
+}
+
 - (void)reinstallDaemon {
     NSLog(@"Attempting to reinstall daemon...");
-    [SCSentry addBreadcrumb: @"Reinstalling daemon" category:@"app"];
+    [SCSentry addBreadcrumb:@"Reinstalling daemon" category:@"app"];
     [self.xpc installDaemon:^(NSError * _Nonnull error) {
-        if (error == nil) {
-            NSLog(@"Reinstalled daemon successfully!");
-            [SCSentry addBreadcrumb: @"Daemon reinstalled successfully" category:@"app"];
-            
-            NSLog(@"Retrying helper tool connection...");
-            [self.xpc performSelectorOnMainThread: @selector(connectToHelperTool) withObject: nil waitUntilDone: YES];
-        } else {
-            if (![SCMiscUtilities errorIsAuthCanceled: error]) {
-                NSLog(@"ERROR: Reinstalling daemon failed with error %@", error);
-                [SCUIUtilities presentError: error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error == nil) {
+                NSLog(@"Reinstalled daemon successfully!");
+                [SCSentry addBreadcrumb:@"Daemon reinstalled successfully" category:@"app"];
+                NSLog(@"Refreshing helper tool connection and verifying compatibility once...");
+                [self.xpc refreshConnectionAndRun:^{
+                    [self checkDaemonCompatibilityAllowingRepair:NO];
+                }];
+            } else {
+                self->daemonCompatibilityRepairInFlight_ = NO;
+                if (self->daemonUnreachableInitialError_ != nil) {
+                    [self emitDaemonUnreachableRepairOutcome:@"install_failed"
+                                                  finalError:error
+                                          reinstallSucceeded:NO
+                                           reconnectAttempted:NO
+                                postRepairHandshakeSucceeded:NO
+                                        postRepairCompatible:NO];
+                }
+                if (![SCMiscUtilities errorIsAuthCanceled:error]) {
+                    NSLog(@"ERROR: Reinstalling daemon failed with error %@", error);
+                    [SCSentry addBreadcrumb:@"Detected out-of-date daemon" category:@"app"];
+                    [SCUIUtilities presentError:error];
+                }
             }
-        }
+        });
     }];
 }
 
@@ -772,9 +1321,6 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
         alert.alertStyle = NSAlertStyleWarning;
         alert.messageText = NSLocalizedString(@"Fence could not repair permissions", @"Permissions repair failure title");
         alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, use Report Bug from this menu.", @"Permissions repair failure message");
-        if (error) {
-            [SCSentry captureError:error];
-        }
     }
     [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
     [NSApp activateIgnoringOtherApps:YES];
@@ -808,7 +1354,7 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
 }
 
 - (void)addToBlockList:(NSString*)host lock:(NSLock*)lock {
-    NSLog(@"addToBlocklist: %@", host);
+    NSLog(@"Adding one entry to the blocklist");
     // Note we RETRIEVE the latest list from settings (ActiveBlocklist), but we SET the new list in defaults
     // since the helper daemon should be the only one changing ActiveBlocklist
     NSMutableArray* list = [[settings_ valueForKey: @"ActiveBlocklist"] mutableCopy];
@@ -948,7 +1494,7 @@ static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
                                                                 @"IncludeLinkedDomains": [self->defaults_ valueForKey: @"IncludeLinkedDomains"],
                                                                 @"BlockSoundShouldPlay": [self->defaults_ valueForKey: @"BlockSoundShouldPlay"],
                                                                 @"BlockSound": [self->defaults_ valueForKey: @"BlockSound"],
-                                                                @"EnableErrorReporting": [self->defaults_ valueForKey: @"EnableErrorReporting"]
+                                                                @"EnableErrorReporting": @([SCSentry errorReportingEnabled])
                                                             }
                                                      reply:^(NSError * _Nonnull error) {
                         if (error != nil) {

@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
+		A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
+		A17E1E110000000000000003 /* SCTelemetrySpoolTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */; };
 		07CCB4F5C9424725B598B04E /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		167A631F7107878D77965A24 /* MenuBarFence@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = AA5F3568C5F305D28DF0F7AC /* MenuBarFence@2x.png */; };
 		1869042B4D754EE781990073 /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
@@ -20,7 +23,6 @@
 		224DFCA02F0409E600D97A1C /* SCLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFC9F2F0409E600D97A1C /* SCLogger.m */; };
 		224DFCF72F0417F700D97A1C /* SCLicenseManager.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFCF62F0417F700D97A1C /* SCLicenseManager.m */; };
 		224DFCFA2F04180C00D97A1C /* SCLicenseWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFCF92F04180C00D97A1C /* SCLicenseWindowController.m */; };
-		224DFCFC2F041AF300D97A1C /* Secrets.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 224DFCFB2F041AF300D97A1C /* Secrets.xcconfig */; };
 		228354F82EFB7BCB00E77469 /* SCTimeRange.m in Sources */ = {isa = PBXBuildFile; fileRef = 228354F72EFB7BCB00E77469 /* SCTimeRange.m */; };
 		228354F92EFB7BCB00E77469 /* SCTimeRange.h in Headers */ = {isa = PBXBuildFile; fileRef = 228354F62EFB7BCB00E77469 /* SCTimeRange.h */; };
 		228354FA2EFB7BCB00E77469 /* SCTimeRange.m in Sources */ = {isa = PBXBuildFile; fileRef = 228354F72EFB7BCB00E77469 /* SCTimeRange.m */; };
@@ -89,7 +91,7 @@
 		CB066F92265203830076964D /* PacketFilter.m in Sources */ = {isa = PBXBuildFile; fileRef = CBCA91111960D87300AFD20C /* PacketFilter.m */; };
 		CB066F93265203920076964D /* SCBlockEntry.m in Sources */ = {isa = PBXBuildFile; fileRef = CB81AB8925B8E6BE006956F7 /* SCBlockEntry.m */; };
 		CB066F94265203970076964D /* SCErr.m in Sources */ = {isa = PBXBuildFile; fileRef = CB1465B725B027E700130D2E /* SCErr.m */; };
-		CB066F95265203990076964D /* SCSentry.m in Sources */ = {isa = PBXBuildFile; fileRef = CBADC27D25B22BC7000EE5BB /* SCSentry.m */; };
+		CB066F95265203990076964D /* SCSentry.m in Sources */ = {isa = PBXBuildFile; fileRef = CBADC27D25B22BC7000EE5BB /* SCSentry.m */; settings = {COMPILER_FLAGS = "-UTESTING -DSC_SENTRY_SDK_PRIVACY_TEST=1"; }; };
 		CB0EEF7820FE49030024D27B /* SCUtilityTests.m in Sources */ = {isa = PBXBuildFile; fileRef = CB0EEF7720FE49020024D27B /* SCUtilityTests.m */; };
 		CB114283222CCF19004B7868 /* SCSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = CBF3B573217BADD7006D5F52 /* SCSettings.m */; };
 		CB114284222CD4F0004B7868 /* SCSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = CBF3B573217BADD7006D5F52 /* SCSettings.m */; };
@@ -596,6 +598,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A17E1E120000000000000001 /* SCTelemetrySpool.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCTelemetrySpool.h; sourceTree = "<group>"; };
+		A17E1E120000000000000002 /* SCTelemetrySpool.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpool.m; sourceTree = "<group>"; };
+		A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpoolTests.m; sourceTree = "<group>"; };
 		0534B42090794A569FD6AAA4 /* SCDebugUtilities.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = SCDebugUtilities.h; path = Common/SCDebugUtilities.h; sourceTree = SOURCE_ROOT; };
 		1058C7A1FEA54F0111CA2CBB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = /System/Library/Frameworks/Cocoa.framework; sourceTree = "<absolute>"; };
 		1FF38B4CA7B04483AB6E70BB /* AppBlocker.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppBlocker.h; sourceTree = "<group>"; };
@@ -1805,6 +1810,7 @@
 		CB0EEF5E20FD8CE00024D27B /* SelfControlTests */ = {
 			isa = PBXGroup;
 			children = (
+				A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */,
 				CB0EEF7720FE49020024D27B /* SCUtilityTests.m */,
 				CB0EEF6120FD8CE00024D27B /* Info.plist */,
 			);
@@ -1823,6 +1829,8 @@
 				CB81A9E325B7C2B9006956F7 /* Utility */,
 				CBADC27C25B22BC7000EE5BB /* SCSentry.h */,
 				CBADC27D25B22BC7000EE5BB /* SCSentry.m */,
+				A17E1E120000000000000001 /* SCTelemetrySpool.h */,
+				A17E1E120000000000000002 /* SCTelemetrySpool.m */,
 				CBC1F4B226070358008E3FA8 /* SCFileWatcher.h */,
 				CBC1F4B326070358008E3FA8 /* SCFileWatcher.m */,
 				CB81A9F025B7C5F7006956F7 /* SCBlockFileReaderWriter.h */,
@@ -3578,7 +3586,6 @@
 				CBBF4EE515830D7300E364D9 /* TimerWindow.xib in Resources */,
 				CBDFFF4924A0711800622CEE /* org.eyebeam.selfcontrold.plist in Resources */,
 				CB0385E219D77051004614B6 /* PreferencesGeneralViewController.xib in Resources */,
-				224DFCFC2F041AF300D97A1C /* Secrets.xcconfig in Resources */,
 				CB40A8680FBC7DE700167727 /* SelfControlBlocklist.icns in Resources */,
 				CBBF4E7F1582F7A200E364D9 /* DomainList.xib in Resources */,
 				CBBF4E801582F7A200E364D9 /* MainMenu.xib in Resources */,
@@ -4027,6 +4034,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */,
+				A17E1E110000000000000003 /* SCTelemetrySpoolTests.m in Sources */,
 				CB066F6C2652037E0076964D /* HostFileBlocker.m in Sources */,
 				228355132EFB7C1900E77469 /* SCScheduleManager.m in Sources */,
 				2283550E2EFB7C1000E77469 /* SCWeeklySchedule.m in Sources */,
@@ -4061,6 +4070,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */,
 				CB74D11F2480E55D002B2079 /* DaemonMain.m in Sources */,
 				CB850F3925130F5300EE2E2D /* NSString+IPAddress.m in Sources */,
 				CB62FC4624B132A300ADBC40 /* HostImporter.m in Sources */,
@@ -4588,6 +4598,7 @@
 				INFOPLIST_FILE = SelfControlTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
 				MTL_ENABLE_DEBUG_INFO = YES;
+				OTHER_LDFLAGS = "$(inherited) -lz";
 				PRODUCT_BUNDLE_IDENTIFIER = org.selfcontrolapp.SelfControlTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -4618,6 +4629,7 @@
 				INFOPLIST_FILE = SelfControlTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
 				MTL_ENABLE_DEBUG_INFO = NO;
+				OTHER_LDFLAGS = "$(inherited) -lz";
 				PRODUCT_BUNDLE_IDENTIFIER = org.selfcontrolapp.SelfControlTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -4634,6 +4646,7 @@
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				CURRENT_PROJECT_VERSION = 647;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = L5YX8CH3F5;
@@ -4654,12 +4667,9 @@
 				OTHER_LDFLAGS = (
 					"-sectcreate",
 					__TEXT,
-					__info_plist,
-					"Daemon/selfcontrold-Info.plist",
-					"-sectcreate",
-					__TEXT,
 					__launchd_plist,
 					Daemon/org.eyebeam.selfcontrold.plist,
+					"-lbsm",
 					"$(inherited)",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.eyebeam.selfcontrold;
@@ -4683,6 +4693,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				CURRENT_PROJECT_VERSION = 647;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = L5YX8CH3F5;
@@ -4700,12 +4711,9 @@
 				OTHER_LDFLAGS = (
 					"-sectcreate",
 					__TEXT,
-					__info_plist,
-					"Daemon/selfcontrold-Info.plist",
-					"-sectcreate",
-					__TEXT,
 					__launchd_plist,
 					Daemon/org.eyebeam.selfcontrold.plist,
+					"-lbsm",
 					"$(inherited)",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.eyebeam.selfcontrold;

@@ -4,6 +4,35 @@
 //
 
 #import "SCBlockBundle.h"
+#import "SCMiscUtilities.h"
+
+static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
+    if (![rawEntries isKindOfClass:[NSArray class]]) {
+        return [NSMutableArray array];
+    }
+
+    NSMutableOrderedSet<NSString*> *canonicalEntries = [NSMutableOrderedSet orderedSet];
+    for (id rawEntry in (NSArray*)rawEntries) {
+        if (![rawEntry isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+        if (canonicalEntry != nil) {
+            [canonicalEntries addObject:canonicalEntry];
+        } else {
+            // Preserve an opaque legacy entry rather than silently loosening a
+            // committed bundle during decode/save. New entries still go through
+            // addEntry: and must canonicalize successfully.
+            NSString *trimmed = [rawEntry stringByTrimmingCharactersInSet:
+                                 NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (trimmed.length > 0 &&
+                [trimmed rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location == NSNotFound) {
+                [canonicalEntries addObject:trimmed];
+            }
+        }
+    }
+    return [canonicalEntries.array mutableCopy];
+}
 
 @implementation SCBlockBundle
 
@@ -50,11 +79,7 @@
     }
 
     // Parse entries
-    if ([dict[@"entries"] isKindOfClass:[NSArray class]]) {
-        bundle.entries = [NSMutableArray arrayWithArray:dict[@"entries"]];
-    } else {
-        bundle.entries = [NSMutableArray array];
-    }
+    bundle.entries = SCCanonicalBundleEntries(dict[@"entries"]);
 
     return bundle;
 }
@@ -64,7 +89,7 @@
         @"bundleID": self.bundleID ?: @"",
         @"name": self.name ?: @"",
         @"colorHex": [self hexFromColor:self.color] ?: @"007AFF",
-        @"entries": self.entries ?: @[],
+        @"entries": SCCanonicalBundleEntries(self.entries),
         @"enabled": @(self.enabled),
         @"displayOrder": @(self.displayOrder)
     };
@@ -99,17 +124,22 @@
 #pragma mark - Entry Management
 
 - (void)addEntry:(NSString *)entry {
-    if (entry && ![self.entries containsObject:entry]) {
-        [self.entries addObject:entry];
+    NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+    if (canonicalEntry && ![self.entries containsObject:canonicalEntry]) {
+        [self.entries addObject:canonicalEntry];
     }
 }
 
 - (void)removeEntry:(NSString *)entry {
-    [self.entries removeObject:entry];
+    NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+    if (canonicalEntry != nil) {
+        [self.entries removeObject:canonicalEntry];
+    }
 }
 
 - (BOOL)containsEntry:(NSString *)entry {
-    return [self.entries containsObject:entry];
+    NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+    return canonicalEntry != nil && [self.entries containsObject:canonicalEntry];
 }
 
 - (NSInteger)appEntryCount {
@@ -223,7 +253,7 @@
     [coder encodeObject:self.bundleID forKey:@"bundleID"];
     [coder encodeObject:self.name forKey:@"name"];
     [coder encodeObject:[self hexFromColor:self.color] forKey:@"colorHex"];
-    [coder encodeObject:self.entries forKey:@"entries"];
+    [coder encodeObject:SCCanonicalBundleEntries(self.entries) forKey:@"entries"];
     [coder encodeBool:self.enabled forKey:@"enabled"];
     [coder encodeInteger:self.displayOrder forKey:@"displayOrder"];
 }
@@ -238,8 +268,7 @@
         _color = [self colorFromHex:colorHex];
 
         NSSet *allowedClasses = [NSSet setWithObjects:[NSArray class], [NSString class], nil];
-        _entries = [[coder decodeObjectOfClasses:allowedClasses forKey:@"entries"] mutableCopy];
-        if (!_entries) _entries = [NSMutableArray array];
+        _entries = SCCanonicalBundleEntries([coder decodeObjectOfClasses:allowedClasses forKey:@"entries"]);
 
         _enabled = [coder decodeBoolForKey:@"enabled"];
         _displayOrder = [coder decodeIntegerForKey:@"displayOrder"];

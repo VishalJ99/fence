@@ -22,6 +22,15 @@
 
 #import <Cocoa/Cocoa.h>
 
+FOUNDATION_EXPORT NSErrorDomain const SCHostFileBlockerErrorDomain;
+
+typedef NS_ERROR_ENUM(SCHostFileBlockerErrorDomain, SCHostFileBlockerError) {
+    SCHostFileBlockerErrorContentsMismatch = 1,
+    SCHostFileBlockerErrorFileNotReadable = 2,
+    SCHostFileBlockerErrorUnknownWriteFailure = 3,
+    SCHostFileBlockerErrorIncompleteBlock = 4,
+};
+
 @protocol HostFileBlocker
 
 - (BOOL)deleteBackupHostsFile;
@@ -29,19 +38,23 @@
 - (void)revertFileContentsToDisk;
 
 - (BOOL)writeNewFileContents;
+- (BOOL)writeNewFileContentsWithError:(NSError**)error;
+- (BOOL)verifyNewFileContentsWithError:(NSError**)error;
 
 - (void)addSelfControlBlockHeader;
 
 - (void)addSelfControlBlockFooter;
 
 - (BOOL)createBackupHostsFile;
+- (BOOL)createBackupHostsFileWithError:(NSError**)error;
 
 - (BOOL)restoreBackupHostsFile;
 
 - (void)addRuleBlockingDomain:(NSString*)domainName;
-- (void)appendExistingBlockWithRuleForDomain:(NSString*)domainName;
+- (BOOL)appendExistingBlockWithRuleForDomain:(NSString*)domainName;
 
 - (BOOL)containsSelfControlBlock;
+- (BOOL)containsCompleteSelfControlBlock;
 
 - (void)removeSelfControlBlock;
 

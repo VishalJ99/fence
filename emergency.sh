@@ -33,10 +33,18 @@ echo "Flushing DNS cache..."
 dscacheutil -flushcache
 killall -HUP mDNSResponder 2>/dev/null || true
 
-# 5. Clear settings plist
-# (only non app specific step - this should be fine since explicitly chosen to be /usr/local/etc seperate from other app plists)
+# 5. Clear Fence's settings plist. SCSettings derives the filename from the
+# hardware serial; do the same here so an emergency wipe can never delete an
+# unrelated hidden plist in /usr/local/etc.
 echo "Clearing settings plist..."
-rm /usr/local/etc/.*.plist 2>/dev/null || echo "No settings plist found"
+SERIAL_NUMBER=$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/awk -F'"' '/IOPlatformSerialNumber/{print $(NF-1); exit}')
+if [ -z "$SERIAL_NUMBER" ]; then
+    echo "Unable to determine the Fence settings filename" >&2
+    exit 1
+fi
+SETTINGS_HASH=$(printf 'SelfControlUserPreferences%s' "$SERIAL_NUMBER" | /usr/bin/shasum -a 1 | /usr/bin/awk '{print $1}')
+SETTINGS_FILE="/usr/local/etc/.${SETTINGS_HASH}.plist"
+rm -f -- "$SETTINGS_FILE"
 
 # 6. Clear schedule/commitment data from user defaults (run as actual user, not root)
 echo "Clearing user defaults..."
@@ -65,7 +73,27 @@ done
 
 echo ""
 echo "=== Wipe Complete ==="
-echo "Verify with:"
-echo "  pfctl -a org.eyebeam -sr  (should show nothing)"
-echo "  cat /etc/hosts  (no SelfControl entries)"
-echo "  ls ~/Library/LaunchAgents/org.eyebeam.selfcontrol.schedule.* (should show no matches)"
+
+# Return a fixed-format, non-sensitive postcondition token to the app. The app
+# consumes an emergency credit only when every physical layer verifies clean.
+SETTINGS_CLEARED=1
+HOSTS_CLEAN=1
+PF_CLEAN=1
+
+if [ -e "$SETTINGS_FILE" ] || [ -L "$SETTINGS_FILE" ]; then
+    SETTINGS_CLEARED=0
+fi
+
+if grep -q '# BEGIN SELFCONTROL BLOCK' /etc/hosts 2>/dev/null; then
+    HOSTS_CLEAN=0
+fi
+
+PF_RULES=$(pfctl -a org.eyebeam -sr 2>/dev/null || true)
+if [ -n "$(printf '%s' "$PF_RULES" | tr -d '[:space:]')" ] || \
+   grep -q 'org\.eyebeam' /etc/pf.conf 2>/dev/null || \
+   [ -s /etc/pf.anchors/org.eyebeam ]; then
+    PF_CLEAN=0
+fi
+
+printf 'FENCE_EMERGENCY_VERIFY settings=%s hosts=%s pf=%s\n' \
+    "$SETTINGS_CLEARED" "$HOSTS_CLEAN" "$PF_CLEAN"

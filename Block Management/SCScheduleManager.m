@@ -10,8 +10,43 @@
 #import "SCMiscUtilities.h"
 #import "SCSettings.h"
 #import "SCVersionTracker.h"
+#import "SCDaemonProtocol.h"
+#import "SCBlockEntry.h"
+#import "NSString+IPAddress.h"
+#import "SCSentry.h"
 
 NSNotificationName const SCScheduleManagerDidChangeNotification = @"SCScheduleManagerDidChangeNotification";
+NSNotificationName const SCScheduleStrictifyDidCompleteNotification = @"SCScheduleStrictifyDidCompleteNotification";
+NSString * const SCScheduleStrictifyOutcomeKey = @"outcome";
+NSString * const SCScheduleStrictifyFailedStageKey = @"failed_stage";
+NSString * const SCScheduleStrictifyOperationTokenKey = @"operation_token";
+
+static BOOL SCStrictifyStatusSucceeded(id value) {
+    return [value isKindOfClass:[NSString class]] && [value isEqualToString:@"succeeded"];
+}
+
+static NSUInteger SCNextStrictifyOperationSequence(void) {
+    static NSUInteger sequence = 0;
+    @synchronized ([SCScheduleManager class]) {
+        sequence += 1;
+        return sequence;
+    }
+}
+
+static NSString *SCStrictifyFailureStageFromDaemonStage(NSString *stage, BOOL activePath) {
+    if ([stage isEqualToString:@"none"]) return @"none";
+    if ([stage isEqualToString:@"lock"]) return @"lock";
+    if ([stage isEqualToString:@"canonicalize"]) return @"canonicalize";
+    if ([stage isEqualToString:@"settings_sync"]) return @"settings_sync";
+    if ([stage isEqualToString:@"verification"]) return @"verification";
+    if ([stage isEqualToString:@"physical_apply"]) return @"active_apply";
+    if ([stage isEqualToString:@"job_verification"]) return @"future_apply";
+    if ([stage isEqualToString:@"resolution"]) return @"future_resolution";
+    if ([stage isEqualToString:@"precondition"]) {
+        return activePath ? @"active_precondition" : @"future_resolution";
+    }
+    return activePath ? @"active_apply" : @"future_apply";
+}
 
 // NSUserDefaults keys (app-layer only, not in SCSettings)
 static NSString * const kBundlesKey = @"SCScheduleBundles";
@@ -22,14 +57,86 @@ static NSString * const kIsCommittedKey = @"SCIsCommitted";
 static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
 static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnlockCreditsInitialized";
 static const NSInteger kDefaultEmergencyUnlockCredits = 5;
+static NSString * const kLastScheduleCommitOutcomeKey = @"SCLastScheduleCommitOutcome";
+static NSString * const kLastScheduleCommitFailureStageKey = @"SCLastScheduleCommitFailureStage";
+
+static BOOL SCScheduleWaitForSemaphore(dispatch_semaphore_t semaphore,
+                                       NSTimeInterval timeout) {
+    BOOL hasDeadline = timeout > 0;
+    NSDate *deadline = hasDeadline ? [NSDate dateWithTimeIntervalSinceNow:timeout] : nil;
+    while (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) != 0) {
+        if (hasDeadline && [deadline timeIntervalSinceNow] <= 0) return NO;
+        if ([NSThread isMainThread]) {
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                      beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        } else {
+            dispatch_time_t waitDeadline = hasDeadline
+                ? dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC))
+                : DISPATCH_TIME_FOREVER;
+            return dispatch_semaphore_wait(semaphore, waitDeadline) == 0;
+        }
+    }
+    return YES;
+}
+
+static void SCEmitScheduleCommitFailure(NSString *stage,
+                                        NSUInteger segmentsPlanned,
+                                        NSUInteger segmentsInstalled,
+                                        NSInteger weekOffset,
+                                        NSInteger errorCode) {
+    [SCSentry captureTelemetryEvent:@"schedule.commit_install_failed"
+                              level:SCTelemetryEventLevelError
+                             fields:@{
+        @"stage": stage,
+        @"segments_planned": @(segmentsPlanned),
+        @"segments_installed": @(segmentsInstalled),
+        @"week_offset": @(MAX(0, weekOffset)),
+        @"error_code": @(errorCode),
+    }];
+}
+
+static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
+                                       SCScheduleLaunchdBridge *bridge,
+                                       SCXPCClient *xpc) {
+    __block BOOL rollbackSucceeded = YES;
+    for (NSString *segmentID in segmentIDs.reverseObjectEnumerator) {
+        NSError *unloadError = nil;
+        if (![bridge uninstallJobForSegmentID:segmentID error:&unloadError]) {
+            rollbackSucceeded = NO;
+        }
+
+        dispatch_semaphore_t unregisterSema = dispatch_semaphore_create(0);
+        __block NSError *unregisterError = nil;
+        [xpc unregisterScheduleWithID:segmentID reply:^(NSError *error) {
+            unregisterError = error;
+            dispatch_semaphore_signal(unregisterSema);
+        }];
+        if (!SCScheduleWaitForSemaphore(unregisterSema, 10) || unregisterError != nil) {
+            rollbackSucceeded = NO;
+        }
+    }
+    return rollbackSucceeded;
+}
 
 @class SCBlockSegment;
+
+@interface SCStrictifyRetryState : NSObject
+@property (nonatomic, copy) NSArray<NSString *> *addedEntries;
+@property (nonatomic, copy) SCBlockBundle *bundle;
+@property (nonatomic, assign) BOOL bundleSaved;
+@end
+
+@implementation SCStrictifyRetryState
+@end
 
 @interface SCScheduleManager ()
 
 @property (nonatomic, strong) NSMutableArray<SCBlockBundle *> *mutableBundles;
 // Cache for week-specific schedules: weekKey -> array of schedules
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<SCWeeklySchedule *> *> *weekSchedulesCache;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, SCStrictifyRetryState *> *strictifyRetryStatesByToken;
+@property (nonatomic, strong) NSMutableArray<NSString *> *strictifyRetryTokenOrder;
+@property (nonatomic, copy, nullable) NSString *lastStrictifyOperationToken;
 
 // Forward declaration for segment-based merging
 - (NSArray<SCBlockSegment *> *)calculateBlockSegmentsForBundles:(NSArray<SCBlockBundle *> *)bundles
@@ -51,7 +158,29 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)expectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle;
 - (void)appendCommittedAdditions:(NSArray<NSString *> *)addedEntries
                        oldBundle:(SCBlockBundle *)oldBundle
-                        toBundle:(SCBlockBundle *)bundle;
+                        toBundle:(SCBlockBundle *)bundle
+                     bundleSaved:(BOOL)bundleSaved
+          blocklistFilePersisted:(BOOL)blocklistFilePersisted
+                  operationToken:(nullable NSString *)operationToken;
+- (void)emitStrictifyResultForEntries:(NSArray<NSString *> *)addedEntries
+                            oldBundle:(SCBlockBundle *)oldBundle
+                             toBundle:(SCBlockBundle *)bundle
+                          bundleSaved:(BOOL)bundleSaved
+               blocklistFilePersisted:(BOOL)blocklistFilePersisted
+                       activeExpected:(BOOL)activeExpected
+                       futureExpected:(BOOL)futureExpected
+                         activeResult:(NSDictionary<NSString *, id> *)activeResult
+                         activeError:(nullable NSError *)activeError
+                         futureResult:(NSDictionary<NSString *, id> *)futureResult
+                         futureError:(nullable NSError *)futureError
+                             timedOut:(BOOL)timedOut
+                            startedAt:(NSDate *)startedAt
+                       operationToken:(NSString *)operationToken;
+- (NSString *)storeStrictifyRetryStateForEntries:(NSArray<NSString *> *)addedEntries
+                                        toBundle:(SCBlockBundle *)bundle
+                                     bundleSaved:(BOOL)bundleSaved
+                                  operationToken:(nullable NSString *)operationToken;
+- (void)clearStrictifyRetryStateForOperationToken:(NSString *)operationToken;
 
 @end
 
@@ -80,12 +209,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     return seg;
 }
 - (NSString *)description {
-    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-    fmt.dateFormat = @"EEE HH:mm";
-    return [NSString stringWithFormat:@"<SCBlockSegment %@ - %@ bundles=%@>",
-            [fmt stringFromDate:self.startDate],
-            [fmt stringFromDate:self.endDate],
-            [self.activeBundles valueForKey:@"name"]];
+    return [NSString stringWithFormat:@"<SCBlockSegment bundles=%lu>",
+            (unsigned long)self.activeBundles.count];
 }
 @end
 
@@ -109,6 +234,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     if (self) {
         _mutableBundles = [NSMutableArray array];
         _weekSchedulesCache = [NSMutableDictionary dictionary];
+        _strictifyRetryStatesByToken = [NSMutableDictionary dictionary];
+        _strictifyRetryTokenOrder = [NSMutableArray array];
         [self reload];
     }
     return self;
@@ -164,8 +291,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         NSArray<NSString *> *removedEntries = [self entriesInArray:oldBundle.entries notInArray:bundle.entries];
 
         if (usedInCommittedSchedule && removedEntries.count > 0) {
-            NSLog(@"SCScheduleManager: Preserving %lu removed entries for committed bundle %@",
-                  (unsigned long)removedEntries.count, bundle.name);
+            NSLog(@"SCScheduleManager: Preserving %lu removed entries for a committed bundle",
+                  (unsigned long)removedEntries.count);
             for (NSString *entry in removedEntries) {
                 if (![bundle.entries containsObject:entry]) {
                     [bundle.entries addObject:entry];
@@ -178,22 +305,44 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         self.mutableBundles[index] = bundle;
         [self save];
 
+        BOOL bundleSaved = NO;
+        id persistedBundles = [[NSUserDefaults standardUserDefaults] objectForKey:kBundlesKey];
+        if ([persistedBundles isKindOfClass:[NSArray class]]) {
+            for (id persistedBundle in persistedBundles) {
+                if ([persistedBundle isKindOfClass:[NSDictionary class]] &&
+                    [persistedBundle[@"bundleID"] isEqualToString:bundle.bundleID]) {
+                    bundleSaved = YES;
+                    break;
+                }
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════════════════════
         // Live strictify: If committed and a block is running, update the active block
         // ═══════════════════════════════════════════════════════════════════════════
 
+        BOOL blocklistFilePersisted = !usedInCommittedSchedule;
         if (usedInCommittedSchedule) {
             // Always update the blocklist file for future jobs
             SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
             NSError *error = nil;
-            [bridge writeBlocklistFileForBundle:bundle error:&error];
+            blocklistFilePersisted = [bridge writeBlocklistFileForBundle:bundle error:&error];
             if (error) {
-                NSLog(@"WARNING: Failed to update blocklist file for bundle %@: %@", bundle.name, error);
+                NSLog(@"WARNING: Failed to update one blocklist file (domain=%@ code=%ld)",
+                      error.domain, (long)error.code);
             }
+        }
 
-            if (addedEntries.count > 0) {
-                [self appendCommittedAdditions:addedEntries oldBundle:oldBundle toBundle:bundle];
-            }
+        BOOL shouldDiagnoseAdditions = addedEntries.count > 0 &&
+            (usedInCommittedSchedule || [SCBlockUtilities anyBlockIsRunning] ||
+             [self isCommittedForWeekOffset:0] || [self isCommittedForWeekOffset:1]);
+        if (shouldDiagnoseAdditions) {
+            [self appendCommittedAdditions:addedEntries
+                                 oldBundle:oldBundle
+                                  toBundle:bundle
+                               bundleSaved:bundleSaved
+                    blocklistFilePersisted:blocklistFilePersisted
+                            operationToken:nil];
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -376,8 +525,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
             NSArray<NSString *> *matchingSegmentIDs = installedScheduleIDsByStartKey[startKey] ?: @[];
 
             if (matchingSegmentIDs.count != 1) {
-                NSLog(@"SCScheduleManager: Skipping approved schedule append for %@ because %lu matching jobs were found",
-                      startKey, (unsigned long)matchingSegmentIDs.count);
+                NSLog(@"SCScheduleManager: Skipping one approved schedule append because %lu matching jobs were found",
+                      (unsigned long)matchingSegmentIDs.count);
                 continue;
             }
 
@@ -390,38 +539,443 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 
 - (void)appendCommittedAdditions:(NSArray<NSString *> *)addedEntries
                        oldBundle:(SCBlockBundle *)oldBundle
-                        toBundle:(SCBlockBundle *)bundle {
-    SCXPCClient *xpc = [[SCXPCClient alloc] init];
+                        toBundle:(SCBlockBundle *)bundle
+                     bundleSaved:(BOOL)bundleSaved
+          blocklistFilePersisted:(BOOL)blocklistFilePersisted
+                  operationToken:(NSString *)operationToken {
+    NSString *scopedOperationToken =
+        [self storeStrictifyRetryStateForEntries:addedEntries
+                                        toBundle:bundle
+                                     bundleSaved:bundleSaved
+                                  operationToken:operationToken];
 
-    NSArray<NSString *> *expectedActiveBlocklist = [self expectedActiveBlocklistForBundle:bundle oldBundle:oldBundle];
-    if (expectedActiveBlocklist.count > 0) {
-        [xpc appendEntriesToActiveBlocklist:addedEntries
-                  matchingExistingBlocklist:expectedActiveBlocklist
-                                      reply:^(NSError *appendError) {
-            if (appendError) {
-                NSLog(@"ERROR: Failed to append active blocklist entries for bundle %@: %@", bundle.name, appendError);
-            } else {
-                NSLog(@"SCScheduleManager: Appended active blocklist entries for bundle %@", bundle.name);
-            }
-        }];
-    }
-
-    NSDictionary<NSString *, NSArray<NSString *> *> *expectedApprovedBlocklists = [self expectedApprovedScheduleBlocklistsForBundle:bundle oldBundle:oldBundle];
-    if (expectedApprovedBlocklists.count == 0) {
-        NSLog(@"SCScheduleManager: No safely identifiable approved schedules to update for bundle %@", bundle.name);
+    NSDate *startedAt = [NSDate date];
+    BOOL usedInCommittedSchedule = [self bundleIsUsedInCommittedSchedule:bundle.bundleID];
+    if (!usedInCommittedSchedule) {
+        [self emitStrictifyResultForEntries:addedEntries
+                                  oldBundle:oldBundle
+                                   toBundle:bundle
+                                bundleSaved:bundleSaved
+                     blocklistFilePersisted:blocklistFilePersisted
+                             activeExpected:NO
+                             futureExpected:NO
+                               activeResult:@{}
+                                activeError:nil
+                               futureResult:@{}
+                                futureError:nil
+                                   timedOut:NO
+                                  startedAt:startedAt
+                             operationToken:scopedOperationToken];
         return;
     }
 
-    [xpc appendEntriesToApprovedSchedules:expectedApprovedBlocklists
-                                   entries:addedEntries
-                                     reply:^(NSError *appendError) {
-        if (appendError) {
-            NSLog(@"ERROR: Failed to append approved schedule entries for bundle %@: %@", bundle.name, appendError);
+    NSArray<NSString *> *expectedActiveBlocklist =
+        [self expectedActiveBlocklistForBundle:bundle oldBundle:oldBundle];
+    NSDictionary<NSString *, NSArray<NSString *> *> *expectedApprovedBlocklists =
+        [self expectedApprovedScheduleBlocklistsForBundle:bundle oldBundle:oldBundle];
+    BOOL activeExpected = expectedActiveBlocklist != nil;
+    BOOL futureExpected = expectedApprovedBlocklists.count > 0;
+
+    if (!activeExpected && !futureExpected) {
+        [self emitStrictifyResultForEntries:addedEntries
+                                  oldBundle:oldBundle
+                                   toBundle:bundle
+                                bundleSaved:bundleSaved
+                     blocklistFilePersisted:blocklistFilePersisted
+                             activeExpected:NO
+                             futureExpected:NO
+                               activeResult:@{}
+                                activeError:nil
+                               futureResult:@{}
+                                futureError:nil
+                                   timedOut:NO
+                                  startedAt:startedAt
+                             operationToken:scopedOperationToken];
+        return;
+    }
+
+    SCXPCClient *xpc = [[SCXPCClient alloc] init];
+    dispatch_queue_t resultQueue = dispatch_queue_create("org.eyebeam.Fence.strictify-result", DISPATCH_QUEUE_SERIAL);
+    __block NSInteger pendingReplies = (activeExpected ? 1 : 0) + (futureExpected ? 1 : 0);
+    __block BOOL finalized = NO;
+    __block NSDictionary<NSString *, id> *activeResult = @{};
+    __block NSDictionary<NSString *, id> *futureResult = @{};
+    __block NSError *activeError = nil;
+    __block NSError *futureError = nil;
+
+    void (^finish)(BOOL) = ^(BOOL timedOut) {
+        NSDictionary *capturedActiveResult = activeResult ?: @{};
+        NSDictionary *capturedFutureResult = futureResult ?: @{};
+        NSError *capturedActiveError = activeError;
+        NSError *capturedFutureError = futureError;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self emitStrictifyResultForEntries:addedEntries
+                                      oldBundle:oldBundle
+                                       toBundle:bundle
+                                    bundleSaved:bundleSaved
+                         blocklistFilePersisted:blocklistFilePersisted
+                                 activeExpected:activeExpected
+                                 futureExpected:futureExpected
+                                   activeResult:capturedActiveResult
+                                    activeError:capturedActiveError
+                                   futureResult:capturedFutureResult
+                                    futureError:capturedFutureError
+                                       timedOut:timedOut
+                                      startedAt:startedAt
+                                 operationToken:scopedOperationToken];
+        });
+    };
+
+    void (^recordReply)(BOOL, NSDictionary<NSString *, id> *, NSError *) =
+        ^(BOOL isActive, NSDictionary<NSString *, id> *result, NSError *error) {
+        dispatch_async(resultQueue, ^{
+            if (finalized) return;
+            if (isActive) {
+                activeResult = [result copy] ?: @{};
+                activeError = error;
+            } else {
+                futureResult = [result copy] ?: @{};
+                futureError = error;
+            }
+            pendingReplies -= 1;
+            if (pendingReplies == 0) {
+                finalized = YES;
+                finish(NO);
+            }
+        });
+    };
+
+    if (activeExpected) {
+        [xpc appendEntriesToActiveBlocklist:addedEntries
+                  matchingExistingBlocklist:expectedActiveBlocklist
+                                 resultReply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+            recordReply(YES, result, error);
+        }];
+    }
+    if (futureExpected) {
+        [xpc appendEntriesToApprovedSchedules:expectedApprovedBlocklists
+                                       entries:addedEntries
+                                   resultReply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+            recordReply(NO, result, error);
+        }];
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), resultQueue, ^{
+        if (finalized) return;
+        finalized = YES;
+        finish(YES);
+    });
+}
+
+- (void)emitStrictifyResultForEntries:(NSArray<NSString *> *)addedEntries
+                            oldBundle:(SCBlockBundle *)oldBundle
+                             toBundle:(SCBlockBundle *)bundle
+                          bundleSaved:(BOOL)bundleSaved
+               blocklistFilePersisted:(BOOL)blocklistFilePersisted
+                       activeExpected:(BOOL)activeExpected
+                       futureExpected:(BOOL)futureExpected
+                         activeResult:(NSDictionary<NSString *, id> *)activeResult
+                          activeError:(NSError *)activeError
+                         futureResult:(NSDictionary<NSString *, id> *)futureResult
+                          futureError:(NSError *)futureError
+                             timedOut:(BOOL)timedOut
+                            startedAt:(NSDate *)startedAt
+                       operationToken:(NSString *)operationToken {
+    BOOL usedInCommittedSchedule = [self bundleIsUsedInCommittedSchedule:bundle.bundleID];
+    BOOL blockRunning = [SCBlockUtilities anyBlockIsRunning];
+
+    NSUInteger validInputCount = 0;
+    NSUInteger appEntryCount = 0;
+    NSUInteger siteEntryCount = 0;
+    NSMutableOrderedSet<NSString *> *canonicalEntries = [NSMutableOrderedSet orderedSet];
+    for (id rawEntry in addedEntries ?: @[]) {
+        if (![rawEntry isKindOfClass:[NSString class]]) continue;
+        NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+        if (canonicalEntry == nil) continue;
+        validInputCount += 1;
+        [canonicalEntries addObject:canonicalEntry];
+    }
+    for (NSString *canonicalEntry in canonicalEntries) {
+        if ([canonicalEntry hasPrefix:@"app:"]) appEntryCount += 1;
+        else siteEntryCount += 1;
+    }
+    NSUInteger requestedCount = addedEntries.count;
+    NSUInteger rejectedCount = requestedCount - MIN(requestedCount, validInputCount);
+    NSUInteger duplicateCount = validInputCount - MIN(validInputCount, canonicalEntries.count);
+
+    NSString *activeOutcome = [activeResult[@"outcome"] isKindOfClass:[NSString class]]
+        ? activeResult[@"outcome"] : @"failed";
+    NSString *futureOutcome = [futureResult[@"outcome"] isKindOfClass:[NSString class]]
+        ? futureResult[@"outcome"] : @"failed";
+    BOOL activeVerified = !activeExpected ||
+        (activeError == nil && [activeOutcome isEqualToString:@"verified"] &&
+         [activeResult[@"active_verified"] boolValue]);
+    BOOL futureVerified = !futureExpected ||
+        (futureError == nil && [futureOutcome isEqualToString:@"verified"] &&
+         [futureResult[@"future_verified"] boolValue]);
+    BOOL activePathSucceeded = activeExpected && activeVerified;
+    BOOL futurePathSucceeded = futureExpected && futureVerified;
+    BOOL activeSettingsPersisted = !activeExpected || [activeResult[@"settings_persisted"] boolValue];
+    BOOL futureSettingsPersisted = !futureExpected || [futureResult[@"settings_persisted"] boolValue];
+    BOOL settingsPersisted = blocklistFilePersisted && activeSettingsPersisted && futureSettingsPersisted;
+
+    NSString *target = activeExpected && futureExpected ? @"active_and_future" :
+        (activeExpected ? @"active" : (futureExpected ? @"future" : @"none"));
+    NSString *skipReason = @"none";
+    NSString *outcome = @"failed";
+    NSString *failedStage = @"none";
+    if (!usedInCommittedSchedule) {
+        outcome = @"skipped";
+        skipReason = blockRunning ? @"bundle_not_in_committed_schedule" : @"not_committed";
+        failedStage = @"commitment_resolution";
+    } else if (!activeExpected && !futureExpected) {
+        outcome = @"skipped";
+        skipReason = blockRunning ? @"no_active_segment" : @"no_matching_future_jobs";
+        failedStage = @"future_resolution";
+    } else if (!bundleSaved || !blocklistFilePersisted) {
+        outcome = @"failed";
+        failedStage = @"persist";
+    } else if (timedOut) {
+        outcome = (activePathSucceeded || futurePathSucceeded) ? @"partial" : @"failed";
+        failedStage = activeExpected && !activeVerified ? @"active_apply" : @"future_apply";
+    } else if (activeVerified && futureVerified && settingsPersisted) {
+        outcome = @"verified";
+    } else {
+        outcome = (activePathSucceeded || futurePathSucceeded) ? @"partial" : @"failed";
+        NSString *activeStage = [activeResult[@"failed_stage"] isKindOfClass:[NSString class]]
+            ? activeResult[@"failed_stage"] : @"precondition";
+        NSString *futureStage = [futureResult[@"failed_stage"] isKindOfClass:[NSString class]]
+            ? futureResult[@"failed_stage"] : @"precondition";
+        if (activeExpected && !activeVerified) {
+            failedStage = SCStrictifyFailureStageFromDaemonStage(activeStage, YES);
+        } else if (futureExpected && !futureVerified) {
+            failedStage = SCStrictifyFailureStageFromDaemonStage(futureStage, NO);
         } else {
-            NSLog(@"SCScheduleManager: Requested append to %lu approved schedules for bundle %@",
-                  (unsigned long)expectedApprovedBlocklists.count, bundle.name);
+            failedStage = @"settings_sync";
         }
+    }
+
+    NSDictionary *applyResult = [activeResult[@"apply_result"] isKindOfClass:[NSDictionary class]]
+        ? activeResult[@"apply_result"] : @{};
+    NSDictionary *entryCounts = [applyResult[@"entry_counts"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"entry_counts"] : @{};
+    NSDictionary *hosts = [applyResult[@"hosts"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"hosts"] : @{};
+    NSDictionary *packetFilter = [applyResult[@"packet_filter"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"packet_filter"] : @{};
+    NSDictionary *apps = [applyResult[@"apps"] isKindOfClass:[NSDictionary class]]
+        ? applyResult[@"apps"] : @{};
+    BOOL hasPhysicalApplyResult = activeExpected && applyResult.count > 0;
+
+    NSString *layer = @"unknown";
+    if (hasPhysicalApplyResult &&
+        (!SCStrictifyStatusSucceeded(hosts[@"ready"]) ||
+        !SCStrictifyStatusSucceeded(hosts[@"write"]) ||
+         !SCStrictifyStatusSucceeded(hosts[@"verify"]))) {
+        layer = @"hosts";
+    } else if (hasPhysicalApplyResult &&
+               (!SCStrictifyStatusSucceeded(packetFilter[@"anchor_open"]) ||
+               !SCStrictifyStatusSucceeded(packetFilter[@"anchor_write"]) ||
+                !SCStrictifyStatusSucceeded(packetFilter[@"verify"]))) {
+        layer = @"pf";
+    } else if (hasPhysicalApplyResult &&
+               ([apps[@"kill_failure_count"] unsignedIntegerValue] > 0 ||
+                (appEntryCount > 0 && ![apps[@"monitoring_after"] boolValue]))) {
+        layer = @"apps";
+    } else if (!settingsPersisted) {
+        layer = @"settings";
+    } else if (![outcome isEqualToString:@"verified"]) {
+        layer = @"verification";
+    }
+
+    NSString *pfCommand = [packetFilter[@"command"] isKindOfClass:[NSString class]]
+        ? packetFilter[@"command"] : @"none";
+    if ([pfCommand isEqualToString:@"start"]) pfCommand = @"load";
+    if (![@[@"none", @"load", @"refresh", @"append"] containsObject:pfCommand]) pfCommand = @"none";
+
+    NSUInteger durationMilliseconds = (NSUInteger)llround(
+        MAX(0, [[NSDate date] timeIntervalSinceDate:startedAt]) * 1000.0);
+    NSMutableDictionary<NSString *, id> *fields = [@{
+        @"operation": @"strictify",
+        @"outcome": outcome,
+        @"target": target,
+        @"failed_stage": failedStage,
+        @"skip_reason": skipReason,
+        @"layer": layer,
+        @"pf_command": pfCommand,
+        @"is_allowlist": @NO,
+        @"bundle_saved": @(bundleSaved),
+        @"blocklist_file_persisted": @(blocklistFilePersisted),
+        @"used_in_committed_schedule": @(usedInCommittedSchedule),
+        @"block_running": @(blockRunning),
+        @"active_expected": @(activeExpected),
+        @"active_precondition_matched": @(activeExpected &&
+            ![failedStage isEqualToString:@"active_precondition"] &&
+            ![failedStage isEqualToString:@"canonicalize"] &&
+            ![failedStage isEqualToString:@"lock"]),
+        @"active_verified": @(activeVerified),
+        @"active_physical_reapply_attempted": @([activeResult[@"physical_reapply_attempted"] boolValue]),
+        @"future_verified": @(futureVerified),
+        @"xpc_completed": @(!timedOut),
+        @"settings_persisted": @(settingsPersisted),
+        @"hosts_ready": @(SCStrictifyStatusSucceeded(hosts[@"ready"])),
+        @"hosts_write_succeeded": @(SCStrictifyStatusSucceeded(hosts[@"write"])),
+        @"hosts_verification_succeeded": @(SCStrictifyStatusSucceeded(hosts[@"verify"])),
+        @"pf_anchor_open_succeeded": @(SCStrictifyStatusSucceeded(packetFilter[@"anchor_open"])),
+        @"pf_anchor_write_succeeded": @(SCStrictifyStatusSucceeded(packetFilter[@"anchor_write"])),
+        @"pf_main_configuration_write_succeeded": @(SCStrictifyStatusSucceeded(packetFilter[@"main_config_write"])),
+        @"pf_verification_succeeded": @(SCStrictifyStatusSucceeded(packetFilter[@"verify"])),
+        @"app_monitoring_before": @([apps[@"monitoring_before"] boolValue]),
+        @"app_monitoring_after": @([apps[@"monitoring_after"] boolValue]),
+        @"operation_sequence": @(SCNextStrictifyOperationSequence()),
+        @"requested_addition_count": @(requestedCount),
+        @"canonical_addition_count": @(canonicalEntries.count),
+        @"duplicate_addition_count": @(duplicateCount),
+        @"input_entry_count": @(requestedCount),
+        @"valid_entry_count": @(validInputCount),
+        @"rejected_entry_count": @(rejectedCount),
+        @"app_entry_count": @(appEntryCount),
+        @"site_entry_count": @(siteEntryCount),
+        @"dns_lookup_count": @([entryCounts[@"dns_lookup_count"] unsignedIntegerValue]),
+        @"dns_resolved_host_count": @([entryCounts[@"dns_resolved_host_count"] unsignedIntegerValue]),
+        @"dns_resolved_address_count": @([entryCounts[@"dns_resolved_address_count"] unsignedIntegerValue]),
+        @"dns_failure_count": @([entryCounts[@"dns_failure_count"] unsignedIntegerValue]),
+        @"unapplied_entry_count": @([entryCounts[@"unapplied_count"] unsignedIntegerValue]),
+        @"blocked_app_count": @([apps[@"blocked_count"] unsignedIntegerValue]),
+        @"app_kill_attempt_count": @([apps[@"kill_attempt_count"] unsignedIntegerValue]),
+        @"app_terminate_success_count": @([apps[@"terminate_success_count"] unsignedIntegerValue]),
+        @"app_force_kill_count": @([apps[@"force_kill_count"] unsignedIntegerValue]),
+        @"app_kill_failure_count": @([apps[@"kill_failure_count"] unsignedIntegerValue]),
+        @"duration_milliseconds": @(durationMilliseconds),
+        @"pf_exit_code": @([packetFilter[@"exit_code"] integerValue]),
+        @"future_candidate_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
+        @"future_job_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
+        @"future_loaded_job_count": @([futureResult[@"loaded_job_count"] unsignedIntegerValue]),
+        @"future_launchd_probe_failure_count": @([futureResult[@"launchd_probe_failure_count"] unsignedIntegerValue]),
+        @"approval_requested_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
+        @"approval_matched_count": @([futureResult[@"matched_count"] unsignedIntegerValue]),
+        @"approval_updated_count": @([futureResult[@"updated_count"] unsignedIntegerValue]),
+        @"approval_skipped_count": @([futureResult[@"skipped_count"] unsignedIntegerValue]),
+        @"active_before_count": @([activeResult[@"active_before_count"] unsignedIntegerValue]),
+        @"active_after_count": @([activeResult[@"active_after_count"] unsignedIntegerValue]),
+        @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
+    } mutableCopy];
+
+    for (NSArray *pair in @[
+        @[@"hosts_error_code", hosts[@"error_code"] ?: NSNull.null],
+        @[@"pf_error_code", packetFilter[@"error_code"] ?: NSNull.null],
+        @[@"app_scan_error_code", apps[@"scan_error_code"] ?: NSNull.null],
+    ]) {
+        if ([pair[1] isKindOfClass:[NSNumber class]]) fields[pair[0]] = pair[1];
+    }
+
+    SCTelemetryEventLevel level = [outcome isEqualToString:@"verified"]
+        ? SCTelemetryEventLevelInfo : SCTelemetryEventLevelError;
+    [SCSentry captureTelemetryEvent:@"block.strictify_result" level:level fields:fields];
+    [[NSUserDefaults standardUserDefaults] setObject:outcome forKey:@"SCLastStrictifyTelemetryOutcome"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if ([outcome isEqualToString:@"verified"]) {
+        [self clearStrictifyRetryStateForOperationToken:operationToken];
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:SCScheduleStrictifyDidCompleteNotification
+                                                        object:self
+                                                      userInfo:@{
+        SCScheduleStrictifyOutcomeKey: outcome,
+        SCScheduleStrictifyFailedStageKey: failedStage,
+        SCScheduleStrictifyOperationTokenKey: operationToken,
     }];
+}
+
+- (BOOL)retryLastStrictifyUpdate {
+    NSString *operationToken = nil;
+    @synchronized (self) {
+        operationToken = [self.lastStrictifyOperationToken copy];
+    }
+    if (operationToken.length == 0) return NO;
+    return [self retryStrictifyUpdateForOperationToken:operationToken];
+}
+
+- (BOOL)retryStrictifyUpdateForOperationToken:(NSString *)operationToken {
+    if (operationToken.length == 0) return NO;
+
+    SCStrictifyRetryState *state = nil;
+    @synchronized (self) {
+        state = self.strictifyRetryStatesByToken[operationToken];
+    }
+    if (state.addedEntries.count == 0 || state.bundle.bundleID.length == 0) return NO;
+
+    // Rebase the operation onto the latest saved bundle. A retry must never
+    // write an older bundle snapshot over an edit that completed while this
+    // operation was in flight.
+    SCBlockBundle *currentBundle = [[self bundleWithID:state.bundle.bundleID] copy];
+    if (currentBundle == nil) return NO;
+    for (NSString *entry in state.addedEntries) {
+        if (![currentBundle.entries containsObject:entry]) return NO;
+    }
+
+    SCBlockBundle *currentBundleWithoutThisOperation = [currentBundle copy];
+    [currentBundleWithoutThisOperation.entries removeObjectsInArray:state.addedEntries];
+
+    BOOL usedInCommittedSchedule =
+        [self bundleIsUsedInCommittedSchedule:currentBundle.bundleID];
+    BOOL blocklistFilePersisted = !usedInCommittedSchedule;
+    if (usedInCommittedSchedule) {
+        NSError *error = nil;
+        SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+        blocklistFilePersisted = [bridge writeBlocklistFileForBundle:currentBundle error:&error];
+        if (error != nil) {
+            NSLog(@"SCScheduleManager: Strictify retry file write failed (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
+        }
+    }
+
+    [self appendCommittedAdditions:state.addedEntries
+                         oldBundle:currentBundleWithoutThisOperation
+                          toBundle:currentBundle
+                       bundleSaved:state.bundleSaved
+            blocklistFilePersisted:blocklistFilePersisted
+                    operationToken:operationToken];
+    return YES;
+}
+
+- (NSString *)storeStrictifyRetryStateForEntries:(NSArray<NSString *> *)addedEntries
+                                        toBundle:(SCBlockBundle *)bundle
+                                     bundleSaved:(BOOL)bundleSaved
+                                  operationToken:(NSString *)operationToken {
+    NSString *token = operationToken.length > 0 ? [operationToken copy] : NSUUID.UUID.UUIDString;
+    SCStrictifyRetryState *state = [[SCStrictifyRetryState alloc] init];
+    state.addedEntries = [addedEntries copy] ?: @[];
+    state.bundle = [bundle copy];
+    state.bundleSaved = bundleSaved;
+
+    @synchronized (self) {
+        if (self.strictifyRetryStatesByToken[token] == nil) {
+            [self.strictifyRetryTokenOrder addObject:token];
+        }
+        self.strictifyRetryStatesByToken[token] = state;
+        self.lastStrictifyOperationToken = token;
+
+        // Completion sheets are short lived. Keep a small bounded set so a
+        // long-running app session cannot accumulate retry snapshots forever.
+        while (self.strictifyRetryTokenOrder.count > 16) {
+            NSString *oldestToken = self.strictifyRetryTokenOrder.firstObject;
+            [self.strictifyRetryTokenOrder removeObjectAtIndex:0];
+            [self.strictifyRetryStatesByToken removeObjectForKey:oldestToken];
+        }
+    }
+    return token;
+}
+
+- (void)clearStrictifyRetryStateForOperationToken:(NSString *)operationToken {
+    if (operationToken.length == 0) return;
+    @synchronized (self) {
+        [self.strictifyRetryStatesByToken removeObjectForKey:operationToken];
+        [self.strictifyRetryTokenOrder removeObject:operationToken];
+        if ([self.lastStrictifyOperationToken isEqualToString:operationToken]) {
+            self.lastStrictifyOperationToken = self.strictifyRetryTokenOrder.lastObject;
+        }
+    }
 }
 
 - (nullable SCBlockBundle *)bundleWithID:(NSString *)bundleID {
@@ -654,11 +1208,11 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     return [[NSUserDefaults standardUserDefaults] objectForKey:storageKey];
 }
 
-- (void)commitToWeek {
-    [self commitToWeekWithOffset:0];
+- (BOOL)commitToWeek {
+    return [self commitToWeekWithOffset:0];
 }
 
-- (void)commitToWeekWithOffset:(NSInteger)weekOffset {
+- (BOOL)commitToWeekWithOffset:(NSInteger)weekOffset {
     // Clean up old week data from NSUserDefaults before committing
     [self cleanupExpiredCommitments];
 
@@ -701,7 +1255,7 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         if (bundle.enabled) {
             [enabledBundles addObject:bundle];
         } else {
-            NSLog(@"SCScheduleManager: Skipping disabled bundle %@", bundle.name);
+            NSLog(@"SCScheduleManager: Skipping one disabled bundle");
         }
     }
 
@@ -711,10 +1265,16 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     for (SCBlockBundle *bundle in enabledBundles) {
         SCWeeklySchedule *schedule = [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset];
         if (!schedule) {
-            NSLog(@"SCScheduleManager: Creating empty schedule for bundle '%@' (no allow blocks drawn)", bundle.name);
+            NSLog(@"SCScheduleManager: Creating one empty schedule (no allow blocks drawn)");
             [self createScheduleForBundle:bundle weekOffset:weekOffset];
         }
     }
+
+    BOOL commitInstallSucceeded = YES;
+    NSString *commitFailureStage = @"verification";
+    NSInteger commitFailureCode = 0;
+    NSUInteger segmentsPlanned = 0;
+    NSUInteger segmentsInstalled = 0;
 
     if (enabledBundles.count == 0) {
         NSLog(@"SCScheduleManager: No enabled bundles to schedule");
@@ -736,44 +1296,52 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
             dispatch_semaphore_signal(daemonSema);
         }];
 
-        // Wait for daemon installation (use run loop to avoid main thread deadlock)
-        if (![NSThread isMainThread]) {
-            dispatch_semaphore_wait(daemonSema, DISPATCH_TIME_FOREVER);
-        } else {
-            while (dispatch_semaphore_wait(daemonSema, DISPATCH_TIME_NOW)) {
-                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-            }
+        // Authorization is an explicit user interaction and must not time out
+        // while the system password/Touch ID sheet is still open.
+        BOOL daemonCompleted = SCScheduleWaitForSemaphore(daemonSema, 0);
+
+        if (!daemonCompleted || daemonError) {
+            NSLog(@"ERROR: Failed to install daemon for schedule commit (domain=%@ code=%ld)",
+                  daemonError.domain, (long)daemonError.code);
+            commitInstallSucceeded = NO;
+            commitFailureStage = @"daemon_install";
+            commitFailureCode = daemonCompleted ? daemonError.code : 408;
         }
 
-        if (daemonError) {
-            NSLog(@"ERROR: Failed to install daemon for schedule commit: %@", daemonError);
-            return; // Can't proceed without daemon
+        if (!commitInstallSucceeded) {
+            SCEmitScheduleCommitFailure(commitFailureStage, segments.count, 0,
+                                        weekOffset, commitFailureCode);
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
+            [defaults setObject:commitFailureStage forKey:kLastScheduleCommitFailureStageKey];
+            [defaults synchronize];
+            return NO;
         }
 
         NSLog(@"SCScheduleManager: Daemon installed, proceeding with schedule registration");
 
-        // Install a job for each segment
+        // Install every future job before starting an in-progress segment. If
+        // anything fails, every attempted local job and root-owned approval is
+        // rolled back before the commitment is persisted.
+        NSMutableArray<SCBlockSegment *> *futureSegments = [NSMutableArray array];
+        NSMutableArray<SCBlockSegment *> *inProgressSegments = [NSMutableArray array];
         for (SCBlockSegment *segment in segments) {
-            // Skip segments that have already passed (for current week)
             if (weekOffset == 0 && [segment.startDate timeIntervalSinceNow] < 0) {
-                // Check if we're currently within this segment
                 if ([segment.endDate timeIntervalSinceNow] > 0) {
-                    // We're in the middle of this segment - start it immediately!
-                    NSLog(@"SCScheduleManager: In-progress segment %@ - starting immediately", segment);
-                    NSError *startError = nil;
-                    if (![bridge startMergedBlockImmediatelyForBundles:segment.activeBundles
-                                                            segmentID:segment.segmentID
-                                                              endDate:segment.endDate
-                                                                error:&startError]) {
-                        NSLog(@"WARNING: Failed to start in-progress segment: %@", startError);
-                    }
+                    [inProgressSegments addObject:segment];
                 } else {
-                    NSLog(@"SCScheduleManager: Skipping past segment %@", segment);
+                    NSLog(@"SCScheduleManager: Skipping one past segment");
                 }
-                continue;
+            } else {
+                [futureSegments addObject:segment];
             }
+        }
+        segmentsPlanned = futureSegments.count + inProgressSegments.count;
+        NSMutableArray<NSString *> *attemptedSegmentIDs = [NSMutableArray array];
 
-            // Install launchd job for this segment
+        for (SCBlockSegment *segment in futureSegments) {
+            [attemptedSegmentIDs addObject:segment.segmentID];
+            error = nil;
             BOOL success = [bridge installJobForSegmentWithBundles:segment.activeBundles
                                                          segmentID:segment.segmentID
                                                          startDate:segment.startDate
@@ -783,8 +1351,58 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
                                                         weekOffset:weekOffset
                                                              error:&error];
             if (!success) {
-                NSLog(@"ERROR: Failed to install segment job: %@", error);
+                NSLog(@"ERROR: Failed to install segment job (domain=%@ code=%ld)",
+                      error.domain, (long)error.code);
+                commitInstallSucceeded = NO;
+                NSString *reportedStage = error.userInfo[SCScheduleLaunchdBridgeFailureStageKey];
+                commitFailureStage = [reportedStage isEqualToString:@"schedule_register"]
+                    ? @"schedule_register" : @"job_install";
+                commitFailureCode = error != nil ? error.code : -1;
+                break;
             }
+            segmentsInstalled += 1;
+        }
+
+        if (commitInstallSucceeded) {
+            for (SCBlockSegment *segment in futureSegments) {
+                if ([bridge installedJobLabelsForSegmentID:segment.segmentID].count == 0) {
+                    commitInstallSucceeded = NO;
+                    commitFailureStage = @"verification";
+                    commitFailureCode = 2;
+                    break;
+                }
+            }
+        }
+
+        if (commitInstallSucceeded) {
+            for (SCBlockSegment *segment in inProgressSegments) {
+                [attemptedSegmentIDs addObject:segment.segmentID];
+                NSError *startError = nil;
+                NSLog(@"SCScheduleManager: Starting one in-progress segment immediately");
+                if (![bridge startMergedBlockImmediatelyForBundles:segment.activeBundles
+                                                        segmentID:segment.segmentID
+                                                          endDate:segment.endDate
+                                                            error:&startError]) {
+                    commitInstallSucceeded = NO;
+                    commitFailureStage = @"schedule_register";
+                    commitFailureCode = startError != nil ? startError.code : -1;
+                    break;
+                }
+                segmentsInstalled += 1;
+            }
+        }
+
+        if (!commitInstallSucceeded) {
+            BOOL rolledBack = SCRollbackScheduleSegments(attemptedSegmentIDs, bridge, xpc);
+            if (!rolledBack) NSLog(@"ERROR: Schedule commit rollback was incomplete");
+            SCEmitScheduleCommitFailure(commitFailureStage, segmentsPlanned,
+                                        segmentsInstalled, weekOffset, commitFailureCode);
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
+            [defaults setObject:commitFailureStage forKey:kLastScheduleCommitFailureStageKey];
+            [defaults synchronize];
+            [self postChangeNotification];
+            return NO;
         }
     }
 
@@ -794,12 +1412,15 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     NSString *weekKey = [self weekKeyForOffset:weekOffset];
     NSString *storageKey = [kWeekCommitmentPrefix stringByAppendingString:weekKey];
     [[NSUserDefaults standardUserDefaults] setObject:endOfWeek forKey:storageKey];
+    [[NSUserDefaults standardUserDefaults] setObject:@"verified" forKey:kLastScheduleCommitOutcomeKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLastScheduleCommitFailureStageKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
     // Mark that user has committed (persistent - skips test block prompt on future launches)
     [SCVersionTracker markHasEverCommitted];
 
     [self postChangeNotification];
+    return YES;
 }
 
 - (BOOL)changeWouldLoosenSchedule:(SCWeeklySchedule *)oldSchedule
@@ -962,10 +1583,6 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     }
 
     NSLog(@"SCScheduleManager: Calculated %lu segments from %lu bundles", (unsigned long)segments.count, (unsigned long)bundles.count);
-    for (SCBlockSegment *seg in segments) {
-        NSLog(@"  %@", seg);
-    }
-
     return segments;
 }
 
@@ -1005,7 +1622,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     // Clear ApprovedSchedules
     [xpc clearAllApprovedSchedules:^(NSError *error) {
         if (error) {
-            NSLog(@"WARNING: Failed to clear ApprovedSchedules: %@", error);
+            NSLog(@"WARNING: Failed to clear approved schedules (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
         } else {
             NSLog(@"SCScheduleManager: Cleared ApprovedSchedules in daemon");
         }
@@ -1016,7 +1634,8 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         NSLog(@"SCScheduleManager: Active block detected, clearing via debug method...");
         [xpc clearBlockForDebug:^(NSError *error) {
             if (error) {
-                NSLog(@"WARNING: Failed to clear active block: %@", error);
+                NSLog(@"WARNING: Failed to clear active block (domain=%@ code=%ld)",
+                      error.domain, (long)error.code);
             } else {
                 NSLog(@"SCScheduleManager: Active block cleared via debug method");
             }
@@ -1039,7 +1658,7 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
             // This week's commitment has expired - uninstall its jobs
             NSString *weekKey = [self weekKeyForOffset:weekOffset];
 
-            NSLog(@"SCScheduleManager: Cleaning up expired commitment for week %@", weekKey);
+            NSLog(@"SCScheduleManager: Cleaning up one expired commitment");
 
             // Uninstall jobs for all bundles from that week
             for (SCBlockBundle *bundle in self.mutableBundles) {
@@ -1068,7 +1687,7 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
         if (weekKey) {
             // ISO date strings sort chronologically - delete only past weeks
             if ([weekKey compare:currentWeekKey] == NSOrderedAscending) {
-                NSLog(@"SCScheduleManager: Removing old week data: %@", key);
+                NSLog(@"SCScheduleManager: Removing one old week record");
                 [defaults removeObjectForKey:key];
             }
         }
@@ -1120,7 +1739,7 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
                 NSString *segmentID = [remainder componentsSeparatedByString:@"."].firstObject;
                 if (segmentID.length > 0) {
                     [staleSegmentIDs addObject:segmentID];
-                    NSLog(@"SCScheduleManager: Found stale job %@ (endDate=%@)", segmentID, endDate);
+                    NSLog(@"SCScheduleManager: Found one stale schedule job");
                 }
             }
         }
@@ -1135,9 +1754,10 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
             dispatch_semaphore_t sema = dispatch_semaphore_create(0);
             [xpc cleanupStaleSchedule:segmentID reply:^(NSError *error) {
                 if (error) {
-                    NSLog(@"SCScheduleManager: Cleanup failed for %@: %@", segmentID, error);
+                    NSLog(@"SCScheduleManager: Schedule cleanup failed (domain=%@ code=%ld)",
+                          error.domain, (long)error.code);
                 } else {
-                    NSLog(@"SCScheduleManager: Cleaned up stale schedule %@", segmentID);
+                    NSLog(@"SCScheduleManager: Cleaned up one stale schedule");
                 }
                 dispatch_semaphore_signal(sema);
             }];
@@ -1229,6 +1849,166 @@ static const NSInteger kDefaultEmergencyUnlockCredits = 5;
     [self.mutableBundles sortUsingComparator:^NSComparisonResult(SCBlockBundle *b1, SCBlockBundle *b2) {
         return [@(b1.displayOrder) compare:@(b2.displayOrder)];
     }];
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)telemetryStructuralSnapshot {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *domainName = NSBundle.mainBundle.bundleIdentifier;
+    NSDictionary *persistentDomain = domainName.length > 0
+        ? [defaults persistentDomainForName:domainName] ?: @{}
+        : @{};
+
+    id rawBundlesValue = persistentDomain[kBundlesKey];
+    NSUInteger rawBundleCount = [rawBundlesValue isKindOfClass:[NSArray class]]
+        ? [rawBundlesValue count] : 0;
+
+    NSUInteger rawScheduleCount = 0;
+    NSUInteger decodedScheduleCount = 0;
+    NSUInteger commitmentCount = 0;
+    for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+        NSString *weekKey = [self weekKeyForOffset:weekOffset];
+        NSString *scheduleKey = [kWeekSchedulesPrefix stringByAppendingString:weekKey];
+        id rawSchedulesValue = persistentDomain[scheduleKey];
+        if ([rawSchedulesValue isKindOfClass:[NSArray class]]) {
+            rawScheduleCount += [rawSchedulesValue count];
+        }
+        decodedScheduleCount += [self schedulesForWeekOffset:weekOffset].count;
+        if ([self isCommittedForWeekOffset:weekOffset]) commitmentCount += 1;
+    }
+
+    NSDictionary<NSString *, NSArray<NSString *> *> *installedJobs = [self installedMergedScheduleIDsByStartKey];
+    NSUInteger installedJobCount = 0;
+    for (NSArray<NSString *> *matchingJobs in installedJobs.allValues) {
+        installedJobCount += matchingJobs.count;
+    }
+
+    BOOL activeProjectionAvailable = [self isCommittedForWeekOffset:0];
+    NSUInteger expectedActiveEntryCount = 0;
+    NSUInteger expectedActiveAppEntryCount = 0;
+    NSUInteger expectedActiveSiteEntryCount = 0;
+    BOOL expectedRequiresHosts = NO;
+    BOOL expectedRequiresPacketFilter = NO;
+    if (activeProjectionAvailable) {
+        SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+        NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:[self enabledBundlesForCommittedBlockCalculations]
+                                                                          weekOffset:0
+                                                                              bridge:bridge];
+        NSDate *now = [NSDate date];
+        NSMutableOrderedSet<NSString *> *expectedEntries = [NSMutableOrderedSet orderedSet];
+        for (SCBlockSegment *segment in segments) {
+            if ([segment.startDate compare:now] == NSOrderedDescending ||
+                [segment.endDate compare:now] == NSOrderedAscending) {
+                continue;
+            }
+            for (SCBlockBundle *activeBundle in segment.activeBundles) {
+                for (id rawEntry in activeBundle.entries ?: @[]) {
+                    if (![rawEntry isKindOfClass:[NSString class]]) continue;
+                    NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+                    // Existing opaque legacy entries remain part of the local
+                    // projection count; the value itself never leaves memory.
+                    [expectedEntries addObject:canonicalEntry ?: rawEntry];
+                }
+            }
+            break;
+        }
+        expectedActiveEntryCount = expectedEntries.count;
+        for (NSString *entry in expectedEntries) {
+            SCBlockEntry *blockEntry = [SCBlockEntry entryFromString:entry];
+            if (blockEntry.isAppEntry) {
+                expectedActiveAppEntryCount += 1;
+            } else {
+                expectedActiveSiteEntryCount += 1;
+                BOOL requiresPacketFilter = [blockEntry.hostname isEqualToString:@"*"] ||
+                    [blockEntry.hostname isValidIPAddress] || blockEntry.port != 0;
+                expectedRequiresPacketFilter = expectedRequiresPacketFilter || requiresPacketFilter;
+                expectedRequiresHosts = expectedRequiresHosts || !requiresPacketFilter;
+            }
+        }
+    }
+
+    BOOL hasScheduleState = rawBundleCount > 0 || rawScheduleCount > 0 || commitmentCount > 0;
+    return @{
+        @"app_has_schedule_state": @(hasScheduleState),
+        @"raw_bundle_count": @(rawBundleCount),
+        @"decoded_bundle_count": @(self.mutableBundles.count),
+        @"raw_schedule_count": @(rawScheduleCount),
+        @"decoded_schedule_count": @(decodedScheduleCount),
+        @"commitment_count": @(commitmentCount),
+        @"installed_schedule_job_count": @(installedJobCount),
+        @"active_projection_available": @(activeProjectionAvailable),
+        @"expected_active_entry_count": @(expectedActiveEntryCount),
+        @"expected_active_app_entry_count": @(expectedActiveAppEntryCount),
+        @"expected_active_site_entry_count": @(expectedActiveSiteEntryCount),
+        @"expected_requires_hosts": @(expectedRequiresHosts),
+        @"expected_requires_packet_filter": @(expectedRequiresPacketFilter),
+    };
+}
+
+- (NSDictionary<NSString *, id> *)daemonConsistencyProjection {
+    static const NSUInteger kMaximumProjectedSchedules = 512;
+    static const NSUInteger kMaximumProjectedEntries = 4096;
+
+    NSDate *now = [NSDate date];
+    NSMutableArray<NSDictionary<NSString *, id> *> *expectedApprovals = [NSMutableArray array];
+    NSMutableArray<NSDictionary<NSString *, id> *> *expectedJobs = [NSMutableArray array];
+    NSMutableOrderedSet<NSString *> *expectedActiveEntries = [NSMutableOrderedSet orderedSet];
+    BOOL activeProjectionAvailable = [self isCommittedForWeekOffset:0];
+    NSUInteger totalProjectedEntries = 0;
+
+    NSArray<SCBlockBundle *> *enabledBundles = [self enabledBundlesForCommittedBlockCalculations];
+    SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+    for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+        if (![self isCommittedForWeekOffset:weekOffset]) continue;
+
+        NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:enabledBundles
+                                                                          weekOffset:weekOffset
+                                                                              bridge:bridge];
+        for (SCBlockSegment *segment in segments) {
+            if ([segment.endDate compare:now] != NSOrderedDescending) continue;
+
+            NSMutableOrderedSet<NSString *> *segmentEntries = [NSMutableOrderedSet orderedSet];
+            for (SCBlockBundle *bundle in segment.activeBundles) {
+                for (id rawEntry in bundle.entries ?: @[]) {
+                    if ([rawEntry isKindOfClass:[NSString class]]) {
+                        [segmentEntries addObject:rawEntry];
+                    }
+                }
+            }
+            totalProjectedEntries += segmentEntries.count;
+            if (expectedApprovals.count >= kMaximumProjectedSchedules ||
+                totalProjectedEntries > kMaximumProjectedEntries) {
+                return @{
+                    @"schema_version": @1,
+                    @"projection_valid": @NO,
+                    @"active_projection_available": @(activeProjectionAvailable),
+                    @"active_entries": @[],
+                    @"approval_schedules": @[],
+                    @"job_schedules": @[],
+                };
+            }
+
+            NSDictionary<NSString *, id> *descriptor = @{
+                @"entries": segmentEntries.array,
+                @"start_date": segment.startDate,
+                @"end_date": segment.endDate,
+            };
+            if ([segment.startDate compare:now] == NSOrderedDescending) {
+                [expectedApprovals addObject:descriptor];
+                [expectedJobs addObject:descriptor];
+            } else if (weekOffset == 0) {
+                [expectedActiveEntries addObjectsFromArray:segmentEntries.array];
+            }
+        }
+    }
+
+    return @{
+        @"schema_version": @1,
+        @"projection_valid": @YES,
+        @"active_projection_available": @(activeProjectionAvailable),
+        @"active_entries": expectedActiveEntries.array,
+        @"approval_schedules": expectedApprovals,
+        @"job_schedules": expectedJobs,
+    };
 }
 
 - (void)clearAllData {

@@ -23,11 +23,57 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)connectAndExecuteCommandBlock:(void(^)(NSError *))commandBlock;
 
 - (void)getVersion:(void(^)(NSString* version, NSError* error))reply;
+- (void)getCompatibilityInfo:(void(^)(NSInteger protocolVersion,
+                                      NSString* _Nullable buildVersion,
+                                      NSString* _Nullable marketingVersion,
+                                      NSArray<NSString*>* _Nullable capabilities,
+                                      NSError* _Nullable error))reply;
+
+// Pure compatibility predicate used by launch repair and focused tests. A
+// future protocol is accepted when it retains the required capabilities.
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>* _Nullable)capabilities
+compatibleWithCurrentAppWithReason:(NSString* _Nullable * _Nullable)reason;
+
+// Builds the complete privacy-safe E7 payload used by AppController after an
+// initially unreachable daemon goes through its one allowed repair attempt.
+// Returning nil means the supplied state is internally inconsistent.
++ (nullable NSDictionary<NSString *, id>*)daemonUnreachableReinstallTelemetryFieldsForOutcome:(NSString*)outcome
+                                                                          initialHandshakeError:(NSError*)initialHandshakeError
+                                                                                     finalError:(NSError* _Nullable)finalError
+                                                                  installedHelperPresentBefore:(BOOL)installedHelperPresentBefore
+                                                                   installedHelperPresentAfter:(BOOL)installedHelperPresentAfter
+                                                                          bundledHelperPresent:(BOOL)bundledHelperPresent
+                                                                            reinstallSucceeded:(BOOL)reinstallSucceeded
+                                                                             reconnectAttempted:(BOOL)reconnectAttempted
+                                                                  postRepairHandshakeSucceeded:(BOOL)postRepairHandshakeSucceeded
+                                                                          postRepairCompatible:(BOOL)postRepairCompatible;
+
+// Daemon-owned telemetry transport. The daemon derives the queue UID from the
+// signed XPC connection; these methods deliberately accept no UID argument.
+- (void)setTelemetryConsentEnabled:(BOOL)enabled
+                        generation:(NSUInteger)generation
+                             reply:(void(^)(NSError * _Nullable error))reply;
+- (void)fetchTelemetryRecordsWithLimit:(NSUInteger)limit
+                                  reply:(void(^)(NSArray<NSDictionary<NSString *, id> *> *records,
+                                                 NSError * _Nullable error))reply;
+- (void)acknowledgeTelemetryRecordIDs:(NSArray<NSString *> *)recordIDs
+                                 reply:(void(^)(NSError * _Nullable error))reply;
+- (void)getSanitizedDaemonSnapshot:(void(^)(NSDictionary<NSString *, id> *snapshot,
+                                             NSError * _Nullable error))reply;
+- (void)getSanitizedDaemonSnapshotForExpectedState:(NSDictionary<NSString *, id> *)expectedState
+                                              reply:(void(^)(NSDictionary<NSString *, id> *snapshot,
+                                                             NSError * _Nullable error))reply;
+
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings reply:(void(^)(NSError* error))reply;
 - (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist reply:(void(^)(NSError* error))reply;
 - (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
              matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
                                  reply:(void(^)(NSError* error))reply;
+- (void)appendEntriesToActiveBlocklist:(NSArray<NSString*>*)entries
+             matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
+                            resultReply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                 NSError * _Nullable error))reply;
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply;
 
 // Schedule registration methods (for pre-authorized scheduled blocks)
@@ -36,10 +82,17 @@ NS_ASSUME_NONNULL_BEGIN
                    isAllowlist:(BOOL)isAllowlist
                  blockSettings:(NSDictionary*)blockSettings
              controllingUID:(uid_t)controllingUID
+                   startDate:(NSDate*)startDate
+                     endDate:(NSDate*)endDate
                          reply:(void(^)(NSError* error))reply;
 
 - (void)startScheduledBlockWithID:(NSString*)scheduleId
                           endDate:(NSDate*)endDate
+                            reply:(void(^)(NSError* error))reply;
+
+- (void)startScheduledBlockWithID:(NSString*)scheduleId
+                          endDate:(NSDate*)endDate
+                    executionPath:(NSString*)executionPath
                             reply:(void(^)(NSError* error))reply;
 
 - (void)unregisterScheduleWithID:(NSString*)scheduleId
@@ -50,6 +103,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
                                   entries:(NSArray<NSString*>*)entries
                                     reply:(void(^)(NSError* error))reply;
+- (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
+                                  entries:(NSArray<NSString*>*)entries
+                              resultReply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                   NSError * _Nullable error))reply;
 
 - (void)clearBlockForDebug:(void(^)(NSError* error))reply;
 

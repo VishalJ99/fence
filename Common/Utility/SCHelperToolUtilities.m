@@ -11,7 +11,7 @@
 
 @implementation SCHelperToolUtilities
 
-+ (void)installBlockRulesFromSettings {
++ (SCBlockApplyResult*)installBlockRulesFromSettings {
     SCSettings* settings = [SCSettings sharedSettings];
     BOOL shouldEvaluateCommonSubdomains = [settings boolForKey: @"EvaluateCommonSubdomains"];
     BOOL allowLocalNetworks = [settings boolForKey: @"AllowLocalNetworks"];
@@ -20,13 +20,24 @@
     // get value for ActiveBlockAsWhitelist
     BOOL blockAsAllowlist = [settings boolForKey: @"ActiveBlockAsWhitelist"];
 
-    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist: blockAsAllowlist allowLocal: allowLocalNetworks includeCommonSubdomains: shouldEvaluateCommonSubdomains includeLinkedDomains: includeLinkedDomains];
+    // Fresh block starts set BlockIsRunning only after physical rules apply.
+    // Reinstalls while it is already true are integrity repairs.
+    SCBlockApplyOperation operation = [settings boolForKey:@"BlockIsRunning"]
+        ? SCBlockApplyOperationIntegrity
+        : SCBlockApplyOperationFresh;
+    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist:blockAsAllowlist
+                                                            allowLocal:allowLocalNetworks
+                                               includeCommonSubdomains:shouldEvaluateCommonSubdomains
+                                                  includeLinkedDomains:includeLinkedDomains
+                                                             operation:operation];
 
     NSLog(@"About to run BlockManager commands");
     
     [blockManager prepareToAddBlock];
     [blockManager addBlockEntriesFromStrings: [settings valueForKey: @"ActiveBlocklist"]];
-    [blockManager finalizeBlock];
+    SCBlockApplyResult* result = [blockManager finalizeBlock];
+    NSLog(@"Block rule application result: %@", [result dictionaryRepresentation]);
+    return result;
 
 }
 
@@ -98,12 +109,15 @@
         }
     }
     
+    NSUInteger attemptedCacheDirectoryCount = 0;
     for (NSURL* cacheDirURL in cacheDirURLs) {
-        NSLog(@"Clearing browser cache folder %@", cacheDirURL);
+        attemptedCacheDirectoryCount += 1;
         // removeItemAtURL will return errors if the file doesn't exist
         // so we don't track the errors - best effort is OK
         [fileManager removeItemAtURL: cacheDirURL error: nil];
     }
+    NSLog(@"Attempted to clear %lu browser cache directories",
+          (unsigned long)attemptedCacheDirectoryCount);
     
     return nil;
 }
@@ -145,28 +159,37 @@
     }
 }
 
-+ (void)removeBlock {
-    [SCBlockUtilities removeBlockFromSettings];
-    [[BlockManager new] clearBlock];
++ (BOOL)removeBlock {
+    return [self removeBlockWithResult:NULL];
+}
+
++ (BOOL)removeBlockWithResult:(NSDictionary<NSString *, id> **)result {
+    // Keep declared state until every physical layer verifies removal. This
+    // lets the daemon retry a partial teardown instead of claiming the block
+    // ended while PF or hosts rules remain installed.
+    BlockManager *blockManager = [BlockManager new];
+    BOOL teardownVerified = [blockManager clearBlock];
+    NSDictionary<NSString *, id> *teardownResult = blockManager.lastTeardownResult ?: @{};
+    if (result != NULL) *result = teardownResult;
+    NSLog(@"Block teardown result: %@", teardownResult);
     
     [SCHelperToolUtilities clearCachesIfRequested];
 
     // play a sound letting
-    [SCHelperToolUtilities playBlockEndSound];
-        
-    // always synchronize settings ASAP after removing a block to let everybody else know
-    // and wait until they're synced before we send the configuration change notification
-    // so the app has no chance of reading the data before we update it
-    NSError* syncErr = [[SCSettings sharedSettings] syncSettingsAndWait: 5.0];
-    if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after removing block", syncErr);
-        [SCSentry captureError: syncErr];
+    if (teardownVerified) {
+        [SCHelperToolUtilities playBlockEndSound];
     }
 
     // let the main app know things have changed so it can update the UI!
     [SCHelperToolUtilities sendConfigurationChangedNotification];
 
-    NSLog(@"INFO: Block cleared.");
+    if (teardownVerified) {
+        NSLog(@"INFO: Block teardown verified.");
+        return YES;
+    }
+
+    NSLog(@"ERROR: Block teardown did not verify; declared state was retained for retry.");
+    return NO;
 }
 
 + (void)sendConfigurationChangedNotification {

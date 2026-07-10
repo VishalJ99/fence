@@ -12,10 +12,22 @@
 NSString* const kPfctlExecutablePath = @"/sbin/pfctl";
 NSString* const kPFConfPath = @"/etc/pf.conf";
 NSString* const kPFAnchorCommand = @"anchor \"org.eyebeam\"";
+NSString* const kPFAnchorConfigurationPath = @"/etc/pf.anchors/org.eyebeam";
+NSErrorDomain const SCPacketFilterErrorDomain = @"SCPacketFilterErrorDomain";
+
+@interface PacketFilter ()
+
+@property (nonatomic, strong) NSFileHandle* appendFileHandle;
+@property (nonatomic, readwrite) BOOL lastAnchorOpenSucceeded;
+@property (nonatomic, readwrite) BOOL lastConfigurationWriteSucceeded;
+@property (nonatomic, readwrite) BOOL lastMainConfigurationWriteSucceeded;
+@property (nonatomic, readwrite) NSInteger lastCommandExitCode;
+@property (nonatomic, readwrite) BOOL lastVerificationSucceeded;
+@property (nonatomic, strong, readwrite) NSError* lastApplyError;
+
+@end
 
 @implementation PacketFilter
-
-NSFileHandle* appendFileHandle;
 
 + (BOOL)blockFoundInPF {
     // Check if actual PF rules are loaded in our anchor (not just config file presence)
@@ -26,19 +38,20 @@ NSFileHandle* appendFileHandle;
     task.arguments = @[@"-a", @"org.eyebeam", @"-sr"];
 
     NSPipe* outputPipe = [NSPipe pipe];
-    NSPipe* errorPipe = [NSPipe pipe];
     task.standardOutput = outputPipe;
-    task.standardError = errorPipe;
+    // Merge stderr and drain the pipe before waiting. Waiting first can
+    // deadlock once a large ruleset fills the pipe buffer.
+    task.standardError = outputPipe;
 
     @try {
         [task launch];
-        [task waitUntilExit];
-
         NSData* outputData = [[outputPipe fileHandleForReading] readDataToEndOfFile];
+        [task waitUntilExit];
         NSString* output = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding];
 
-        // If there's any non-whitespace output, rules are loaded
-        if (output && [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] > 0) {
+        // Require pfctl success so an error message cannot masquerade as rules.
+        if (task.terminationStatus == 0 && output &&
+            [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] > 0) {
             return YES;
         }
     } @catch (NSException* exception) {
@@ -56,6 +69,7 @@ NSFileHandle* appendFileHandle;
 	if (self = [super init]) {
 		isAllowlist = allowlist;
 		rules = [NSMutableString stringWithCapacity: 1000];
+        _lastCommandExitCode = -1;
 	}
 	return self;
 }
@@ -122,8 +136,18 @@ NSFileHandle* appendFileHandle;
     @synchronized(self) {
         NSArray<NSString*>* ruleStrings = [self ruleStringsForIP: ip port: port maskLen: maskLen];
         for (NSString* ruleString in ruleStrings) {
-            if (appendFileHandle) {
-                [appendFileHandle writeData: [ruleString dataUsingEncoding:NSUTF8StringEncoding]];
+            if (self.appendFileHandle) {
+                @try {
+                    [self.appendFileHandle writeData:[ruleString dataUsingEncoding:NSUTF8StringEncoding]];
+                } @catch (NSException* exception) {
+                    self.lastConfigurationWriteSucceeded = NO;
+                    if (self.lastApplyError == nil) {
+                        self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                                  code:SCPacketFilterErrorAnchorWriteFailed
+                                                              userInfo:nil];
+                    }
+                    NSLog(@"ERROR: Failed writing appended PF rule");
+                }
             } else {
                 [rules appendString: ruleString];
             }
@@ -131,7 +155,7 @@ NSFileHandle* appendFileHandle;
     }
 }
 
-- (void)writeConfiguration {
+- (BOOL)writeConfiguration {
 	NSMutableString* filterConfiguration = [NSMutableString stringWithCapacity: 1000];
 
 	[self addBlockHeader: filterConfiguration];
@@ -141,27 +165,82 @@ NSFileHandle* appendFileHandle;
 		[self addAllowlistFooter: filterConfiguration];
 	}
 
-	[filterConfiguration writeToFile: @"/etc/pf.anchors/org.eyebeam" atomically: true encoding: NSUTF8StringEncoding error: nil];
+	NSError* writeError = nil;
+	BOOL success = [filterConfiguration writeToFile:kPFAnchorConfigurationPath
+                                          atomically:YES
+                                            encoding:NSUTF8StringEncoding
+                                               error:&writeError];
+    self.lastConfigurationWriteSucceeded = success;
+    if (!success && self.lastApplyError == nil) {
+        self.lastApplyError = writeError ?: [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                             code:SCPacketFilterErrorAnchorWriteFailed
+                                                         userInfo:nil];
+    }
+    return success;
 }
 
-- (void)enterAppendMode {
+- (BOOL)enterAppendMode {
+    self.lastApplyError = nil;
+    self.lastAnchorOpenSucceeded = NO;
+    self.lastConfigurationWriteSucceeded = NO;
+    self.lastMainConfigurationWriteSucceeded = NO;
+    self.lastCommandExitCode = -1;
+    self.lastVerificationSucceeded = NO;
+
     if (isAllowlist) {
         NSLog(@"WARNING: Can't append rules to allowlist blocks - ignoring");
-        return;
+        return NO;
     }
 
     // open the file and prepare to write to the very bottom (no footer since it's not an allowlist)
-    appendFileHandle = [NSFileHandle fileHandleForWritingAtPath: @"/etc/pf.anchors/org.eyebeam"];
-    if (!appendFileHandle) {
+    self.appendFileHandle = [NSFileHandle fileHandleForWritingAtPath:kPFAnchorConfigurationPath];
+    if (!self.appendFileHandle) {
+        self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                  code:SCPacketFilterErrorAnchorUnavailable
+                                              userInfo:nil];
         NSLog(@"ERROR: Failed to get handle for pf.anchors file while attempting to append rules");
-        return;
+        return NO;
     }
 
-    [appendFileHandle seekToEndOfFile];
+    @try {
+        [self.appendFileHandle seekToEndOfFile];
+        self.lastAnchorOpenSucceeded = YES;
+        self.lastConfigurationWriteSucceeded = YES;
+        return YES;
+    } @catch (NSException* exception) {
+        self.appendFileHandle = nil;
+        self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                  code:SCPacketFilterErrorAnchorUnavailable
+                                              userInfo:nil];
+        return NO;
+    }
 }
-- (void)finishAppending {
-    [appendFileHandle closeFile];
-    appendFileHandle = nil;
+- (BOOL)finishAppending {
+    if (!self.appendFileHandle) {
+        self.lastConfigurationWriteSucceeded = NO;
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                      code:SCPacketFilterErrorAnchorUnavailable
+                                                  userInfo:nil];
+        }
+        return NO;
+    }
+
+    @try {
+        [self.appendFileHandle synchronizeFile];
+        [self.appendFileHandle closeFile];
+        self.appendFileHandle = nil;
+        return self.lastConfigurationWriteSucceeded;
+    } @catch (NSException* exception) {
+        self.appendFileHandle = nil;
+        self.lastConfigurationWriteSucceeded = NO;
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                      code:SCPacketFilterErrorAnchorWriteFailed
+                                                  userInfo:nil];
+        }
+        return NO;
+    }
 }
 
 - (void)appendRulesToCurrentBlockConfiguration:(NSArray<NSDictionary*>*)newEntryDicts {
@@ -194,17 +273,60 @@ NSFileHandle* appendFileHandle;
     [fileHandle closeFile];
 }
 
+- (BOOL)anchorConfigurationContainsRules {
+    NSError* readError = nil;
+    NSString* anchorContents = [NSString stringWithContentsOfFile:kPFAnchorConfigurationPath
+                                                          encoding:NSUTF8StringEncoding
+                                                             error:&readError];
+    if (anchorContents == nil) {
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = readError ?: [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                                    code:SCPacketFilterErrorAnchorUnavailable
+                                                                userInfo:nil];
+        }
+        return NO;
+    }
+
+    for (NSString* line in [anchorContents componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString* trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if ([trimmed hasPrefix:@"block "] || [trimmed hasPrefix:@"pass "]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)verifyStartedConfiguration {
+    if (![self containsSelfControlBlock]) return NO;
+    if (![[NSFileManager defaultManager] isReadableFileAtPath:kPFAnchorConfigurationPath]) return NO;
+
+    // An app-only block intentionally has an empty PF anchor. In that case the
+    // successfully-loaded main configuration is the expected physical state.
+    BOOL expectsLoadedRules = [self anchorConfigurationContainsRules];
+    return !expectsLoadedRules || [PacketFilter blockFoundInPF];
+}
+
 - (int)startBlock {
+    self.lastApplyError = nil;
+    self.lastAnchorOpenSucceeded = NO;
+    self.lastConfigurationWriteSucceeded = NO;
+    self.lastMainConfigurationWriteSucceeded = NO;
+    self.lastCommandExitCode = -1;
+    self.lastVerificationSucceeded = NO;
+
 #ifdef DEBUG
     // Check debug override - if blocking is disabled, skip PF configuration
     if ([SCDebugUtilities isDebugBlockingDisabled]) {
         NSLog(@"DEBUG: Skipping PF block activation - debug override enabled");
+        self.lastCommandExitCode = 0;
+        self.lastVerificationSucceeded = YES;
         return 0;
     }
 #endif
 
-	[self addSelfControlConfig];
-	[self writeConfiguration];
+	BOOL mainConfigurationWritten = [self addSelfControlConfig];
+	BOOL anchorConfigurationWritten = [self writeConfiguration];
+    if (!mainConfigurationWritten || !anchorConfigurationWritten) {
+        return -1;
+    }
 
 	NSArray* args = [@"-E -f /etc/pf.conf -F states" componentsSeparatedByString: @" "];
 
@@ -217,10 +339,23 @@ NSFileHandle* appendFileHandle;
 	[task setStandardOutput: inPipe];
 	[task setStandardError: inPipe];
 
-	[task launch];
-	NSString* pfctlOutput = [[NSString alloc] initWithData: [readHandle readDataToEndOfFile] encoding: NSUTF8StringEncoding];
-	[readHandle closeFile];
-	[task waitUntilExit];
+	NSString* pfctlOutput = @"";
+    @try {
+        [task launch];
+        pfctlOutput = [[NSString alloc] initWithData:[readHandle readDataToEndOfFile]
+                                           encoding:NSUTF8StringEncoding] ?: @"";
+        [readHandle closeFile];
+        [task waitUntilExit];
+        self.lastCommandExitCode = [task terminationStatus];
+    } @catch (NSException* exception) {
+        self.lastCommandExitCode = -1;
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                      code:SCPacketFilterErrorCommandLaunchFailed
+                                                  userInfo:nil];
+        }
+        return -1;
+    }
 
 	NSArray* lines = [pfctlOutput componentsSeparatedByString: @"\n"];
 	for (NSString* line in lines) {
@@ -230,7 +365,14 @@ NSFileHandle* appendFileHandle;
 		}
 	}
 
-	return [task terminationStatus];
+	self.lastVerificationSucceeded = (self.lastCommandExitCode == 0) && [self verifyStartedConfiguration];
+    if (!self.lastVerificationSucceeded && self.lastApplyError == nil) {
+        self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                  code:SCPacketFilterErrorCommandVerificationFailed
+                                              userInfo:nil];
+    }
+
+	return (int)self.lastCommandExitCode;
 }
 - (int)refreshPFRules {
     NSArray* args = [@"-f /etc/pf.conf -F states" componentsSeparatedByString: @" "];
@@ -238,10 +380,29 @@ NSFileHandle* appendFileHandle;
     NSTask* task = [[NSTask alloc] init];
     [task setLaunchPath: kPfctlExecutablePath];
     [task setArguments: args];
-    [task launch];
-    [task waitUntilExit];
+    @try {
+        [task launch];
+        [task waitUntilExit];
+        self.lastCommandExitCode = [task terminationStatus];
+    } @catch (NSException* exception) {
+        self.lastCommandExitCode = -1;
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                      code:SCPacketFilterErrorCommandLaunchFailed
+                                                  userInfo:nil];
+        }
+        self.lastVerificationSucceeded = NO;
+        return -1;
+    }
 
-    return [task terminationStatus];
+    self.lastVerificationSucceeded = (self.lastCommandExitCode == 0) && [self verifyStartedConfiguration];
+    if (!self.lastVerificationSucceeded && self.lastApplyError == nil) {
+        self.lastApplyError = [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                  code:SCPacketFilterErrorCommandVerificationFailed
+                                              userInfo:nil];
+    }
+
+    return (int)self.lastCommandExitCode;
 }
 
 - (void)writePFToken:(NSString*)token error:(NSError**)error {
@@ -287,8 +448,20 @@ NSFileHandle* appendFileHandle;
 	return [task terminationStatus];
 }
 
-- (void)addSelfControlConfig {
-	NSMutableString* pfConf = [NSMutableString stringWithContentsOfFile: @"/etc/pf.conf" encoding: NSUTF8StringEncoding error: nil];
+- (BOOL)addSelfControlConfig {
+    NSError* readError = nil;
+	NSMutableString* pfConf = [NSMutableString stringWithContentsOfFile:kPFConfPath
+                                                              encoding:NSUTF8StringEncoding
+                                                                 error:&readError];
+    if (pfConf == nil) {
+        self.lastMainConfigurationWriteSucceeded = NO;
+        if (self.lastApplyError == nil) {
+            self.lastApplyError = readError ?: [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                                code:SCPacketFilterErrorMainConfigurationUnavailable
+                                                            userInfo:nil];
+        }
+        return NO;
+    }
 
 	if ([pfConf rangeOfString: @"/etc/pf.anchors/org.eyebeam"].location == NSNotFound) {
 		[pfConf appendString: @"\n"
@@ -296,7 +469,18 @@ NSFileHandle* appendFileHandle;
 		 "load anchor \"org.eyebeam\" from \"/etc/pf.anchors/org.eyebeam\"\n"];
 	}
 
-	[pfConf writeToFile: @"/etc/pf.conf" atomically: true encoding: NSUTF8StringEncoding error: nil];
+	NSError* writeError = nil;
+    BOOL success = [pfConf writeToFile:kPFConfPath
+                              atomically:YES
+                                encoding:NSUTF8StringEncoding
+                                   error:&writeError];
+    self.lastMainConfigurationWriteSucceeded = success;
+    if (!success && self.lastApplyError == nil) {
+        self.lastApplyError = writeError ?: [NSError errorWithDomain:SCPacketFilterErrorDomain
+                                                             code:SCPacketFilterErrorMainConfigurationUnavailable
+                                                         userInfo:nil];
+    }
+    return success;
 }
 
 - (BOOL)containsSelfControlBlock {

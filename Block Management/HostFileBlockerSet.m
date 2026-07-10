@@ -46,7 +46,8 @@
 - (BOOL)deleteBackupHostsFile {
     BOOL ret = YES;
     for (HostFileBlocker* blocker in self.blockers) {
-        ret = ret && [blocker deleteBackupHostsFile];
+        BOOL blockerSucceeded = [blocker deleteBackupHostsFile];
+        ret = blockerSucceeded && ret;
     }
     return ret;
 }
@@ -58,10 +59,32 @@
 }
 
 - (BOOL)writeNewFileContents {
+    return [self writeNewFileContentsWithError:NULL];
+}
+
+- (BOOL)writeNewFileContentsWithError:(NSError**)error {
     BOOL ret = YES;
+    NSError* firstError = nil;
     for (HostFileBlocker* blocker in self.blockers) {
-        ret = ret && [blocker writeNewFileContents];
+        NSError* blockerError = nil;
+        BOOL blockerSucceeded = [blocker writeNewFileContentsWithError:&blockerError];
+        if (!blockerSucceeded && firstError == nil) firstError = blockerError;
+        ret = blockerSucceeded && ret;
     }
+    if (error) *error = firstError;
+    return ret;
+}
+
+- (BOOL)verifyNewFileContentsWithError:(NSError**)error {
+    BOOL ret = YES;
+    NSError* firstError = nil;
+    for (HostFileBlocker* blocker in self.blockers) {
+        NSError* blockerError = nil;
+        BOOL blockerSucceeded = [blocker verifyNewFileContentsWithError:&blockerError];
+        if (!blockerSucceeded && firstError == nil) firstError = blockerError;
+        ret = blockerSucceeded && ret;
+    }
+    if (error) *error = firstError;
     return ret;
 }
 
@@ -78,17 +101,27 @@
 }
 
 - (BOOL)createBackupHostsFile {
+    return [self createBackupHostsFileWithError:NULL];
+}
+
+- (BOOL)createBackupHostsFileWithError:(NSError**)error {
     BOOL ret = YES;
+    NSError* firstError = nil;
     for (HostFileBlocker* blocker in self.blockers) {
-        ret = ret && [blocker createBackupHostsFile];
+        NSError* blockerError = nil;
+        BOOL blockerSucceeded = [blocker createBackupHostsFileWithError:&blockerError];
+        if (!blockerSucceeded && firstError == nil) firstError = blockerError;
+        ret = blockerSucceeded && ret;
     }
+    if (error) *error = firstError;
     return ret;
 }
 
 - (BOOL)restoreBackupHostsFile {
     BOOL ret = YES;
     for (HostFileBlocker* blocker in self.blockers) {
-        ret = ret && [blocker restoreBackupHostsFile];
+        BOOL blockerSucceeded = [blocker restoreBackupHostsFile];
+        ret = blockerSucceeded && ret;
     }
     return ret;
 }
@@ -98,16 +131,27 @@
         [blocker addRuleBlockingDomain: domainName];
     }
 }
-- (void)appendExistingBlockWithRuleForDomain:(NSString*)domainName {
+- (BOOL)appendExistingBlockWithRuleForDomain:(NSString*)domainName {
+    BOOL ret = YES;
     for (HostFileBlocker* blocker in self.blockers) {
-        [blocker appendExistingBlockWithRuleForDomain: domainName];
+        BOOL blockerSucceeded = [blocker appendExistingBlockWithRuleForDomain:domainName];
+        ret = blockerSucceeded && ret;
     }
+    return ret;
 }
 
 - (BOOL)containsSelfControlBlock {
     BOOL ret = NO;
     for (HostFileBlocker* blocker in self.blockers) {
         ret = ret || [blocker containsSelfControlBlock];
+    }
+    return ret;
+}
+
+- (BOOL)containsCompleteSelfControlBlock {
+    BOOL ret = NO;
+    for (HostFileBlocker* blocker in self.blockers) {
+        ret = [blocker containsCompleteSelfControlBlock] || ret;
     }
     return ret;
 }

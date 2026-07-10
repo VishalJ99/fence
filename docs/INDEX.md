@@ -11,6 +11,7 @@
 | Scheduling | [dictionary.md](dictionary.md) | SCScheduleManager.m, SCScheduleLaunchdBridge.m |
 | Schedule job lifecycle | [SCHEDULE_JOB_LIFECYCLE.md](SCHEDULE_JOB_LIFECYCLE.md) | SCScheduleManager.m, cli-main.m, SCDaemon.m |
 | **Daemon Lifecycle** | [DAEMON_LIFECYCLE.md](DAEMON_LIFECYCLE.md) | SCDaemon.m, org.eyebeam.selfcontrold.plist |
+| **Telemetry policy (Sentry)** | [TELEMETRY.md](TELEMETRY.md) | SCSentry.m, SCSettings.m, SCLogger.m |
 | **Timezone Handling** | [TIMEZONE_HANDLING.md](TIMEZONE_HANDLING.md) | SCScheduleManager.m, cli-main.m, SCDaemon.m |
 | Terminology | [dictionary.md](dictionary.md) | See dictionary/ folder for full entries |
 | Debug features | [SYSTEM_ARCHITECTURE.md#6-debug-features](../SYSTEM_ARCHITECTURE.md#6-debug-features) | SCDebugUtilities.m |

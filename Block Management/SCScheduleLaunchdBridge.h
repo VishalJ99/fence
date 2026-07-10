@@ -12,6 +12,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Static internal error metadata used only to classify a typed diagnostic.
+/// The associated value is one of schedule_register or job_install.
+FOUNDATION_EXPORT NSString * const SCScheduleLaunchdBridgeFailureStageKey;
+
 /// Represents a calculated block window (inverted from allowed windows)
 @interface SCBlockWindow : NSObject
 
@@ -106,6 +110,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Uninstalls all SelfControl schedule-related launchd jobs
 - (BOOL)uninstallAllScheduleJobs:(NSError **)error;
+
+/// Unloads and removes the launchd job for one merged schedule segment.
+- (BOOL)uninstallJobForSegmentID:(NSString *)segmentID error:(NSError **)error;
+
+/// Returns labels installed for one merged schedule segment.
+- (NSArray<NSString *> *)installedJobLabelsForSegmentID:(NSString *)segmentID;
 
 #pragma mark - Segment-Based Merged Job Installation
 

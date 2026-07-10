@@ -283,9 +283,8 @@ typedef NS_ENUM(NSInteger, SCLicenseErrorCode) {
 
     // Compare signatures (case-insensitive hex comparison)
 #ifdef DEBUG
-    NSLog(@"[SCLicenseManager] Provided signature: %@", providedSignature);
-    NSLog(@"[SCLicenseManager] Computed signature: %@", computedSignature);
-    NSLog(@"[SCLicenseManager] Secret key first 8 chars: %.8s...", STRINGIFY_VALUE(LICENSE_SECRET_KEY).UTF8String);
+    // Never log license signatures or any portion of the embedded validation
+    // secret. A boolean outcome is sufficient for diagnostics.
 #endif
 
     if (![computedSignature.lowercaseString isEqualToString:providedSignature.lowercaseString]) {
@@ -636,7 +635,7 @@ typedef NS_ENUM(NSInteger, SCLicenseErrorCode) {
     request.HTTPMethod = @"GET";
     request.timeoutInterval = 10.0;
 
-    NSLog(@"[SCLicenseManager] Attempting license recovery for device: %@", deviceId);
+    NSLog(@"[SCLicenseManager] Attempting license recovery");
 
     NSURLSessionDataTask *task = [self.apiSession dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {

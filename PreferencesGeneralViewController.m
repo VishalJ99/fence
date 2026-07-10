@@ -11,8 +11,10 @@
 #import "SCUIUtilities.h"
 
 @interface PreferencesGeneralViewController ()
-
+@property (nonatomic, assign) BOOL updatingErrorReportingPreference;
 @end
+
+static void *SCErrorReportingPreferenceObservationContext = &SCErrorReportingPreferenceObservationContext;
 
 @implementation PreferencesGeneralViewController
 
@@ -21,9 +23,46 @@
 }
 
 - (void)viewDidLoad  {
+    [super viewDidLoad];
     // set the valid sounds in the Block Sound menu
     [self.soundMenu removeAllItems];
     [self.soundMenu addItemsWithTitles: SCConstants.systemSoundNames];
+
+    // The checkbox is bound through NSUserDefaultsController. Observe explicit
+    // user changes so legacy/system defaults can never masquerade as Fence
+    // telemetry consent.
+    [[NSUserDefaultsController sharedUserDefaultsController] addObserver:self
+                                                               forKeyPath:@"values.EnableErrorReporting"
+                                                                  options:0
+                                                                  context:SCErrorReportingPreferenceObservationContext];
+}
+
+- (void)dealloc {
+    @try {
+        [[NSUserDefaultsController sharedUserDefaultsController] removeObserver:self
+                                                                      forKeyPath:@"values.EnableErrorReporting"
+                                                                         context:SCErrorReportingPreferenceObservationContext];
+    } @catch (__unused NSException *exception) {
+        // The view may be torn down before viewDidLoad in unusual test paths.
+    }
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey,id> *)change
+                       context:(void *)context {
+    if (context == SCErrorReportingPreferenceObservationContext) {
+        if (self.updatingErrorReportingPreference) return;
+        self.updatingErrorReportingPreference = YES;
+        BOOL enabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"EnableErrorReporting"];
+        // The lifecycle broker records explicit consent, advances its
+        // generation, starts/purges the SDK, and notifies AppController so the
+        // daemon spool is enabled/drained or purged in the same transition.
+        [SCSentry setUserErrorReportingEnabled:enabled];
+        self.updatingErrorReportingPreference = NO;
+        return;
+    }
+    [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
 }
 
 - (IBAction)soundSelectionChanged:(NSPopUpButton*)sender {

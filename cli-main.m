@@ -28,6 +28,13 @@
 #import <sysexits.h>
 #import "XPMArguments.h"
 
+static void SCLogCLIError(NSString* message, NSError* error) {
+    NSLog(@"CLI: %@ (domain=%@ code=%ld)",
+          message,
+          error.domain ?: @"unknown",
+          (long)error.code);
+}
+
 // The main method which deals which most of the logic flow and execution of
 // the CLI tool.
 int main(int argc, char* argv[]) {
@@ -85,7 +92,6 @@ int main(int argc, char* argv[]) {
             // Detailed logging for debugging block state
             SCSettings* checkSettings = [SCSettings sharedSettings];
             BOOL blockIsRunningFlag = [checkSettings boolForKey:@"BlockIsRunning"];
-            NSDate* existingEndDate = [checkSettings valueForKey:@"BlockEndDate"];
             BOOL isExpired = [SCBlockUtilities currentBlockIsExpired];
             BOOL modernRunning = [SCBlockUtilities modernBlockIsRunning];
             BOOL legacyRunning = [SCBlockUtilities legacyBlockIsRunning];
@@ -93,12 +99,10 @@ int main(int argc, char* argv[]) {
 
             NSLog(@"=== CLI BLOCK STATE CHECK ===");
             NSLog(@"CLI: BlockIsRunning flag = %d", blockIsRunningFlag);
-            NSLog(@"CLI: BlockEndDate = %@", existingEndDate);
             NSLog(@"CLI: currentBlockIsExpired = %d", isExpired);
             NSLog(@"CLI: modernBlockIsRunning = %d", modernRunning);
             NSLog(@"CLI: legacyBlockIsRunning = %d", legacyRunning);
             NSLog(@"CLI: anyBlockIsRunning = %d", anyRunning);
-            NSLog(@"CLI: now = %@", [NSDate date]);
 
             if (anyRunning) {
                 if (isExpired) {
@@ -106,7 +110,6 @@ int main(int argc, char* argv[]) {
                     // the daemon's checkup timer couldn't run to clear the expired block.
                     // We need to call removeBlock to clear PF rules, /etc/hosts, AppBlocker.
                     NSLog(@"CLI: Block is running but EXPIRED - clearing stale block rules...");
-                    NSLog(@"CLI: Expired block end date was: %@", existingEndDate);
 
                     SCXPCClient* clearXpc = [SCXPCClient new];
                     dispatch_semaphore_t clearSema = dispatch_semaphore_create(0);
@@ -120,7 +123,7 @@ int main(int argc, char* argv[]) {
                     dispatch_semaphore_wait(clearSema, DISPATCH_TIME_FOREVER);
 
                     if (clearError) {
-                        NSLog(@"CLI: Failed to clear expired block: %@", clearError);
+                        SCLogCLIError(@"Failed to clear expired block", clearError);
                         exit(EX_CONFIG);
                     }
 
@@ -140,7 +143,6 @@ int main(int argc, char* argv[]) {
                 // This is a scheduled block - use pre-authorized flow (NO password prompt)
                 NSLog(@"=== SCHEDULED BLOCK START ===");
                 NSLog(@"CLI: Received scheduled block request");
-                NSLog(@"CLI: scheduleId = %@", scheduleId);
 
                 // Parse dates
                 NSISO8601DateFormatter* isoFormatter = [NSISO8601DateFormatter new];
@@ -148,20 +150,19 @@ int main(int argc, char* argv[]) {
                 NSDate* blockEndDateArg = [isoFormatter dateFromString: [arguments firstObjectForSignature: blockEndDateSig]];
                 NSDate* now = [NSDate date];
 
-                NSLog(@"CLI: parsed startDate = %@", blockStartDateArg);
-                NSLog(@"CLI: parsed endDate = %@", blockEndDateArg);
-                NSLog(@"CLI: now = %@", now);
+                NSLog(@"CLI: Parsed scheduled block bounds (hasStart=%d hasEnd=%d)",
+                      blockStartDateArg != nil, blockEndDateArg != nil);
 
                 // Check if this job is for a future week (startDate hasn't arrived yet)
                 // This handles the case where "Next Week's Sunday" job fires on "This Week's Sunday"
                 if (blockStartDateArg != nil && [now compare:blockStartDateArg] == NSOrderedAscending) {
-                    NSLog(@"CLI: Job is for future week (startDate=%@), skipping without cleanup", blockStartDateArg);
+                    NSLog(@"CLI: Job is for a future week; skipping without cleanup");
                     exit(EXIT_SUCCESS);  // Exit quietly, don't cleanup - job is valid but not yet
                 }
 
                 // Check if this job has expired (endDate is in the past)
                 if (blockEndDateArg == nil || [now compare:blockEndDateArg] == NSOrderedDescending) {
-                    NSLog(@"CLI: Job has expired (endDate=%@), cleaning up stale schedule", blockEndDateArg);
+                    NSLog(@"CLI: Job has expired; cleaning up stale schedule");
 
                     // Cleanup the stale schedule via XPC
                     SCXPCClient* xpc = [SCXPCClient new];
@@ -169,9 +170,9 @@ int main(int argc, char* argv[]) {
 
                     [xpc cleanupStaleSchedule:scheduleId reply:^(NSError* error) {
                         if (error) {
-                            NSLog(@"CLI: Cleanup failed: %@", error);
+                            SCLogCLIError(@"Stale schedule cleanup failed", error);
                         } else {
-                            NSLog(@"CLI: Successfully cleaned up stale schedule %@", scheduleId);
+                            NSLog(@"CLI: Successfully cleaned up stale schedule");
                         }
                         dispatch_semaphore_signal(cleanupSema);
                     }];
@@ -195,20 +196,21 @@ int main(int argc, char* argv[]) {
 
                 [xpc connectAndExecuteCommandBlock:^(NSError *connectError) {
                     if (connectError) {
-                        NSLog(@"CLI ERROR: XPC connection failed: %@", connectError);
+                        SCLogCLIError(@"XPC connection failed", connectError);
                     } else {
                         NSLog(@"CLI: XPC connected, calling startScheduledBlockWithID...");
                     }
                     // Try to start the scheduled block (no password needed!)
                     [xpc startScheduledBlockWithID: scheduleId
                                            endDate: blockEndDateArg
+                                     executionPath: @"cli_launchd"
                                              reply:^(NSError * _Nonnull error) {
                         if (error != nil) {
-                            NSLog(@"CLI ERROR: Daemon returned error: %@", error);
+                            SCLogCLIError(@"Daemon rejected scheduled block", error);
                             exit(EX_SOFTWARE);
                             return;
                         }
-                        NSLog(@"CLI: Scheduled block %@ successfully started!", scheduleId);
+                        NSLog(@"CLI: Scheduled block successfully started");
                         NSLog(@"=== SCHEDULED BLOCK START COMPLETE ===");
                         dispatch_semaphore_signal(scheduledBlockSema);
                     }];
@@ -244,7 +246,7 @@ int main(int argc, char* argv[]) {
                 
                 pathToBlocklistFile = @(argv[3]);
                 blockEndDateArg = [[NSISO8601DateFormatter new] dateFromString: @(argv[4])];
-                NSLog(@"created legacy block end date %@ from %@", blockEndDateArg, @(argv[4]));
+                NSLog(@"CLI: Parsed legacy block arguments (hasValidEndDate=%d)", blockEndDateArg != nil);
             }
             
             // if we got valid block arguments from the command-line, read in that file
@@ -253,7 +255,7 @@ int main(int argc, char* argv[]) {
                 NSDictionary* readProperties = [SCBlockFileReaderWriter readBlocklistFromFile: [NSURL fileURLWithPath: pathToBlocklistFile]];
                 
                 if (readProperties == nil) {
-                    NSLog(@"ERROR: Block could not be read from file %@", pathToBlocklistFile);
+                    NSLog(@"CLI: Block could not be read from the supplied file");
                     exit(EX_IOERR);
                 }
                 
@@ -288,7 +290,7 @@ int main(int argc, char* argv[]) {
                                                                          options: 0
                                                                            error: &jsonParseErr];
                 if (jsonSettings == nil) {
-                    NSLog(@"ERROR: Failed to parse JSON settings string with error %@", jsonParseErr.localizedDescription);
+                    SCLogCLIError(@"Failed to parse JSON settings", jsonParseErr);
                     exit(EX_USAGE);
                 }
                 
@@ -302,7 +304,10 @@ int main(int argc, char* argv[]) {
             if(([blocklist count] == 0 && !blockAsWhitelist) || [blockEndDate timeIntervalSinceNow] < 1) {
                 // ya can't start a block without a blocklist, and it can't run for less than a second
                 // because that's silly
-                NSLog(@"ERROR: Blocklist is empty, or block does not end in the future (%@, %@).", blocklist, blockEndDate);
+                NSLog(@"CLI: Invalid block request (entryCount=%lu allowlist=%d endDateInFuture=%d)",
+                      (unsigned long)blocklist.count,
+                      blockAsWhitelist,
+                      [blockEndDate timeIntervalSinceNow] >= 1);
                 exit(EX_CONFIG);
             }
 
@@ -329,7 +334,7 @@ int main(int argc, char* argv[]) {
                                     blockSettings: blockSettings
                                             reply:^(NSError * _Nonnull error) {
                     if (error != nil) {
-                        NSLog(@"ERROR: Daemon failed to start block with error %@", error);
+                        SCLogCLIError(@"Daemon failed to start block", error);
                         exit(EX_SOFTWARE);
                         return;
                     }
@@ -351,7 +356,7 @@ int main(int argc, char* argv[]) {
                     NSLog(@"INFO: Daemon not running, installing (password required)...");
                     [xpc installDaemon:^(NSError * _Nonnull error) {
                         if (error != nil) {
-                            NSLog(@"ERROR: Failed to install daemon with error %@", error);
+                            SCLogCLIError(@"Failed to install daemon", error);
                             exit(EX_SOFTWARE);
                             return;
                         }
@@ -380,8 +385,14 @@ int main(int argc, char* argv[]) {
             exit(EX_UNAVAILABLE);
         } else if ([arguments booleanValueForSignature: printSettingsSig]) {
             [SCSentry addBreadcrumb: @"CLI method --print-settings called" category: @"cli"];
-            NSLog(@" - Printing SelfControl secured settings for debug: - ");
-            NSLog(@"%@", [settings dictionaryRepresentation]);
+            NSDictionary* representation = [settings dictionaryRepresentation];
+            NSArray* activeEntries = representation[@"ActiveBlocklist"];
+            NSDictionary* approvedSchedules = representation[@"ApprovedSchedules"];
+            NSLog(@"CLI settings summary: running=%d activeEntryCount=%lu approvedScheduleCount=%lu settingsVersion=%ld",
+                  [representation[@"BlockIsRunning"] boolValue],
+                  (unsigned long)([activeEntries isKindOfClass:NSArray.class] ? activeEntries.count : 0),
+                  (unsigned long)([approvedSchedules isKindOfClass:NSDictionary.class] ? approvedSchedules.count : 0),
+                  (long)[representation[@"SettingsVersionNumber"] integerValue]);
         } else if ([arguments booleanValueForSignature: isRunningSig]) {
             [SCSentry addBreadcrumb: @"CLI method --is-running called" category: @"cli"];
             BOOL blockIsRunning = [SCBlockUtilities anyBlockIsRunning];

@@ -7,6 +7,10 @@
 
 #import "SCSettings.h"
 #import <AppKit/AppKit.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <errno.h>
+#import <math.h>
+#import <sys/stat.h>
 
 // Only include Sentry if available and not testing
 #if !defined(TESTING) && __has_include(<Sentry/Sentry.h>)
@@ -20,6 +24,22 @@
 float const SYNC_INTERVAL_SECS = 30;
 float const SYNC_LEEWAY_SECS = 30;
 NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
+NSString * const SCSettingsLoadFailedNotification = @"org.eyebeam.Fence.SCSettingsLoadFailed";
+NSInteger const SCSettingsStateUnavailableErrorCode = 602;
+
+static BOOL SCSettingsIntegerNumberInRange(id candidate, unsigned long long maximum) {
+    if (![candidate isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)candidate) == CFBooleanGetTypeID()) {
+        return NO;
+    }
+    double value = [candidate doubleValue];
+    return isfinite(value) && floor(value) == value && value >= 0 && value <= maximum;
+}
+
+static BOOL SCSettingsNumberIsBoolean(id candidate) {
+    return [candidate isKindOfClass:[NSNumber class]] &&
+        CFGetTypeID((__bridge CFTypeRef)candidate) == CFBooleanGetTypeID();
+}
 
 @interface SCSettings ()
 
@@ -28,10 +48,22 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
 @property NSDate* lastSynchronizedWithDisk;
 @property dispatch_source_t syncTimer;
 @property dispatch_source_t debouncedChangeTimer;
+@property (nullable, copy) NSString* lastReportedLoadFailureSignature;
+@property (nonatomic, readwrite) BOOL settingsStateAvailableForEnforcement;
+@property (nullable, copy) NSString* settingsFilePathOverride;
+
+- (NSError *)settingsStateUnavailableError;
+- (void)writeSettingsAllowingUnavailableBootstrapWithCompletion:(nullable void(^)(NSError* _Nullable))completionBlock;
+- (void)writeSettingsWithCompletion:(nullable void(^)(NSError* _Nullable))completionBlock
+        allowingUnavailableBootstrap:(BOOL)allowUnavailableBootstrap;
 
 @end
 
 @implementation SCSettings
+
+- (NSError *)settingsStateUnavailableError {
+    return [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode];
+}
 
 + (instancetype)sharedSettings {
     static SCSettings* globalSettings = nil;
@@ -55,7 +87,7 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
         if (_readOnly) {
             NSLog(@"SCSettings: Read-only mode (non-root process)");
         } else {
-            NSLog(@"SCSettings: Persistence enabled - writing to %@", [SCSettings securedSettingsFilePath]);
+            NSLog(@"SCSettings: Persistence enabled");
         }
 #endif
 
@@ -68,6 +100,18 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                                                   suspensionBehavior: NSNotificationSuspensionBehaviorDeliverImmediately];
     }
     return self;
+}
+
+#if defined(TESTING)
+- (instancetype)initWithSettingsFilePathForTesting:(NSString *)settingsFilePath {
+    self = [self init];
+    if (self) _settingsFilePathOverride = [settingsFilePath copy];
+    return self;
+}
+#endif
+
+- (NSString *)settingsFilePath {
+    return self.settingsFilePathOverride ?: SCSettings.securedSettingsFilePath;
 }
 
 + (NSString*)settingsFileName {
@@ -97,6 +141,7 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
         @"BlockEndDate": [NSDate distantPast],
         @"ActiveBlocklist": @[],
         @"ActiveBlockAsWhitelist": @NO,
+        @"ActiveBlockControllingUID": @0,
 
         @"BlockIsRunning": @NO, // tells us whether a block is actually running on the system (to the best of our knowledge)
         @"TamperingDetected": @NO,
@@ -110,7 +155,7 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
         @"ClearCaches": @YES,
         @"AllowLocalNetworks": @YES,
 
-        @"EnableErrorReporting": @([SCMiscUtilities systemThirdPartyCrashReportingEnabled]),
+        @"EnableErrorReporting": @NO,
 
         @"SettingsVersionNumber": @0,
         @"LastSettingsUpdate": [NSDate distantPast], // special value that keeps track of when we last updated our settings
@@ -121,35 +166,240 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     };
 }
 
-- (void)initializeSettingsDict {
-    // make sure we only load the settings dictionary once, even if called simultaneously from multiple threads
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        @synchronized (self) {
-            self->_settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile: SCSettings.securedSettingsFilePath];
-            
-            BOOL isTest = [[NSUserDefaults standardUserDefaults] boolForKey: @"isTest"];
-            if (isTest) NSLog(@"Ignoring settings on disk because we're unit-testing");
-            
-            // if we don't have a settings dictionary on disk yet,
-            // set it up with the default values (and migrate legacy settings also)
-            // also if we're running tests, just use the default dict
-            if (self->_settingsDict == nil || isTest) {
-                self->_settingsDict = [[self defaultSettingsDict] mutableCopy];
-                
-                // write out our brand-new settings to disk!
-                if (!self.readOnly) {
-                    [self writeSettings];
-                }
-                [SCSentry addBreadcrumb: @"Initialized SCSettings to default settings" category: @"settings"];
-            }
-            
-            // we're now current with disk!
-            self->lastSynchronizedWithDisk = [NSDate date];
+- (nullable NSDictionary*)validatedSettingsDictionaryFromDiskWithReason:(NSString * _Nullable * _Nullable)reason
+                                                               errorCode:(NSInteger * _Nullable)errorCode {
+    if (reason != NULL) *reason = nil;
+    if (errorCode != NULL) *errorCode = 0;
 
-            [self startSyncTimer];
+    NSString *settingsFilePath = [self settingsFilePath];
+    const char *path = settingsFilePath.fileSystemRepresentation;
+    struct stat status;
+    if (lstat(path, &status) != 0) {
+        int statusError = errno;
+        if (reason != NULL) {
+            *reason = statusError == ENOENT ? @"missing" :
+                ((statusError == EACCES || statusError == EPERM) ? @"permissions" : @"decode_failed");
         }
-    });
+        if (errorCode != NULL) *errorCode = statusError;
+        return nil;
+    }
+    if (!S_ISREG(status.st_mode) || S_ISLNK(status.st_mode)) {
+        if (reason != NULL) *reason = @"schema_invalid";
+        return nil;
+    }
+
+    NSError *readError = nil;
+    NSData *plistData = [NSData dataWithContentsOfFile:settingsFilePath
+                                              options:NSDataReadingMappedIfSafe
+                                                error:&readError];
+    if (plistData == nil) {
+        BOOL permissionFailure = readError.code == NSFileReadNoPermissionError || errno == EACCES || errno == EPERM;
+        if (reason != NULL) {
+            *reason = readError.code == NSFileReadNoSuchFileError ? @"missing" :
+                (permissionFailure ? @"permissions" : @"decode_failed");
+        }
+        if (errorCode != NULL) *errorCode = readError.code;
+        return nil;
+    }
+
+    NSError *decodeError = nil;
+    id decoded = [NSPropertyListSerialization propertyListWithData:plistData
+                                                            options:NSPropertyListImmutable
+                                                             format:NULL
+                                                              error:&decodeError];
+    if (![decoded isKindOfClass:[NSDictionary class]]) {
+        if (reason != NULL) *reason = @"decode_failed";
+        if (errorCode != NULL) *errorCode = decodeError.code;
+        return nil;
+    }
+
+    id version = decoded[@"SettingsVersionNumber"];
+    if (version != nil && !SCSettingsIntegerNumberInRange(version, NSIntegerMax)) {
+        if (reason != NULL) *reason = @"version_invalid";
+        return nil;
+    }
+    if (![SCSettings settingsDictionaryHasValidSchema:decoded]) {
+        if (reason != NULL) *reason = @"schema_invalid";
+        return nil;
+    }
+    return decoded;
+}
+
++ (BOOL)settingsDictionaryHasValidSchema:(id)settingsDictionary {
+    if (![settingsDictionary isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *settings = settingsDictionary;
+
+    id version = settings[@"SettingsVersionNumber"];
+    if (version != nil && !SCSettingsIntegerNumberInRange(version, NSIntegerMax)) return NO;
+
+    id controllingUID = settings[@"ActiveBlockControllingUID"];
+    if (controllingUID != nil && !SCSettingsIntegerNumberInRange(controllingUID, UINT_MAX)) return NO;
+
+    NSArray<NSString *> *dateKeys = @[@"BlockEndDate", @"LastSettingsUpdate"];
+    for (NSString *key in dateKeys) {
+        id value = settings[key];
+        if (value != nil && ![value isKindOfClass:[NSDate class]]) return NO;
+    }
+
+    NSArray<NSString *> *booleanKeys = @[
+        @"ActiveBlockAsWhitelist", @"BlockIsRunning", @"TamperingDetected",
+        @"EvaluateCommonSubdomains", @"IncludeLinkedDomains", @"BlockSoundShouldPlay",
+        @"ClearCaches", @"AllowLocalNetworks", @"EnableErrorReporting",
+        @"DebugBlockingDisabled"
+    ];
+    for (NSString *key in booleanKeys) {
+        id value = settings[key];
+        if (value != nil && !SCSettingsNumberIsBoolean(value)) return NO;
+    }
+    id blockSound = settings[@"BlockSound"];
+    if (blockSound != nil && !SCSettingsIntegerNumberInRange(blockSound, NSIntegerMax)) return NO;
+
+    id activeBlocklist = settings[@"ActiveBlocklist"];
+    if (activeBlocklist != nil) {
+        if (![activeBlocklist isKindOfClass:[NSArray class]]) return NO;
+        for (id entry in activeBlocklist) {
+            if (![entry isKindOfClass:[NSString class]]) return NO;
+        }
+    }
+
+    id approvedSchedules = settings[@"ApprovedSchedules"];
+    if (approvedSchedules != nil) {
+        if (![approvedSchedules isKindOfClass:[NSDictionary class]]) return NO;
+        for (id scheduleID in approvedSchedules) {
+            if (![scheduleID isKindOfClass:[NSString class]]) return NO;
+            id schedule = approvedSchedules[scheduleID];
+            if (![schedule isKindOfClass:[NSDictionary class]]) return NO;
+            NSDictionary *scheduleDictionary = schedule;
+            id blocklist = scheduleDictionary[@"blocklist"];
+            if (blocklist != nil) {
+                if (![blocklist isKindOfClass:[NSArray class]]) return NO;
+                for (id entry in blocklist) {
+                    if (![entry isKindOfClass:[NSString class]]) return NO;
+                }
+            }
+            NSDictionary<NSString *, Class> *knownTypes = @{
+                @"isAllowlist": NSNumber.class,
+                @"blockSettings": NSDictionary.class,
+                @"controllingUID": NSNumber.class,
+                @"approvedStartDate": NSDate.class,
+                @"approvedEndDate": NSDate.class,
+                @"registeredAt": NSDate.class,
+            };
+            for (NSString *key in knownTypes) {
+                id value = scheduleDictionary[key];
+                if (value != nil && ![value isKindOfClass:knownTypes[key]]) return NO;
+            }
+            id scheduleUID = scheduleDictionary[@"controllingUID"];
+            if (scheduleUID != nil && !SCSettingsIntegerNumberInRange(scheduleUID, UINT_MAX)) return NO;
+            id isAllowlist = scheduleDictionary[@"isAllowlist"];
+            if (isAllowlist != nil && !SCSettingsNumberIsBoolean(isAllowlist)) return NO;
+            NSDate *startDate = scheduleDictionary[@"approvedStartDate"];
+            NSDate *endDate = scheduleDictionary[@"approvedEndDate"];
+            if (startDate != nil && endDate != nil && [endDate compare:startDate] != NSOrderedDescending) {
+                return NO;
+            }
+        }
+    }
+
+    if ([settings[@"BlockIsRunning"] boolValue]) {
+        if (![settings[@"BlockEndDate"] isKindOfClass:[NSDate class]] ||
+            ![settings[@"ActiveBlocklist"] isKindOfClass:[NSArray class]] ||
+            !SCSettingsNumberIsBoolean(settings[@"ActiveBlockAsWhitelist"])) {
+            return NO;
+        }
+        // An empty allowlist intentionally blocks everything. An empty
+        // denylist blocks nothing, so treating it as authoritative active
+        // state could let integrity repair remove real rules and reinstall an
+        // empty block after a damaged plist load.
+        if (![settings[@"ActiveBlockAsWhitelist"] boolValue] &&
+            [settings[@"ActiveBlocklist"] count] == 0) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+- (void)reportSettingsLoadFailureWithReason:(NSString*)reason
+                           recoveryAttempted:(BOOL)recoveryAttempted
+                           recoverySucceeded:(BOOL)recoverySucceeded
+                                   errorCode:(NSInteger)errorCode {
+    if (geteuid() != 0 || reason.length == 0) return;
+    NSNumber *settingsVersion = [_settingsDict[@"SettingsVersionNumber"] isKindOfClass:[NSNumber class]]
+        ? _settingsDict[@"SettingsVersionNumber"] : @0;
+    NSString *signature = [NSString stringWithFormat:@"%@:%ld:%@:%d:%d",
+                           reason, (long)errorCode, settingsVersion,
+                           recoveryAttempted, recoverySucceeded];
+    if ([self.lastReportedLoadFailureSignature isEqualToString:signature]) return;
+    self.lastReportedLoadFailureSignature = signature;
+
+    NSMutableDictionary *fields = [@{
+        @"reason": reason,
+        @"recovery_attempted": @(recoveryAttempted),
+        @"recovery_succeeded": @(recoverySucceeded),
+        @"settings_version": @([settingsVersion unsignedIntegerValue]),
+    } mutableCopy];
+    if (errorCode != 0) fields[@"error_code"] = @(errorCode);
+    [[NSNotificationCenter defaultCenter] postNotificationName:SCSettingsLoadFailedNotification
+                                                        object:self
+                                                      userInfo:fields];
+}
+
+- (void)initializeSettingsDict {
+    // This is deliberately per-instance rather than dispatch_once. A force
+    // reload must be able to recover after a transient read failure, and a
+    // failed reload must never strand `_settingsDict` at nil.
+    @synchronized (self) {
+        if (_settingsDict != nil) return;
+
+        BOOL isTest = [[NSUserDefaults standardUserDefaults] boolForKey:@"isTest"];
+        NSString *failureReason = nil;
+        NSInteger errorCode = 0;
+        NSDictionary *settingsFromDisk = isTest ? nil :
+            [self validatedSettingsDictionaryFromDiskWithReason:&failureReason errorCode:&errorCode];
+        if (isTest) NSLog(@"Ignoring settings on disk because we're unit-testing");
+
+        if (settingsFromDisk != nil) {
+            _settingsDict = [settingsFromDisk mutableCopy];
+            self.settingsStateAvailableForEnforcement = YES;
+            self.lastReportedLoadFailureSignature = nil;
+        } else {
+            _settingsDict = [[self defaultSettingsDict] mutableCopy];
+            self.settingsStateAvailableForEnforcement = isTest;
+            BOOL recoveryAttempted = NO;
+            BOOL recoverySucceeded = NO;
+
+            // A genuinely absent file on first root initialization is normal.
+            // Create it once. Corrupt, unreadable, or schema-invalid files are
+            // not overwritten: they may contain the only recoverable record of
+            // an active block, so retain them for support/manual recovery.
+            if (!isTest && !self.readOnly && [failureReason isEqualToString:@"missing"]) {
+                recoveryAttempted = YES;
+                __block NSError *writeError = nil;
+                [self writeSettingsAllowingUnavailableBootstrapWithCompletion:^(NSError *error) {
+                    writeError = error;
+                }];
+                recoverySucceeded = (writeError == nil);
+                self.settingsStateAvailableForEnforcement = recoverySucceeded;
+                if (!recoverySucceeded) {
+                    errorCode = writeError.code;
+                    [self reportSettingsLoadFailureWithReason:@"permissions"
+                                            recoveryAttempted:YES
+                                            recoverySucceeded:NO
+                                                    errorCode:errorCode];
+                }
+            } else if (!isTest) {
+                [self reportSettingsLoadFailureWithReason:failureReason ?: @"decode_failed"
+                                        recoveryAttempted:recoveryAttempted
+                                        recoverySucceeded:recoverySucceeded
+                                                errorCode:errorCode];
+            }
+            [SCSentry addBreadcrumb:@"Initialized SCSettings to safe in-memory defaults" category:@"settings"];
+        }
+
+        self.lastSynchronizedWithDisk = [NSDate date];
+        [self startSyncTimer];
+    }
 }
 
 - (NSDictionary*)settingsDict {
@@ -185,12 +435,37 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     }
 
     @synchronized (self) {
-        NSDictionary* settingsFromDisk = [NSDictionary dictionaryWithContentsOfFile: SCSettings.securedSettingsFilePath];
+        NSString *failureReason = nil;
+        NSInteger errorCode = 0;
+        NSDictionary* settingsFromDisk =
+            [self validatedSettingsDictionaryFromDiskWithReason:&failureReason errorCode:&errorCode];
+        if (settingsFromDisk == nil) {
+            // Keep the last-known-good in-memory state. Replacing it with
+            // defaults here can make the UI claim no block is active while the
+            // physical hosts/PF/app layers remain enforced.
+            [self reportSettingsLoadFailureWithReason:failureReason ?: @"decode_failed"
+                                    recoveryAttempted:NO
+                                    recoverySucceeded:NO
+                                            errorCode:errorCode];
+            NSLog(@"SCSettings: Reload rejected unsafe disk state (reason=%@ code=%ld); retaining memory version",
+                  failureReason, (long)errorCode);
+            return;
+        }
+        if (!self.settingsStateAvailableForEnforcement) {
+            _settingsDict = [settingsFromDisk mutableCopy];
+            self.settingsStateAvailableForEnforcement = YES;
+            self.lastReportedLoadFailureSignature = nil;
+            self.lastSynchronizedWithDisk = [NSDate date];
+            NSLog(@"SCSettings: Recovered a valid authoritative settings snapshot");
+            return;
+        }
+        self.lastReportedLoadFailureSignature = nil;
         
         int diskSettingsVersion = [settingsFromDisk[@"SettingsVersionNumber"] intValue];
-        int memorySettingsVersion = [[self valueForKey: @"SettingsVersionNumber"] intValue];
+        int memorySettingsVersion = [_settingsDict[@"SettingsVersionNumber"] intValue];
         NSDate* diskSettingsLastUpdated = settingsFromDisk[@"LastSettingsUpdate"];
-        NSDate* memorySettingsLastUpdated = [self valueForKey: @"LastSettingsUpdate"];
+        NSDate* memorySettingsLastUpdated = [_settingsDict[@"LastSettingsUpdate"] isKindOfClass:[NSDate class]]
+            ? _settingsDict[@"LastSettingsUpdate"] : [NSDate distantPast];
         
         // occasionally we can end up with timestamps from the future
         // (usually because the user moved their system clock forward, then back again)
@@ -227,21 +502,41 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     // Bypasses version number checking - always reloads from disk.
     // Use this when you KNOW the disk has authoritative data (e.g., after clearBlockForDebug).
     @synchronized (self) {
-        NSDictionary* settingsFromDisk = [NSDictionary dictionaryWithContentsOfFile: SCSettings.securedSettingsFilePath];
+        NSString *failureReason = nil;
+        NSInteger errorCode = 0;
+        NSDictionary* settingsFromDisk =
+            [self validatedSettingsDictionaryFromDiskWithReason:&failureReason errorCode:&errorCode];
         if (settingsFromDisk != nil) {
             _settingsDict = [settingsFromDisk mutableCopy];
+            self.settingsStateAvailableForEnforcement = YES;
+            self.lastReportedLoadFailureSignature = nil;
             NSLog(@"SCSettings: Force-reloaded from disk (version %d)", [settingsFromDisk[@"SettingsVersionNumber"] intValue]);
         } else {
-            // File doesn't exist or is corrupted - reinitialize with defaults
-            _settingsDict = nil;
-            [self initializeSettingsDict];
-            NSLog(@"SCSettings: Force-reload found no file, reinitialized with defaults");
+            // Never discard the last-known-good state on a transient or
+            // malicious disk failure. If this instance has not initialized,
+            // establish non-nil safe defaults without recursive initialization.
+            if (_settingsDict == nil) _settingsDict = [[self defaultSettingsDict] mutableCopy];
+            [self reportSettingsLoadFailureWithReason:failureReason ?: @"decode_failed"
+                                    recoveryAttempted:NO
+                                    recoverySucceeded:NO
+                                            errorCode:errorCode];
+            NSLog(@"SCSettings: Force-reload rejected unsafe disk state (reason=%@ code=%ld); retaining memory version",
+                  failureReason, (long)errorCode);
         }
         self.lastSynchronizedWithDisk = [NSDate date];
     }
 }
 
+- (void)writeSettingsAllowingUnavailableBootstrapWithCompletion:(nullable void(^)(NSError* _Nullable))completionBlock {
+    [self writeSettingsWithCompletion:completionBlock allowingUnavailableBootstrap:YES];
+}
+
 - (void)writeSettingsWithCompletion:(nullable void(^)(NSError* _Nullable))completionBlock {
+    [self writeSettingsWithCompletion:completionBlock allowingUnavailableBootstrap:NO];
+}
+
+- (void)writeSettingsWithCompletion:(nullable void(^)(NSError* _Nullable))completionBlock
+        allowingUnavailableBootstrap:(BOOL)allowUnavailableBootstrap {
     @synchronized (self) {
         if (self.readOnly) {
             NSLog(@"WARNING: Read-only SCSettings instance can't write out settings");
@@ -253,13 +548,19 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
             return;
         }
 
+        if (_settingsDict == nil) [self initializeSettingsDict];
+        if (!self.settingsStateAvailableForEnforcement && !allowUnavailableBootstrap) {
+            NSLog(@"WARNING: Refusing to persist unavailable SCSettings safe defaults");
+            NSError *err = [self settingsStateUnavailableError];
+            if (completionBlock != nil) completionBlock(err);
+            return;
+        }
+
 #if TESTING
         // no writing to disk during unit tests
         NSLog(@"Would write settings to disk now (but no writing during unit tests)");
         if (completionBlock != nil) completionBlock(nil);
-        return;
-#endif
-        
+#else
         // don't spend time on the main thread writing out files - it's OK for this to happen without blocking other things
         dispatch_sync(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSError* serializationErr;
@@ -269,7 +570,8 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                                                                             error: &serializationErr];
                             
             if (plistData == nil) {
-                NSLog(@"NSPropertyListSerialization error: %@", serializationErr);
+                NSLog(@"NSPropertyListSerialization failed (domain=%@ code=%ld)",
+                      serializationErr.domain, (long)serializationErr.code);
                 if (completionBlock != nil) completionBlock(serializationErr);
                 return;
             }
@@ -284,7 +586,8 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                                                                                        }
                                                                                             error: &createDirectoryErr];
             if (!createDirectorySuccessful) {
-                NSLog(@"WARNING: Failed to create %@ folder to store SCSettings. Error was %@", SETTINGS_FILE_DIR, createDirectoryErr);
+                NSLog(@"WARNING: Failed to create SCSettings directory (domain=%@ code=%ld)",
+                      createDirectoryErr.domain, (long)createDirectoryErr.code);
                 [SCSentry addBreadcrumb: [NSString stringWithFormat: @"Failed to create directory for SCSettings with error %@", createDirectoryErr] category:@"settings"];
             }
 
@@ -296,12 +599,13 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                                              ofItemAtPath: SETTINGS_FILE_DIR
                                              error: &chmodDirectoryErr];
             if (!chmodDirectorySuccessful) {
-                NSLog(@"WARNING: Failed to set permissions on %@ folder to store SCSettings. Error was %@", SETTINGS_FILE_DIR, chmodDirectoryErr);
+                NSLog(@"WARNING: Failed to set SCSettings directory permissions (domain=%@ code=%ld)",
+                      chmodDirectoryErr.domain, (long)chmodDirectoryErr.code);
                 [SCSentry addBreadcrumb: [NSString stringWithFormat: @"Failed to set directory permissions for SCSettings with error %@", chmodDirectoryErr] category:@"settings"];
             }
 
             NSError* writeErr;
-            BOOL writeSuccessful = [plistData writeToFile: SCSettings.securedSettingsFilePath
+            BOOL writeSuccessful = [plistData writeToFile: [self settingsFilePath]
                                                   options: NSDataWritingAtomic
                                                     error: &writeErr
                                     ];
@@ -313,19 +617,26 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                                         NSFileGroupOwnerAccountID: [NSNumber numberWithUnsignedLong: 0],
                                         NSFilePosixPermissions: [NSNumber numberWithShort: 0755]
                                     }
-                                    ofItemAtPath: SCSettings.securedSettingsFilePath
+                                    ofItemAtPath: [self settingsFilePath]
                                     error: &chmodErr];
 
             if (writeSuccessful) {
                 self.lastSynchronizedWithDisk = [NSDate date];
+                // Ordinary writes only reach this point from a valid
+                // authoritative snapshot. The one explicit exception is the
+                // first-run path where the secured file was genuinely absent.
+                if (allowUnavailableBootstrap) {
+                    self.settingsStateAvailableForEnforcement = YES;
+                }
             }
 
             if (!writeSuccessful) {
-                NSLog(@"Failed to write secured settings to file %@", SCSettings.securedSettingsFilePath);
+                NSLog(@"Failed to write secured settings (domain=%@ code=%ld)", writeErr.domain, (long)writeErr.code);
                 [SCSentry captureError: writeErr];
                 if (completionBlock != nil) completionBlock(writeErr);
             } else if (!chmodSuccessful) {
-                NSLog(@"Failed to change secured settings file owner/permissions secured settings for file %@ with error %@", SCSettings.securedSettingsFilePath, chmodErr);
+                NSLog(@"Failed to set secured settings permissions (domain=%@ code=%ld)",
+                      chmodErr.domain, (long)chmodErr.code);
                 [SCSentry captureError: chmodErr];
                 if (completionBlock != nil) completionBlock(chmodErr);
             } else {
@@ -333,18 +644,25 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
                 if (completionBlock != nil) completionBlock(nil);
             }
         });
+#endif
     }
 }
 - (void)writeSettings {
     // by default, just log all errors
     [self writeSettingsWithCompletion:^(NSError * _Nullable err) {
         if (err != nil) {
-            NSLog(@"Error writing SCSettings: %@", err);
+            NSLog(@"Error writing SCSettings (domain=%@ code=%ld)", err.domain, (long)err.code);
         }
     }];
 }
 - (void)synchronizeSettingsWithCompletion:(nullable void (^)(NSError * _Nullable))completionBlock {
     [self reloadSettings];
+
+    if (!self.settingsStateAvailableForEnforcement) {
+        NSLog(@"WARNING: Refusing to synchronize unavailable SCSettings safe defaults");
+        if (completionBlock != nil) completionBlock([self settingsStateUnavailableError]);
+        return;
+    }
     
     NSDate* lastSettingsUpdate = [self valueForKey: @"LastSettingsUpdate"];
     
@@ -369,7 +687,12 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     }
 }
 - (void)synchronizeSettings {
-    [self synchronizeSettingsWithCompletion: nil];
+    [self synchronizeSettingsWithCompletion:^(NSError *error) {
+        if (error != nil) {
+            NSLog(@"SCSettings synchronization refused (domain=%@ code=%ld)",
+                  error.domain, (long)error.code);
+        }
+    }];
 }
 
 - (NSError*)syncSettingsAndWait:(NSInteger)timeoutSecs {
@@ -398,7 +721,16 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     // the only exception is receiving value updates (via notification) from other processes
     // in which case stopPropagation will be true
     if (self.readOnly && !stopPropagation) {
-        NSLog(@"WARNING: Read-only SCSettings instance can't update values (setting %@ to %@)", key, value);
+        NSLog(@"WARNING: Read-only SCSettings instance can't update key %@", key);
+        return;
+    }
+
+    if (_settingsDict == nil) [self initializeSettingsDict];
+    if (!self.settingsStateAvailableForEnforcement) {
+        // Safe defaults exist only so reads and diagnostics remain total after
+        // a corrupt initial load. Mutating them would let a later sync replace
+        // the only record of an active block with fabricated default state.
+        NSLog(@"WARNING: Refusing SCSettings mutation while authoritative state is unavailable");
         return;
     }
     
@@ -429,11 +761,13 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     // stopPropagation is a flag that stops one setting change from bouncing back and forth for ages
     // between two processes. It indicates that the change started in another process
     if (!stopPropagation) {
+        // Never broadcast setting values across sessions. ActiveBlocklist and
+        // ApprovedSchedules are private; receivers reload the authoritative
+        // file after this version-only invalidation signal.
         [[NSDistributedNotificationCenter defaultCenter] postNotificationName: @"org.eyebeam.SelfControl.SCSettingsValueChanged"
                                                                        object: self.description
                                                                      userInfo: @{
                                                                                  @"key": key,
-                                                                                 @"value": value,
                                                                                  @"versionNumber": self.settingsDict[@"SettingsVersionNumber"],
                                                                                  @"date": [NSDate date]
                                                                                  }
@@ -495,36 +829,20 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
 }
 
 - (void)updateSentryContext {
-    // make sure Sentry has the latest context in the event of a crash
-    
-    NSMutableDictionary* dictCopy = [self.settingsDict mutableCopy];
-    
-    // fill in any gaps with default values (like we did if they called valueForKey:)
-    for (NSString* key in [[self defaultSettingsDict] allKeys]) {
-        if (dictCopy[key] == nil) {
-            dictCopy[key] = [self defaultSettingsDict][key];
-        }
+    if (![SCSentry errorReportingEnabled]) {
+        return;
     }
-    
-    // eliminate privacy-sensitive data (i.e. blocklist)
-    // but store the blocklist length as a useful piece of debug info
-    id activeBlocklist = dictCopy[@"ActiveBlocklist"];
-    NSUInteger blocklistLength = (activeBlocklist == nil) ? 0 : ((NSArray*)activeBlocklist).count;
-    [dictCopy setObject: @(blocklistLength) forKey: @"ActiveBlocklistLength"];
-    [dictCopy removeObjectForKey: @"Blocklist"];
-    [dictCopy removeObjectForKey: @"ActiveBlocklist"];
 
-    // and serialize dates to string, since Sentry has a hard time with that
-    NSArray<NSString*>* dateKeys = @[@"BlockEndDate", @"LastSettingsUpdate"];
-    for (NSString* dateKey in dateKeys) {
-        dictCopy[dateKey] = [NSDateFormatter localizedStringFromDate: dictCopy[dateKey]
-                                                                 dateStyle: NSDateFormatterShortStyle
-                                                                 timeStyle: NSDateFormatterFullStyle];
-    }
+    // Never attach a settings dump. In particular, ApprovedSchedules contains
+    // every committed segment's complete blocklist. The shared sanitizer copies
+    // only known-safe scalars and derived counts/states.
+    NSMutableDictionary* settingsWithDefaults = [[self defaultSettingsDict] mutableCopy];
+    [settingsWithDefaults addEntriesFromDictionary:self.settingsDict ?: @{}];
+    NSDictionary* safeContext = [SCSentry sanitizedSettingsContextFromDictionary:settingsWithDefaults];
 
 #if SENTRY_ENABLED
     [SentrySDK configureScope:^(SentryScope * _Nonnull scope) {
-        [scope setContextValue: dictCopy forKey: @"SCSettings"];
+        [scope setContextValue:safeContext forKey:@"SCSettings"];
     }];
 #endif
 }
@@ -561,10 +879,8 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     if (!noteMoreRecentThanSettings) {
         NSLog(@"Ignoring setting change notification as %@ is older than %@", noteSettingUpdated, ourSettingsLastUpdated);
     } else {
-        NSLog(@"Accepting propagated change (%@ --> %@) since version %d is newer than %d and/or %@ is newer than %@", note.userInfo[@"key"], note.userInfo[@"value"], noteVersionNumber, ourSettingsVersionNumber, noteSettingUpdated, ourSettingsLastUpdated);
-        
-        // mirror the change on our own instance - but don't propagate the change to avoid loopin
-        [self setValue: note.userInfo[@"value"] forKey: note.userInfo[@"key"] stopPropagation: YES];
+        NSLog(@"Accepting propagated invalidation for key %@ (version %d newer than %d)",
+              note.userInfo[@"key"], noteVersionNumber, ourSettingsVersionNumber);
     }
     
     // regardless of which is more recent, we should really go get the new deal from disk
@@ -598,6 +914,7 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
 }
 
 - (void)dealloc {
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
     [self cancelSyncTimers];
 }
 

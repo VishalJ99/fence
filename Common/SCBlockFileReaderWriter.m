@@ -19,7 +19,7 @@
     }
 
     if (![saveData writeToURL: targetFileURL atomically: YES]) {
-        NSLog(@"ERROR: Failed to write blocklist to URL %@", targetFileURL);
+        NSLog(@"ERROR: Failed to write blocklist file");
         *errRef = [SCErr errorWithCode: 106];
         return NO;
     }
@@ -35,7 +35,7 @@
     NSDictionary* openedDict = [NSDictionary dictionaryWithContentsOfURL: fileURL];
     
     if (openedDict == nil || openedDict[@"HostBlacklist"] == nil || openedDict[@"BlockAsWhitelist"] == nil) {
-        NSLog(@"ERROR: Could not read a valid block from file %@", fileURL);
+        NSLog(@"ERROR: Could not read a valid block from the selected file");
         return nil;
     }
     

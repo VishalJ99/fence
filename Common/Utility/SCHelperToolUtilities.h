@@ -9,6 +9,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class SCBlockApplyResult;
+
 // Utility methods athat are only used by the helper tools
 // (i.e. selfcontrold, selfcontrol-cli, and SCKillerHelper)
 // note that this is NOT included in SCUtility.h currently!
@@ -17,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Reads the domain block list from the settings for SelfControl, and adds deny
 // rules for all of the IPs (or the A DNS record IPS for doamin names) to the
 // ipfw firewall.
-+ (void)installBlockRulesFromSettings;
++ (SCBlockApplyResult*)installBlockRulesFromSettings;
 
 // calls SMJobRemove to unload the daemon from launchd
 // (which also kills the running process, synchronously)
@@ -36,7 +38,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 // Removes block via settings, host file rules and ipfw rules,
 // deleting user caches if requested, and migrating legacy settings.
-+ (void)removeBlock;
++ (BOOL)removeBlock;
+/// Same teardown with its privacy-safe per-layer postconditions returned to
+/// daemon callers for telemetry. The dictionary never contains block entries.
++ (BOOL)removeBlockWithResult:(NSDictionary<NSString *, id> * _Nullable * _Nullable)result;
 
 + (void)sendConfigurationChangedNotification;
 

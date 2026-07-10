@@ -11,6 +11,13 @@
 #import <pwd.h>
 #import "SCSettings.h"
 
+static NSString * const SCFenceLegacyDefaultsDomain = @"org.eyebeam.SelfControl";
+static NSString * const SCFenceCurrentDefaultsDomain = @"org.eyebeam.Fence";
+static NSString * const SCFenceDefaultsDomainMigrationKey = @"SCFenceDefaultsDomainMigrationVersion";
+// Version 2 re-runs the migration for users whose version-1 attempt was
+// incorrectly suppressed by an expired commitment marker.
+static const NSInteger SCFenceDefaultsDomainMigrationVersion = 2;
+
 @implementation SCMigrationUtilities
 
 + (NSString*)homeDirectoryForUid:(uid_t)uid {
@@ -149,7 +156,7 @@
         
         // if we have a v3.x settings dictionary, copy what we can from that
         if (settingsFromDisk != nil) {
-            NSLog(@"Migrating all settings from legacy secured settings file %@", legacySettingsPath);
+            NSLog(@"Migrating settings from a legacy secured settings file");
 
             // we assume the settings from disk are newer / should override existing values
             // UNLESS the user has set a default to its non-default value
@@ -163,7 +170,7 @@
                 // we have a value from settings, and the defaults value is unset or equal to the default value
                 // so pull the value from settings in!
                 if (settingsValue != nil && (defaultsValue == nil || [defaultsValue isEqualTo: defaultDefaults[key]])) {
-                    NSLog(@"Migrating keypair (%@, %@) from settings to defaults", key, settingsValue);
+                    NSLog(@"Migrating one allowlisted setting from secured settings to defaults");
                     [defaults setObject: settingsValue forKey: key];
                 }
             }
@@ -178,10 +185,12 @@
         if (blocklistInDefaults == nil || blocklistInDefaults.count == 0) {
             if (lockDict != nil && lockDict[@"HostBlacklist"] != nil) {
                 [defaults setObject: lockDict[@"HostBlacklist"] forKey: @"Blocklist"];
-                NSLog(@"Migrated blocklist from pre-3.0 lock dictionary: %@", lockDict[@"HostBlacklist"]);
+                NSLog(@"Migrated blocklist from pre-3.0 lock dictionary (entryCount=%lu)",
+                      (unsigned long)[lockDict[@"HostBlacklist"] count]);
             } else if ([defaults objectForKey: @"HostBlacklist"] != nil) {
                 [defaults setObject: [defaults objectForKey: @"HostBlacklist"] forKey: @"Blocklist"];
-                NSLog(@"Migrated blocklist from pre-3.0 legacy defaults: %@", [defaults objectForKey: @"HostBlacklist"]);
+                NSLog(@"Migrated blocklist from pre-3.0 legacy defaults (entryCount=%lu)",
+                      (unsigned long)[[defaults objectForKey:@"HostBlacklist"] count]);
             }
         }
         
@@ -203,6 +212,119 @@
 
 + (void)copyLegacySettingsToDefaults {
     [SCMigrationUtilities copyLegacySettingsToDefaults: 0];
+}
+
+#pragma mark - Fence bundle-ID defaults migration
+
++ (BOOL)commitmentMarkerIsLive:(id)marker relativeToDate:(NSDate *)referenceDate {
+    return [marker isKindOfClass:[NSDate class]] &&
+           [(NSDate *)marker compare:referenceDate] == NSOrderedDescending;
+}
+
++ (BOOL)domainContainsFenceScheduleState:(NSDictionary<NSString*, id>*)domain
+                          relativeToDate:(NSDate *)referenceDate {
+    id bundles = domain[@"SCScheduleBundles"];
+    if ([bundles isKindOfClass:[NSArray class]] && [(NSArray*)bundles count] > 0) {
+        return YES;
+    }
+
+    // Historical SCIsCommitted flags and commitment dates were not always
+    // cleaned up. Only an end date that is still in the future is evidence of
+    // a live commitment; a stale marker must not hide a recoverable calendar
+    // in the legacy bundle-ID domain.
+    if ([self commitmentMarkerIsLive:domain[@"SCCommitmentEndDate"]
+                      relativeToDate:referenceDate]) {
+        return YES;
+    }
+
+    for (NSString *key in domain) {
+        id value = domain[key];
+        if ([key hasPrefix:@"SCWeekSchedules_"] &&
+            ([value isKindOfClass:[NSArray class]] || [value isKindOfClass:[NSDictionary class]]) &&
+            [value count] > 0) {
+            return YES;
+        }
+        if ([key hasPrefix:@"SCWeekCommitment_"] &&
+            [self commitmentMarkerIsLive:value relativeToDate:referenceDate]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
++ (BOOL)domainContainsFenceScheduleState:(NSDictionary<NSString*, id>*)domain {
+    return [self domainContainsFenceScheduleState:domain relativeToDate:[NSDate date]];
+}
+
++ (BOOL)isFenceScheduleMigrationKey:(NSString*)key {
+    static NSSet<NSString*> *exactKeys;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        exactKeys = [NSSet setWithArray:@[
+            @"SCScheduleBundles",
+            @"SCCommitmentEndDate",
+            @"SCIsCommitted",
+            @"SCEmergencyUnlockCredits",
+            @"SCEmergencyUnlockCreditsInitialized"
+        ]];
+    });
+
+    return [exactKeys containsObject:key] ||
+           [key hasPrefix:@"SCWeekSchedules_"] ||
+           [key hasPrefix:@"SCWeekCommitment_"];
+}
+
++ (NSDictionary<NSString*, id>*)legacyFenceScheduleValuesToRestoreFromDomain:(NSDictionary<NSString*, id>*)legacyDomain
+                                                               currentDomain:(NSDictionary<NSString*, id>*)currentDomain {
+    if (![legacyDomain isKindOfClass:[NSDictionary class]] ||
+        ![currentDomain isKindOfClass:[NSDictionary class]] ||
+        [self domainContainsFenceScheduleState:currentDomain] ||
+        ![self domainContainsFenceScheduleState:legacyDomain]) {
+        return @{};
+    }
+
+    NSMutableDictionary<NSString*, id> *values = [NSMutableDictionary dictionary];
+    [legacyDomain enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) {
+        BOOL isCreditKey = [key isEqualToString:@"SCEmergencyUnlockCredits"] ||
+                           [key isEqualToString:@"SCEmergencyUnlockCreditsInitialized"];
+        if ([key isKindOfClass:[NSString class]] && value != nil &&
+            [self isFenceScheduleMigrationKey:key] &&
+            (!isCreditKey || currentDomain[key] == nil)) {
+            values[key] = value;
+        }
+    }];
+    return [values copy];
+}
+
++ (BOOL)migrateLegacyFenceScheduleDefaultsIfNeeded {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *currentDomainName = NSBundle.mainBundle.bundleIdentifier ?: SCFenceCurrentDefaultsDomain;
+    NSDictionary<NSString*, id> *currentDomain = [defaults persistentDomainForName:currentDomainName] ?: @{};
+
+    if ([currentDomain[SCFenceDefaultsDomainMigrationKey] integerValue] >= SCFenceDefaultsDomainMigrationVersion) {
+        return NO;
+    }
+
+    NSDictionary<NSString*, id> *legacyDomain = [defaults persistentDomainForName:SCFenceLegacyDefaultsDomain] ?: @{};
+    NSDictionary<NSString*, id> *valuesToRestore =
+        [self legacyFenceScheduleValuesToRestoreFromDomain:legacyDomain currentDomain:currentDomain];
+
+    for (NSString *key in valuesToRestore) {
+        [defaults setObject:valuesToRestore[key] forKey:key];
+    }
+    [defaults setInteger:SCFenceDefaultsDomainMigrationVersion forKey:SCFenceDefaultsDomainMigrationKey];
+    [defaults synchronize];
+
+    if (valuesToRestore.count > 0) {
+        // Never print restored values: bundle dictionaries contain private
+        // blocklist entries. Structural counts are sufficient for local logs.
+        NSLog(@"Restored %lu Fence schedule-state keys from the legacy defaults domain",
+              (unsigned long)valuesToRestore.count);
+        return YES;
+    }
+
+    return NO;
 }
 
 // We might have "legacy" block settings hiding in one of three places:
@@ -246,7 +368,8 @@
     
     // first, clear the pre-3.0 lock dictionary
     if(![fileMan removeItemAtPath: SelfControlLegacyLockFilePath error: &retErr] && [fileMan fileExistsAtPath: SelfControlLegacyLockFilePath]) {
-        NSLog(@"WARNING: Could not remove legacy SelfControl lock file because of error: %@", retErr);
+        NSLog(@"WARNING: Could not remove legacy lock file (domain=%@ code=%ld)",
+              retErr.domain, (long)retErr.code);
         [SCSentry captureError: retErr];
     }
     
@@ -277,7 +400,8 @@
             NSURL* settingsFileURL = [homeDirURL URLByAppendingPathComponent: relativeSettingsPath isDirectory: NO];
             
             if(![fileMan removeItemAtURL: settingsFileURL error: &retErr] && [fileMan fileExistsAtPath: settingsFileURL.path]) {
-                NSLog(@"WARNING: Could not remove legacy SelfControl settings file at URL %@ because of error: %@", settingsFileURL, retErr);
+                NSLog(@"WARNING: Could not remove legacy settings file (domain=%@ code=%ld)",
+                      retErr.domain, (long)retErr.code);
                 [SCSentry captureError: retErr];
             }
         }

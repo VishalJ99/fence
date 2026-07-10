@@ -116,7 +116,15 @@ Sentry remains conditionally compiled so unit tests and dependency-free builds c
 #endif
 ```
 
-Structured logs are enabled with `options.enableLogs = YES` in `SCSentry`, and `options.beforeSendLog` drops all logs when `EnableErrorReporting` is disabled. Log call sites should go through `SCSentry` so user opt-in and attribute sanitization are applied consistently.
+Structured Sentry logs are deliberately disabled (`options.enableLogs = NO`).
+Fence uses bounded, typed diagnostic events and allowlisted breadcrumbs only;
+unknown/off consent prevents SDK startup and opt-out closes the SDK without
+flushing before purging Fence's dedicated cache.
+
+For privacy integration coverage, only the test target's `SCSentry.m` build
+undefines `TESTING`; a dedicated harness macro keeps consent lifecycle and cache
+mutation disabled while a real Sentry client is exercised through a fake local
+URL transport. All other test sources retain `TESTING=1`.
 
 ### 4. PCH Race Condition Fix
 

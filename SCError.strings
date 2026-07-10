@@ -47,6 +47,7 @@
 
 // 600-699 = errors generated in SCSettings
 "600" = "Unable to write SCSettings from a normal (non-root) account.";
+"602" = "Fence's secured settings are unavailable, so this change was not saved.";
 
 // 700-799 = errors generated in Fence utility functions
 "700" = "Fence couldn't clear your browser caches, because it couldn't read the user home directories.";

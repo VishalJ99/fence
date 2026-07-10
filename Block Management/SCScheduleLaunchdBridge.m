@@ -10,6 +10,15 @@
 #import "SCXPCClient.h"
 #import "SCMiscUtilities.h"
 
+NSString * const SCScheduleLaunchdBridgeFailureStageKey = @"SCScheduleLaunchdBridgeFailureStage";
+
+static void SCBridgeLogError(NSString* message, NSError* error) {
+    NSLog(@"SCScheduleLaunchdBridge: %@ (domain=%@ code=%ld)",
+          message,
+          error.domain ?: @"unknown",
+          (long)error.code);
+}
+
 #pragma mark - SCBlockWindow Implementation
 
 @implementation SCBlockWindow
@@ -122,11 +131,12 @@
                                                           blockInfo:blockInfo
                                                               error:error];
     if (!success) {
-        NSLog(@"ERROR: Failed to write blocklist file for bundle %@", bundle.bundleID);
+        SCBridgeLogError(@"Failed to write blocklist file", error ? *error : nil);
         return nil;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Wrote blocklist file to %@", fileURL.path);
+    NSLog(@"SCScheduleLaunchdBridge: Wrote blocklist file (entryCount=%lu)",
+          (unsigned long)bundle.entries.count);
     return fileURL;
 }
 
@@ -284,8 +294,8 @@
         ],
         @"StartCalendarInterval": calendarInterval,
         @"RunAtLoad": @NO,  // Don't run immediately when loaded
-        @"StandardOutPath": @"/tmp/selfcontrol-schedule.log",
-        @"StandardErrorPath": @"/tmp/selfcontrol-schedule.log"
+        @"StandardOutPath": @"/dev/null",
+        @"StandardErrorPath": @"/dev/null"
     };
 
     return plist;
@@ -302,17 +312,17 @@
                                                                   options:0
                                                                     error:error];
     if (!plistData) {
-        NSLog(@"ERROR: Failed to serialize plist for label %@", label);
+        SCBridgeLogError(@"Failed to serialize launchd plist", error ? *error : nil);
         return NO;
     }
 
     BOOL success = [plistData writeToURL:plistURL options:NSDataWritingAtomic error:error];
     if (!success) {
-        NSLog(@"ERROR: Failed to write plist to %@", plistURL.path);
+        SCBridgeLogError(@"Failed to write launchd plist", error ? *error : nil);
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Wrote launchd plist to %@", plistURL.path);
+    NSLog(@"SCScheduleLaunchdBridge: Wrote launchd plist");
     return YES;
 }
 
@@ -333,7 +343,7 @@
     [task launchAndReturnError:&taskError];
     if (taskError) {
         if (error) *error = taskError;
-        NSLog(@"ERROR: Failed to launch launchctl load: %@", taskError);
+        SCBridgeLogError(@"Failed to launch launchctl load", taskError);
         return NO;
     }
 
@@ -341,17 +351,17 @@
 
     if (task.terminationStatus != 0) {
         NSData *errorData = [[errorPipe fileHandleForReading] readDataToEndOfFile];
-        NSString *errorStr = [[NSString alloc] initWithData:errorData encoding:NSUTF8StringEncoding];
-        NSLog(@"ERROR: launchctl load failed for %@: %@", label, errorStr);
+        (void)errorData;
+        NSLog(@"SCScheduleLaunchdBridge: launchctl load failed (exitStatus=%d)", task.terminationStatus);
         if (error) {
             *error = [NSError errorWithDomain:@"SCScheduleLaunchdBridge"
-                                         code:1
-                                     userInfo:@{NSLocalizedDescriptionKey: errorStr ?: @"launchctl load failed"}];
+                                         code:task.terminationStatus
+                                     userInfo:@{NSLocalizedDescriptionKey: @"launchctl load failed"}];
         }
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Loaded launchd job %@", label);
+    NSLog(@"SCScheduleLaunchdBridge: Loaded launchd job");
     return YES;
 }
 
@@ -382,7 +392,7 @@
                                        URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.selfcontrol", segmentID]];
                 if ([fm fileExistsAtPath:blocklistURL.path]) {
                     [fm removeItemAtURL:blocklistURL error:nil];
-                    NSLog(@"SCScheduleLaunchdBridge: Removed merged blocklist file %@", blocklistURL.path);
+                    NSLog(@"SCScheduleLaunchdBridge: Removed merged blocklist file");
                 }
             }
         }
@@ -393,12 +403,12 @@
         NSError *removeError = nil;
         if (![fm removeItemAtURL:plistURL error:&removeError]) {
             if (error) *error = removeError;
-            NSLog(@"ERROR: Failed to remove plist file %@: %@", plistURL.path, removeError);
+            SCBridgeLogError(@"Failed to remove launchd plist", removeError);
             return NO;
         }
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Unloaded and removed job %@", label);
+    NSLog(@"SCScheduleLaunchdBridge: Unloaded and removed launchd job");
     return YES;
 }
 
@@ -425,7 +435,8 @@
     isoFormatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
     NSString *endDateStr = [isoFormatter stringFromDate:endDate];
 
-    NSLog(@"SCScheduleLaunchdBridge: Starting block immediately for bundle %@ until %@", bundle.name, endDateStr);
+    NSLog(@"SCScheduleLaunchdBridge: Starting block immediately (entryCount=%lu)",
+          (unsigned long)bundle.entries.count);
 
     // Run the CLI directly
     NSTask *task = [[NSTask alloc] init];
@@ -440,7 +451,7 @@
     NSError *taskError = nil;
     [task launchAndReturnError:&taskError];
     if (taskError) {
-        NSLog(@"ERROR: Failed to launch CLI: %@", taskError);
+        SCBridgeLogError(@"Failed to launch CLI", taskError);
         if (error) *error = taskError;
         return NO;
     }
@@ -449,20 +460,21 @@
 
     NSData *outputData = [[outputPipe fileHandleForReading] readDataToEndOfFile];
     NSData *errorData = [[errorPipe fileHandleForReading] readDataToEndOfFile];
-    NSString *outputStr = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding];
-    NSString *errorStr = [[NSString alloc] initWithData:errorData encoding:NSUTF8StringEncoding];
 
     if (task.terminationStatus != 0) {
-        NSLog(@"ERROR: CLI exited with status %d: %@ %@", task.terminationStatus, outputStr, errorStr);
+        NSLog(@"SCScheduleLaunchdBridge: CLI failed (exitStatus=%d outputBytes=%lu errorBytes=%lu)",
+              task.terminationStatus,
+              (unsigned long)outputData.length,
+              (unsigned long)errorData.length);
         if (error) {
             *error = [NSError errorWithDomain:@"SCScheduleLaunchdBridge"
                                          code:task.terminationStatus
-                                     userInfo:@{NSLocalizedDescriptionKey: errorStr ?: @"CLI failed"}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"CLI failed"}];
         }
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Block started successfully for bundle %@", bundle.name);
+    NSLog(@"SCScheduleLaunchdBridge: Block started successfully");
     return YES;
 }
 
@@ -478,8 +490,8 @@
     // Calculate all block windows
     NSArray<SCBlockWindow *> *blockWindows = [self allBlockWindowsForSchedule:schedule weekOffset:weekOffset];
 
-    NSLog(@"SCScheduleLaunchdBridge: Installing %lu jobs for bundle %@ (weekOffset=%ld)",
-          (unsigned long)blockWindows.count, bundle.bundleID, (long)weekOffset);
+    NSLog(@"SCScheduleLaunchdBridge: Installing jobs (jobCount=%lu weekOffset=%ld entryCount=%lu)",
+          (unsigned long)blockWindows.count, (long)weekOffset, (unsigned long)bundle.entries.count);
 
     // Create and install a job for each block window
     for (SCBlockWindow *window in blockWindows) {
@@ -488,14 +500,14 @@
             // Check if we're currently within this block window
             if ([window.endDate timeIntervalSinceNow] > 0) {
                 // We're in the middle of this block - start it immediately!
-                NSLog(@"SCScheduleLaunchdBridge: In-progress block window %@ - starting immediately", window);
+                NSLog(@"SCScheduleLaunchdBridge: Starting in-progress block window");
                 NSError *startError = nil;
                 if (![self startBlockImmediatelyForBundle:bundle endDate:window.endDate error:&startError]) {
-                    NSLog(@"WARNING: Failed to start in-progress block: %@", startError);
+                    SCBridgeLogError(@"Failed to start in-progress block", startError);
                     // Continue anyway - don't fail the whole installation
                 }
             } else {
-                NSLog(@"SCScheduleLaunchdBridge: Skipping past block window %@", window);
+                NSLog(@"SCScheduleLaunchdBridge: Skipping past block window");
             }
             continue;
         }
@@ -503,7 +515,7 @@
         // Generate plist
         NSDictionary *plist = [self launchdPlistForBundle:bundle blockWindow:window];
         if (!plist) {
-            NSLog(@"ERROR: Failed to generate plist for window %@", window);
+            NSLog(@"SCScheduleLaunchdBridge: Failed to generate launchd plist for block window");
             continue;
         }
 
@@ -529,7 +541,7 @@
     for (NSString *label in labels) {
         if (![self unloadJobWithLabel:label error:error]) {
             // Log but continue trying to unload others
-            NSLog(@"WARNING: Failed to unload job %@", label);
+            SCBridgeLogError(@"Failed to unload launchd job", error ? *error : nil);
         }
     }
 
@@ -541,15 +553,33 @@
 
     for (NSString *label in labels) {
         if (![self unloadJobWithLabel:label error:error]) {
-            NSLog(@"WARNING: Failed to unload job %@", label);
+            SCBridgeLogError(@"Failed to unload launchd job", error ? *error : nil);
         }
     }
 
     return YES;
 }
 
+- (BOOL)uninstallJobForSegmentID:(NSString *)segmentID error:(NSError **)error {
+    BOOL success = YES;
+    for (NSString *label in [self installedJobLabelsForSegmentID:segmentID]) {
+        NSError *unloadError = nil;
+        if (![self unloadJobWithLabel:label error:&unloadError]) {
+            success = NO;
+            if (error != NULL && *error == nil) *error = unloadError;
+        }
+    }
+    return success;
+}
+
 - (NSArray<NSString *> *)installedJobLabelsForBundleID:(NSString *)bundleID {
     NSString *prefix = [NSString stringWithFormat:@"%@.%@.", [SCScheduleLaunchdBridge jobLabelPrefix], bundleID];
+    return [self jobLabelsWithPrefix:prefix];
+}
+
+- (NSArray<NSString *> *)installedJobLabelsForSegmentID:(NSString *)segmentID {
+    NSString *prefix = [NSString stringWithFormat:@"%@.merged-%@.",
+                        [SCScheduleLaunchdBridge jobLabelPrefix], segmentID];
     return [self jobLabelsWithPrefix:prefix];
 }
 
@@ -605,12 +635,12 @@
                                                               error:error];
 
     if (!success) {
-        NSLog(@"ERROR: Failed to write merged blocklist for segment %@", segmentID);
+        SCBridgeLogError(@"Failed to write merged blocklist", error ? *error : nil);
         return nil;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Wrote merged blocklist file to %@ with %lu entries from %lu bundles",
-          fileURL.path, (unsigned long)mergedEntries.count, (unsigned long)bundles.count);
+    NSLog(@"SCScheduleLaunchdBridge: Wrote merged blocklist (entryCount=%lu bundleCount=%lu)",
+          (unsigned long)mergedEntries.count, (unsigned long)bundles.count);
 
     return fileURL;
 }
@@ -642,6 +672,8 @@
 
     // Get block settings from user defaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL telemetryConsent = [defaults boolForKey:@"ErrorReportingPromptDismissed"] &&
+                            [defaults boolForKey:@"EnableErrorReporting"];
     NSDictionary *blockSettings = @{
         @"ClearCaches": [defaults objectForKey:@"ClearCaches"] ?: @NO,
         @"AllowLocalNetworks": [defaults objectForKey:@"AllowLocalNetworks"] ?: @YES,
@@ -649,7 +681,7 @@
         @"IncludeLinkedDomains": [defaults objectForKey:@"IncludeLinkedDomains"] ?: @YES,
         @"BlockSoundShouldPlay": [defaults objectForKey:@"BlockSoundShouldPlay"] ?: @NO,
         @"BlockSound": [defaults objectForKey:@"BlockSound"] ?: @5,
-        @"EnableErrorReporting": [defaults objectForKey:@"EnableErrorReporting"] ?: @YES
+        @"EnableErrorReporting": @(telemetryConsent)
     };
 
     // Register the schedule with the daemon (daemon must already be installed by caller)
@@ -663,6 +695,8 @@
                     isAllowlist:NO
                   blockSettings:blockSettings
               controllingUID:getuid()
+                    startDate:startDate
+                      endDate:endDate
                           reply:^(NSError *err) {
         registerError = err;
         dispatch_semaphore_signal(registerSema);
@@ -679,12 +713,17 @@
     }
 
     if (registerError) {
-        NSLog(@"ERROR: Failed to register schedule %@ with daemon: %@", segmentID, registerError);
-        if (error) *error = registerError;
+        SCBridgeLogError(@"Failed to register schedule with daemon", registerError);
+        if (error) {
+            *error = [NSError errorWithDomain:@"SCScheduleLaunchdBridge"
+                                         code:registerError.code
+                                     userInfo:@{SCScheduleLaunchdBridgeFailureStageKey: @"schedule_register"}];
+        }
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Registered schedule %@ with daemon", segmentID);
+    NSLog(@"SCScheduleLaunchdBridge: Registered schedule with daemon (entryCount=%lu)",
+          (unsigned long)mergedEntries.count);
 
     // Format start and end dates as ISO8601
     NSISO8601DateFormatter *isoFormatter = [[NSISO8601DateFormatter alloc] init];
@@ -722,22 +761,32 @@
         ],
         @"StartCalendarInterval": calendarInterval,
         @"RunAtLoad": @NO,
-        @"StandardOutPath": @"/tmp/selfcontrol-schedule.log",
-        @"StandardErrorPath": @"/tmp/selfcontrol-schedule.log"
+        @"StandardOutPath": @"/dev/null",
+        @"StandardErrorPath": @"/dev/null"
     };
 
     // Write plist
     if (![self writeLaunchdPlist:plist toLabel:label error:error]) {
+        if (error && *error) {
+            *error = [NSError errorWithDomain:@"SCScheduleLaunchdBridge"
+                                         code:(*error).code
+                                     userInfo:@{SCScheduleLaunchdBridgeFailureStageKey: @"job_install"}];
+        }
         return NO;
     }
 
     // Load job
     if (![self loadJobWithLabel:label error:error]) {
+        if (error && *error) {
+            *error = [NSError errorWithDomain:@"SCScheduleLaunchdBridge"
+                                         code:(*error).code
+                                     userInfo:@{SCScheduleLaunchdBridgeFailureStageKey: @"job_install"}];
+        }
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Installed merged segment job %@ for bundles: %@",
-          label, [bundles valueForKey:@"name"]);
+    NSLog(@"SCScheduleLaunchdBridge: Installed merged segment job (bundleCount=%lu)",
+          (unsigned long)bundles.count);
 
     return YES;
 }
@@ -746,35 +795,32 @@
                                     segmentID:(NSString *)segmentID
                                       endDate:(NSDate *)endDate
                                         error:(NSError **)error {
-    // Debug logging to file (NSLog doesn't show up from daemon)
-    NSMutableString *debugLog = [NSMutableString string];
-    [debugLog appendFormat:@"\n=== startMergedBlockImmediately %@ ===\n", [NSDate date]];
-    [debugLog appendFormat:@"segmentID: %@\n", segmentID];
-    [debugLog appendFormat:@"endDate: %@\n", endDate];
-    [debugLog appendFormat:@"bundles count: %lu\n", (unsigned long)bundles.count];
-    [debugLog appendFormat:@"euid: %d, uid: %d\n", geteuid(), getuid()];
-
-    NSLog(@"SCScheduleLaunchdBridge: Starting merged block immediately for segment %@ until %@", segmentID, endDate);
+    NSLog(@"SCScheduleLaunchdBridge: Starting merged block immediately (bundleCount=%lu)",
+          (unsigned long)bundles.count);
 
     // Merge blocklists from all bundles
     NSMutableArray *mergedEntries = [NSMutableArray array];
     for (SCBlockBundle *bundle in bundles) {
         [mergedEntries addObjectsFromArray:bundle.entries ?: @[]];
     }
-    [debugLog appendFormat:@"mergedEntries count: %lu\n", (unsigned long)mergedEntries.count];
+    NSLog(@"SCScheduleLaunchdBridge: Prepared merged block (entryCount=%lu)",
+          (unsigned long)mergedEntries.count);
 
     // Get the controlling UID - use console user if running as root (daemon)
     uid_t controllingUID = getuid();
     if (geteuid() == 0) {
         controllingUID = [SCMiscUtilities consoleUserUID];
     }
-    [debugLog appendFormat:@"controllingUID: %d\n", controllingUID];
 
     // Get block settings from user defaults (use console user's defaults if running as root)
     NSDictionary *userDefaults = nil;
     if (geteuid() == 0) {
         userDefaults = [SCMiscUtilities defaultsDictForUser:controllingUID];
     }
+    BOOL telemetryConsent = userDefaults
+        ? ([userDefaults[@"ErrorReportingPromptDismissed"] boolValue] && [userDefaults[@"EnableErrorReporting"] boolValue])
+        : ([[NSUserDefaults standardUserDefaults] boolForKey:@"ErrorReportingPromptDismissed"] &&
+           [[NSUserDefaults standardUserDefaults] boolForKey:@"EnableErrorReporting"]);
     NSDictionary *blockSettings = @{
         @"ClearCaches": (userDefaults ? userDefaults[@"ClearCaches"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"ClearCaches"]) ?: @NO,
         @"AllowLocalNetworks": (userDefaults ? userDefaults[@"AllowLocalNetworks"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"AllowLocalNetworks"]) ?: @YES,
@@ -782,20 +828,18 @@
         @"IncludeLinkedDomains": (userDefaults ? userDefaults[@"IncludeLinkedDomains"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"IncludeLinkedDomains"]) ?: @YES,
         @"BlockSoundShouldPlay": (userDefaults ? userDefaults[@"BlockSoundShouldPlay"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"BlockSoundShouldPlay"]) ?: @NO,
         @"BlockSound": (userDefaults ? userDefaults[@"BlockSound"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"BlockSound"]) ?: @5,
-        @"EnableErrorReporting": (userDefaults ? userDefaults[@"EnableErrorReporting"] : [[NSUserDefaults standardUserDefaults] objectForKey:@"EnableErrorReporting"]) ?: @YES
+        @"EnableErrorReporting": @(telemetryConsent)
     };
 
     // If running as daemon (euid == 0), bypass XPC and call SCDaemonBlockMethods directly
     // XPC doesn't work when a process tries to connect to its own Mach service
     if (geteuid() == 0) {
-        [debugLog appendFormat:@"Running as daemon - bypassing XPC, calling SCDaemonBlockMethods directly\n"];
-        [debugLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSLog(@"SCScheduleLaunchdBridge: Using direct daemon block method");
 
         // Use dynamic invocation since SCDaemonBlockMethods is only in daemon target
         Class daemonBlockMethods = NSClassFromString(@"SCDaemonBlockMethods");
         if (!daemonBlockMethods) {
-            [debugLog appendFormat:@"ERROR: SCDaemonBlockMethods class not found!\n"];
-            [debugLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"SCScheduleLaunchdBridge: Direct daemon block class unavailable");
             if (error) *error = [NSError errorWithDomain:@"SelfControl" code:500 userInfo:@{NSLocalizedDescriptionKey: @"SCDaemonBlockMethods class not available"}];
             return NO;
         }
@@ -806,14 +850,10 @@
         // Call: +[SCDaemonBlockMethods startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:]
         SEL startBlockSel = NSSelectorFromString(@"startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:");
         if (![daemonBlockMethods respondsToSelector:startBlockSel]) {
-            [debugLog appendFormat:@"ERROR: SCDaemonBlockMethods doesn't respond to startBlockWithControllingUID:!\n"];
-            [debugLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"SCScheduleLaunchdBridge: Direct daemon block selector unavailable");
             if (error) *error = [NSError errorWithDomain:@"SelfControl" code:500 userInfo:@{NSLocalizedDescriptionKey: @"startBlock method not found"}];
             return NO;
         }
-
-        [debugLog appendFormat:@"Calling SCDaemonBlockMethods startBlock...\n"];
-        [debugLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
         // Use NSInvocation for the complex method signature
         NSMethodSignature *sig = [daemonBlockMethods methodSignatureForSelector:startBlockSel];
@@ -825,9 +865,6 @@
         BOOL isAllowlist = NO;
         NSData *authData = nil;
         void (^replyBlock)(NSError *) = ^(NSError *err) {
-            NSMutableString *replyLog = [NSMutableString stringWithContentsOfFile:@"/tmp/selfcontrol_xpc_debug.log" encoding:NSUTF8StringEncoding error:nil] ?: [NSMutableString string];
-            [replyLog appendFormat:@"SCDaemonBlockMethods reply: err=%@\n", err];
-            [replyLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
             blockError = err;
             dispatch_semaphore_signal(sema);
         };
@@ -846,31 +883,24 @@
         dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC);
         long result = dispatch_semaphore_wait(sema, timeout);
 
-        NSMutableString *finalLog = [NSMutableString stringWithContentsOfFile:@"/tmp/selfcontrol_xpc_debug.log" encoding:NSUTF8StringEncoding error:nil] ?: [NSMutableString string];
-
         if (result != 0) {
-            [finalLog appendFormat:@"TIMEOUT: Direct call timed out after 30 seconds!\n"];
-            [finalLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"SCScheduleLaunchdBridge: Direct block call timed out");
             if (error) *error = [NSError errorWithDomain:@"SelfControl" code:408 userInfo:@{NSLocalizedDescriptionKey: @"Direct block call timed out"}];
             return NO;
         }
 
         if (blockError) {
-            [finalLog appendFormat:@"FINAL: FAILED (direct) - %@\n", blockError];
-            [finalLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            SCBridgeLogError(@"Direct block call failed", blockError);
             if (error) *error = blockError;
             return NO;
         }
 
-        [finalLog appendFormat:@"FINAL: SUCCESS (direct) for segment %@\n", segmentID];
-        [finalLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        NSLog(@"SCScheduleLaunchdBridge: Merged block started successfully (direct) for segment %@", segmentID);
+        NSLog(@"SCScheduleLaunchdBridge: Merged block started successfully (direct)");
         return YES;
     }
 
     // Not running as daemon - use XPC as normal
-    [debugLog appendFormat:@"Running as app - using XPC\n"];
-    [debugLog writeToFile:@"/tmp/selfcontrol_xpc_debug.log" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSLog(@"SCScheduleLaunchdBridge: Using XPC block method");
 
     SCXPCClient *xpc = [SCXPCClient new];
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
@@ -882,6 +912,8 @@
                     isAllowlist:NO
                   blockSettings:blockSettings
               controllingUID:controllingUID
+                    startDate:[NSDate date]
+                      endDate:endDate
                           reply:^(NSError *err) {
         if (err) {
             xpcError = err;
@@ -913,13 +945,13 @@
     }
 
     if (xpcError) {
-        NSLog(@"ERROR: Failed to start immediate block for segment %@: %@", segmentID, xpcError);
+        SCBridgeLogError(@"Failed to start immediate merged block", xpcError);
         if (error) *error = xpcError;
         return NO;
     }
 
-    NSLog(@"SCScheduleLaunchdBridge: Merged block started successfully for segment %@ with bundles: %@",
-          segmentID, [bundles valueForKey:@"name"]);
+    NSLog(@"SCScheduleLaunchdBridge: Merged block started successfully (bundleCount=%lu)",
+          (unsigned long)bundles.count);
     return YES;
 }
 

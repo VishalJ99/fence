@@ -16,6 +16,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Posted when bundles or schedules change
 extern NSNotificationName const SCScheduleManagerDidChangeNotification;
+/// Posted after an explicit committed-bundle addition has either verified or
+/// failed/skipped. userInfo contains static outcome/stage strings and an
+/// app-local opaque operation token.
+extern NSNotificationName const SCScheduleStrictifyDidCompleteNotification;
+extern NSString * const SCScheduleStrictifyOutcomeKey;
+extern NSString * const SCScheduleStrictifyFailedStageKey;
+/// Opaque, app-local identifier for the exact update attempt represented by a
+/// strictify completion notification. It is never included in telemetry.
+extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 @interface SCScheduleManager : NSObject
 
@@ -36,6 +45,15 @@ extern NSNotificationName const SCScheduleManagerDidChangeNotification;
 
 /// Updates an existing bundle
 - (void)updateBundle:(SCBlockBundle *)bundle;
+
+/// Repeats the most recent in-memory strictify operation. Returns NO if there
+/// is no failed/skipped operation available to retry.
+- (BOOL)retryLastStrictifyUpdate;
+
+/// Repeats only the strictify update identified by `operationToken`. This is
+/// used by completion UI so overlapping bundle edits cannot retry one
+/// another's payload.
+- (BOOL)retryStrictifyUpdateForOperationToken:(NSString *)operationToken;
 
 /// Gets a bundle by ID
 - (nullable SCBlockBundle *)bundleWithID:(NSString *)bundleID;
@@ -82,11 +100,13 @@ extern NSNotificationName const SCScheduleManagerDidChangeNotification;
 /// Gets commitment end date for a specific week offset
 - (nullable NSDate *)commitmentEndDateForWeekOffset:(NSInteger)weekOffset;
 
-/// Commits to a specific week (0 = current, 1 = next)
-- (void)commitToWeekWithOffset:(NSInteger)weekOffset;
+/// Commits to a specific week (0 = current, 1 = next). Returns YES only after
+/// every required daemon approval and launchd job has been installed and
+/// verified; a failed install is rolled back and is not recorded as committed.
+- (BOOL)commitToWeekWithOffset:(NSInteger)weekOffset;
 
 /// Legacy method - commits to current week
-- (void)commitToWeek;
+- (BOOL)commitToWeek;
 
 /// Checks if a change would make the schedule looser (not allowed when committed)
 - (BOOL)changeWouldLoosenSchedule:(SCWeeklySchedule *)oldSchedule
@@ -119,6 +139,17 @@ extern NSNotificationName const SCScheduleManagerDidChangeNotification;
 
 /// Reloads data from NSUserDefaults
 - (void)reload;
+
+/// Privacy-safe structural view used by consistency diagnostics. Values are
+/// booleans and counts only; no bundle IDs, names, schedule times, dates, or
+/// blocklist entries are returned.
+- (NSDictionary<NSString *, NSNumber *> *)telemetryStructuralSnapshot;
+
+/// Local-only expected state passed over the authenticated daemon XPC
+/// connection for exact consistency comparison. This dictionary can contain
+/// block entries and schedule dates and must never be attached to telemetry or
+/// written to logs. The daemon returns only booleans and aggregate deltas.
+- (NSDictionary<NSString *, id> *)daemonConsistencyProjection;
 
 /// Clears all data (for testing)
 - (void)clearAllData;
