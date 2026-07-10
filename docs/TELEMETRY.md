@@ -1,6 +1,6 @@
 # Fence Telemetry Policy (Sentry)
 
-> **Status:** IMPLEMENTED LOCALLY, RELEASE-GATED under PER-355. Core remote diagnostics are wired and tested; §2.2 lists the remaining production gates. The audit decisions in §12 are recorded in `decisions/agent/pending/PER-355-telemetry-privacy-and-transport.md` for final maintainer review.
+> **Status:** PRODUCTION ENABLED in Fence 3.4.8 (build 648) under PER-355. Core remote diagnostics are released; §2.2 lists bounded gaps and follow-up hardening. The audit decisions in §12 are recorded in `decisions/agent/pending/PER-355-telemetry-privacy-and-transport.md` for final maintainer review.
 > **Date:** 2026-07-10
 > **Purpose:** Define what diagnostic data Fence sends to Sentry (essential vs. good-to-have), what it must NEVER upload, and how the policy is enforced structurally rather than aspirationally.
 
@@ -24,7 +24,7 @@ Sentry **9.14.0** is linked only into the app. Root components never initialize 
 |---|---|
 | Consent and SDK lifecycle | Explicit Fence opt-in is required before startup; root is prohibited; opt-out stops transmission without flushing and purges Fence/known legacy caches |
 | Privacy boundary | Typed event schemas, allowlisted fields/enums, sanitized errors/contexts/breadcrumbs, final serialized-payload tripwire, attachment-free capture API plus zero attachment-size ceiling, no raw settings/defaults, no Sentry user ID, and automatic network/hang/session/log/tracing channels disabled |
-| Release identity | Component-specific release + build dist, production/development environment, empty/placeholder/upstream-DSN kill switch, and a release script that requires/uploads the matching dSYM when a DSN is configured; live symbolication remains gated |
+| Release identity | Component-specific release + build dist, production/development environment, empty/placeholder/upstream-DSN kill switch, and a release script that requires/uploads the matching dSYM when a DSN is configured; the 3.4.8/build 648 production dSYM and symbolication smoke are verified live |
 | URL/block parsing | One canonicalizer is shared by UI, block model, daemon apply, strictify, and comparisons. Schemes, paths, queries, case, IDNA, ports, CIDR, and trailing slashes are normalized before enforcement |
 | Physical enforcement | Fresh apply, strictify, integrity reapply, and teardown return typed hosts/PF/app/settings postconditions; state mutation alone is not success |
 | Strictify | One aggregated `block.strictify_result` covers active and future commitments, exact preconditions, retry-safe union handling, physical apply, settings persistence, timeout, and token-scoped overlapping retries |
@@ -35,11 +35,11 @@ Sentry **9.14.0** is linked only into the app. Root components never initialize 
 
 For the motivating incidents this is enough to answer, without blocklist contents: whether app calendar/default state disappeared, whether the daemon retained active/approved state, whether a newly added entry canonicalized, whether it targeted the active block and/or future jobs, whether preconditions matched, and which hosts/PF/app/persistence postcondition failed.
 
-### 2.2 Remaining production gates and bounded gaps
+### 2.2 Remaining hardening work and bounded gaps
 
-Do **not** configure a production DSN or call this fully release-ready until the release gates below are closed:
+The production DSN is configured in 3.4.8/build 648 and the original external release gate is closed. Items 2–4 remain follow-up hardening and bound what support can infer; they do not disable the released consent-gated diagnostics.
 
-1. Configure a Fence-owned Sentry project, enable server-side IP suppression, inject its public DSN, upload the exact dSYMs, and verify a symbolicated smoke event for the release/dist. The non-`TESTING` real-SDK fake-transport test now passes locally without external network access.
+1. **Completed for 3.4.8/build 648:** the Fence-owned `scattered-minds/fence-macos` project has IP suppression and default data scrubbing enabled; the public DSN is injected at release build time; dSYM UUID `4d06898a-5154-34ca-8ba3-c43258fa18e3` is present in Sentry; and exact-release smoke event `93c1405cc7cc4382ae4ed719a7a10a09` symbolicated to `main` for `fence-app@3.4.8+648`, dist `648`.
 2. Move all non-root SCSettings reads behind authenticated XPC, then migrate Fence's plist into a dedicated root-owned `0700` directory with a `0600` file (do not chmod the shared `/usr/local/etc` directory). Tightening the current file alone would make the app/CLI read defaults and can hide a live block.
 3. Add the brand-stable identity/count ledger and a real calendar-render projection if UI-only disappearance (model present, views absent) must be distinguished remotely. Current startup checks prove persisted/decoded/app/daemon/physical consistency, not AppKit rendering.
 4. Add a persistent per-event/release upload budget, a user-owned CLI spool for failures where the daemon is unreachable, a signed multi-user XPC integration test, and one-shot support consent. The spool already has hard count/byte/age bounds, but these operational controls are still missing.
@@ -60,7 +60,7 @@ Sections 3–13 are the target policy/acceptance contract. Where they are more a
 | U8 | ~~Automatic Sentry identity/network/hang channels~~ | `SCSentry.m` | **Fixed and covered by a real Sentry 9.14 fake-transport envelope test** |
 | U9 | The supposedly secured SCSettings plist is chmod `0755` even though it contains `ActiveBlocklist` and `ApprovedSchedules` | `SCSettings.m:303-317` | Every local account can read the complete active and scheduled blocklists; direct app reads also prevent safely tightening it to `0600` |
 | U10 | ~~`Secrets.xcconfig` in Copy Bundle Resources~~ | Xcode project | **Fixed:** it is configuration-only, not a copied resource |
-| U11 | ~~No dSYM upload step~~ | `scripts/build-release.sh` | **Fixed in script; live Sentry upload/symbolication evidence remains a release gate** |
+| U11 | ~~No dSYM upload step~~ | `scripts/build-release.sh` | **Fixed and verified live for 3.4.8/build 648:** matching dSYM uploaded and exact-release smoke symbolicated |
 
 ## 3. The NEVER-upload list (the contract)
 
@@ -170,7 +170,7 @@ If later dogfooding proves that cross-event correlation is indispensable, use ei
 1. **Typed allowlists, not denylist cleanup.** Each event builder owns its safe schema. App defaults context includes only safe preferences/flags and derived structural counts. Daemon context comes from a sanitized XPC snapshot containing state booleans, delta buckets, counts, local match results, and collector statuses. Never attach raw `NSUserDefaults`, SCSettings, SDK-generated device/user contexts, exact `BlockEndDate`, `ApprovedSchedules`, or arbitrary dictionaries.
 2. **`sanitizedError:` choke point** inside `captureError:` and the spool writer keeps only domain+code plus an internal safe reason enum chosen by the typed caller. Drop `localizedDescription`, `userInfo`, `NSUnderlyingError`, paths, and dynamic `SCErr subDescription` text.
 3. **Message strings are hardcoded templates only.** Dynamic values travel exclusively through fields declared by the event schema. Unknown fields, object types, enum values, or error domains are dropped or mapped to `other`; arbitrary object `description` is never serialized.
-4. **Planned upload budget:** persist a per-release counted set keyed by event/discriminator and acknowledge budget-dropped spool records. Hard spool count/byte/age caps exist now; the cross-drain upload budget remains a §2.2 release gate.
+4. **Planned upload budget:** persist a per-release counted set keyed by event/discriminator and acknowledge budget-dropped spool records. Hard spool count/byte/age caps exist now; the cross-drain upload budget remains a §2.2 follow-up.
 5. **Privacy tripwire:** pure serializer tests and an SDK-enabled fake-transport integration host traverse only user-controlled event fields/breadcrumb data and reject sentinel blocklist values, usernames, home paths, emails, license/device tokens, raw UIDs, undeclared keys, and every non-event envelope item. Do not use a blanket `@` substring check because the valid release name itself contains `@`.
 6. **SDK containment before DSN enablement:** remove the hardcoded upstream DSN and leave the SDK disabled when the Fence-owned DSN is absent. Explicitly clear Sentry's installation `user.id`; set `sendDefaultPii=NO`; disable network/automatic breadcrumbs, failed-request capture, app hangs, logs, screenshots, view hierarchy, sessions, tracing, and profiling unless separately ratified. Add `beforeSend`, `beforeBreadcrumb`, and `beforeSendLog` defense in depth. Enable Sentry's project-side **Prevent Storing IP Addresses**. Environment is `development`/`production`; release is `fence-app@<version>` and dist is the build number.
 7. **Build-secret and symbol hygiene:** the public DSN may be injected as a build setting/Info value, but `SENTRY_AUTH_TOKEN` stays only in the release environment/keychain. Remove `Secrets.xcconfig` from Copy Bundle Resources and verify/rotate separately. Upload and verify the matching dSYM before publishing each release.
@@ -194,7 +194,7 @@ If later dogfooding proves that cross-event correlation is indispensable, use ei
 
 The existing Report Bug flow requests one current sanitized daemon snapshot, combines it with a bounded app structural snapshot, captures `support.diagnostic_snapshot` (E13) when global Fence telemetry consent is enabled, and puts `FENCE-<first 8 of Sentry event ID>` into the mail subject/body and sanitized log header. Without global consent (or without an active DSN), the email/log export still works but has no remote event reference. Support capture does not tag or drain historical spool records.
 
-**Planned release gate:** if global telemetry consent is off, a future explicit one-shot confirmation may authorize exactly one current E13 snapshot. That flow is not implemented in this slice and must never enable global telemetry or drain history.
+**Planned follow-up:** if global telemetry consent is off, a future explicit one-shot confirmation may authorize exactly one current E13 snapshot. That flow is not implemented in this slice and must never enable global telemetry or drain history.
 
 ## 12. Implementation decisions
 
@@ -211,8 +211,8 @@ The existing Report Bug flow requests one current sanitized daemon snapshot, com
 - **SDK-enabled fake transport:** the test target compiles `SCSentry.m` alone through its non-`TESTING` branch while keeping lifecycle/cache mutation dormant. A real Sentry 9.14 client sends through an ephemeral `NSURLSession` intercepted by an in-process URL protocol (with a loopback-only DSN as a second fail-safe). The test gunzips and parses the final HTTP envelopes after SDK enrichment, requires each envelope to contain exactly one event item, and asserts they contain no attachment, sentinel entry (`canary-telemetry-test.example`), username/home path, email, license/device token, raw UID, automatic URL breadcrumb, SDK-generated `user.id`, or undeclared context.
 - **Automated spool/XPC tests now passing:** unknown/off/stale consent rejection and opt-out purge; root storage permissions and hard caps; TTL/future-skew collection; corrupt/symlinked marker recovery; concurrent append/rotation with UID queue isolation; retry-safe acknowledgement; symlink/non-regular-file rejection; typed schema and privacy-tripwire rejection; ownership/window predicates.
 - **Automated strictify/consistency tests now passing:** canonical URL/entry table; legacy opaque-entry preservation; capability rejection; token-scoped overlapping retries; typed active physical-reapply, future loaded-job, no-projection physical-remnant, and seven-day divergence-suppression predicates; exact hosts-file write verification.
-- **Remaining manual/VM release matrix:** retained 6.4.5 daemon repair; orphaned current defaults with live daemon schedules; missing/immutable hosts content; PF anchor/refresh failure; zero DNS resolution; first-app monitoring; settings persistence failure; unloaded/partial future schedules; signed multi-user XPC isolation; E4 teardown retry; E6 code-signature rejection; E6a managed-right failure; E7 real install/post-repair failures; E8 launchd execution failure; E10 sabotaged emergency script; exact-release crash symbolication.
-- **Release gate:** upload dSYM, verify debug file presence, send a production-environment smoke event for the exact release/dist, confirm symbolication, then publish. After one week of dogfooding, target <1 automatic event/install/day excluding real incidents and explicit strictify/support actions.
+- **Remaining manual/VM matrix:** retained 6.4.5 daemon repair; orphaned current defaults with live daemon schedules; missing/immutable hosts content; PF anchor/refresh failure; zero DNS resolution; first-app monitoring; settings persistence failure; unloaded/partial future schedules; signed multi-user XPC isolation; E4 teardown retry; E6 code-signature rejection; E6a managed-right failure; E7 real install/post-repair failures; E8 launchd execution failure; and E10 sabotaged emergency script.
+- **3.4.8 release gate (closed):** uploaded dSYM, verified exact debug-file UUID, sent an exact release/dist production smoke event, confirmed symbolication, and published the notarized artifacts. After one week of dogfooding, target <1 automatic event/install/day excluding real incidents and explicit strictify/support actions.
 - **Bloat audit after a week of dogfooding:** target < 1 event/install/day excluding incidents; anything routine gets demoted to crumb per §5's anti-bloat contract.
 
 ### Explicitly NOT instrumented (anti-bloat contract)
