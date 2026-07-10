@@ -22,7 +22,7 @@ Sentry **9.14.0** is linked only into the app. Root components never initialize 
 
 | Area | Current implementation |
 |---|---|
-| Consent and SDK lifecycle | Explicit Fence opt-in is required before startup; root is prohibited; opt-out stops transmission without flushing and purges Fence/known legacy caches |
+| Consent and SDK lifecycle | Explicit Fence opt-in is required before startup; a checkmarked `Send Anonymized Error Reports` status-menu item exposes the current choice; root is prohibited; opt-out stops transmission without flushing and purges Fence/known legacy caches |
 | Privacy boundary | Typed event schemas, allowlisted fields/enums, sanitized errors/contexts/breadcrumbs, final serialized-payload tripwire, attachment-free capture API plus zero attachment-size ceiling, no raw settings/defaults, no Sentry user ID, and automatic network/hang/session/log/tracing channels disabled |
 | Release identity | Component-specific release + build dist, production/development environment, empty/placeholder/upstream-DSN kill switch, and a release script that requires/uploads the matching dSYM when a DSN is configured; the 3.4.8/build 648 production dSYM and symbolication smoke are verified live |
 | URL/block parsing | One canonicalizer is shared by UI, block model, daemon apply, strictify, and comparisons. Schemes, paths, queries, case, IDNA, ports, CIDR, and trailing slashes are normalized before enforcement |

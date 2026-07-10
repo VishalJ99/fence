@@ -1320,7 +1320,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     } else {
         alert.alertStyle = NSAlertStyleWarning;
         alert.messageText = NSLocalizedString(@"Fence could not repair permissions", @"Permissions repair failure title");
-        alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, use Report Bug from this menu.", @"Permissions repair failure message");
+        alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, choose Export Logs for Support from the Help menu.", @"Permissions repair failure message");
     }
     [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
     [NSApp activateIgnoringOtherApps:YES];
