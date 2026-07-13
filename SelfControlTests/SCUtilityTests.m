@@ -17,6 +17,7 @@
 #import "HostFileBlocker.h"
 #import "SCBlockBundle.h"
 #import "SCScheduleManager.h"
+#import "SCLogger.h"
 #import <Sentry/Sentry.h>
 #import <Sentry/Sentry-Swift.h>
 #import <zlib.h>
@@ -32,6 +33,13 @@
 + (BOOL)shouldRecordAuthorizationRejectionForCommand:(NSString*)command
                                                 error:(NSError*)error
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
+@end
+
+@interface SCLogger (DiagnosticTelemetryTests)
++ (NSDictionary<NSString *, id> *)diagnosticTelemetryFieldsForAppSnapshot:(NSDictionary<NSString *, NSNumber *> *)appSnapshot
+                                                                 uiSnapshot:(nullable NSDictionary<NSString *, NSNumber *> *)uiSnapshot
+                                                             daemonSnapshot:(NSDictionary<NSString *, id> *)daemonSnapshot
+                                                            daemonReachable:(BOOL)daemonReachable;
 @end
 
 typedef void (^SCSentryFakeRequestHandler)(NSURLRequest *request);
@@ -804,7 +812,66 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"daemon_active_entry_count": @4, @"daemon_approval_count": @2,
         @"daemon_job_count": @2, @"collector_error_count": @0,
         @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
+        @"raw_bundle_count": @2, @"decoded_bundle_count": @2,
+        @"raw_schedule_count": @3, @"decoded_schedule_count": @3,
+        @"week_window_initialized": @YES, @"week_window_loaded": @YES,
+        @"week_window_visible": @YES, @"ui_snapshot_available": @YES,
+        @"ui_calendar_attached": @YES, @"ui_calendar_has_area": @YES,
+        @"ui_empty_state_visible": @NO, @"ui_bundle_counts_match": @YES,
+        @"ui_schedule_counts_match": @YES, @"ui_allow_block_counts_match": @YES,
+        @"ui_empty_despite_model": @NO, @"selected_week_offset": @0,
+        @"ui_model_bundle_count": @2, @"ui_model_schedule_count": @2,
+        @"ui_rendered_bundle_count": @2, @"ui_rendered_schedule_count": @2,
+        @"ui_day_column_count": @5, @"ui_expected_allow_block_count": @4,
+        @"ui_rendered_allow_block_count": @4,
     };
+}
+
+- (void)testDiagnosticSnapshotDistinguishesModelStateFromEmptyRenderedCalendar {
+    NSDictionary<NSString *, NSNumber *> *appSnapshot = @{
+        @"app_has_schedule_state": @YES,
+        @"raw_bundle_count": @3, @"decoded_bundle_count": @3,
+        @"raw_schedule_count": @4, @"decoded_schedule_count": @4,
+        @"commitment_count": @1, @"installed_schedule_job_count": @2,
+        @"active_projection_available": @YES, @"expected_active_entry_count": @5,
+        @"expected_active_app_entry_count": @1, @"expected_requires_hosts": @YES,
+        @"expected_requires_packet_filter": @NO,
+    };
+    NSDictionary<NSString *, NSNumber *> *uiSnapshot = @{
+        @"week_window_initialized": @YES, @"week_window_loaded": @YES,
+        @"week_window_visible": @YES, @"ui_snapshot_available": @YES,
+        @"ui_calendar_attached": @YES, @"ui_calendar_has_area": @YES,
+        @"ui_empty_state_visible": @YES, @"ui_bundle_counts_match": @NO,
+        @"ui_schedule_counts_match": @NO, @"ui_allow_block_counts_match": @NO,
+        @"ui_empty_despite_model": @YES, @"selected_week_offset": @0,
+        @"ui_model_bundle_count": @3, @"ui_model_schedule_count": @2,
+        @"ui_rendered_bundle_count": @0, @"ui_rendered_schedule_count": @0,
+        @"ui_day_column_count": @5, @"ui_expected_allow_block_count": @6,
+        @"ui_rendered_allow_block_count": @0,
+    };
+    NSDictionary<NSString *, id> *daemonSnapshot = @{
+        @"settings_available": @YES, @"block_running": @YES,
+        @"pf_active": @NO, @"hosts_active": @YES, @"app_monitoring": @YES,
+        @"active_entry_count": @5, @"approved_schedule_count": @2,
+        @"schedule_job_count": @2, @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
+    };
+
+    NSDictionary<NSString *, id> *fields =
+        [SCLogger diagnosticTelemetryFieldsForAppSnapshot:appSnapshot
+                                               uiSnapshot:uiSnapshot
+                                           daemonSnapshot:daemonSnapshot
+                                          daemonReachable:YES];
+    XCTAssertEqualObjects(fields[@"ui_empty_despite_model"], @YES);
+    XCTAssertEqualObjects(fields[@"ui_expected_allow_block_count"], @6);
+    XCTAssertEqualObjects(fields[@"ui_rendered_allow_block_count"], @0);
+    XCTAssertEqualObjects(fields[@"block_running"], @YES);
+    XCTAssertNotNil([SCSentry sanitizedTelemetryFields:fields
+                                          forEventName:@"support.diagnostic_snapshot"]);
+
+    NSMutableDictionary *unsafe = [fields mutableCopy];
+    unsafe[@"website"] = @"canary-telemetry-test.example";
+    XCTAssertNil([SCSentry sanitizedTelemetryFields:unsafe
+                                      forEventName:@"support.diagnostic_snapshot"]);
 }
 
 - (void)testTelemetryBlockApplyAdapterFlattensAndNormalizesTypedResults {

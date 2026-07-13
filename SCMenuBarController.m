@@ -313,6 +313,12 @@
         : NSControlStateValueOff;
     [self.statusMenu addItem:errorReportingItem];
 
+    NSMenuItem *diagnosticReportItem = [[NSMenuItem alloc] initWithTitle:@"Send Diagnostic Report Now…"
+                                                                  action:@selector(sendDiagnosticReportClicked:)
+                                                           keyEquivalent:@""];
+    diagnosticReportItem.target = self;
+    [self.statusMenu addItem:diagnosticReportItem];
+
     // Check for Updates
     NSMenuItem *updateItem = [[NSMenuItem alloc] initWithTitle:@"Check for Updates"
                                                         action:@selector(checkForUpdates:)
@@ -495,6 +501,12 @@
 
     if ([sender isKindOfClass:[NSMenuItem class]]) {
         ((NSMenuItem *)sender).state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+
+- (void)sendDiagnosticReportClicked:(id)sender {
+    if (self.onSendDiagnosticReport) {
+        self.onSendDiagnosticReport();
     }
 }
 

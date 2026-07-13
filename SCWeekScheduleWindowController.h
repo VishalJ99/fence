@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Reload all data
 - (void)reloadData;
 
+/// Counts and booleans describing the actual calendar presentation. No bundle
+/// names, identifiers, entries, or schedule times are included.
+- (NSDictionary<NSString *, NSNumber *> *)telemetryRenderSnapshot;
+
 @end
 
 NS_ASSUME_NONNULL_END

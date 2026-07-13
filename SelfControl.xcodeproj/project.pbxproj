@@ -21,6 +21,7 @@
 		22320A212F0E98BF00912FF3 /* SCTimezoneInfoWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 22320A202F0E98BF00912FF3 /* SCTimezoneInfoWindowController.m */; };
 		224577BA2F0198C80050F2F4 /* emergency.sh in Resources */ = {isa = PBXBuildFile; fileRef = 224577B92F0198C80050F2F4 /* emergency.sh */; };
 		224DFCA02F0409E600D97A1C /* SCLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFC9F2F0409E600D97A1C /* SCLogger.m */; };
+		D1A6E5B90000000000000001 /* SCLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFC9F2F0409E600D97A1C /* SCLogger.m */; };
 		224DFCF72F0417F700D97A1C /* SCLicenseManager.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFCF62F0417F700D97A1C /* SCLicenseManager.m */; };
 		224DFCFA2F04180C00D97A1C /* SCLicenseWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 224DFCF92F04180C00D97A1C /* SCLicenseWindowController.m */; };
 		228354F82EFB7BCB00E77469 /* SCTimeRange.m in Sources */ = {isa = PBXBuildFile; fileRef = 228354F72EFB7BCB00E77469 /* SCTimeRange.m */; };
@@ -82,7 +83,6 @@
 		973D399C86DA47548569330F /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
 		ACA557C33180494282B827BE /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		B53EE81BF3FB170B3676BB71 /* SCSafetyCheckWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 5AA687B207D9494C0056038B /* SCSafetyCheckWindowController.m */; };
-		C3D4E5F6789012345678901A /* SCLogExportWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F678901234567890 /* SCLogExportWindowController.m */; };
 		C6C132CB5B4BE2168CD5E6D4 /* SCScheduleLaunchdBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = CF1441F5703140F3C25B9C5E /* SCScheduleLaunchdBridge.m */; };
 		CB0385E119D77051004614B6 /* PreferencesAdvancedViewController.xib in Resources */ = {isa = PBXBuildFile; fileRef = CB0385DD19D77051004614B6 /* PreferencesAdvancedViewController.xib */; };
 		CB0385E219D77051004614B6 /* PreferencesGeneralViewController.xib in Resources */ = {isa = PBXBuildFile; fileRef = CB0385DF19D77051004614B6 /* PreferencesGeneralViewController.xib */; };
@@ -673,10 +673,8 @@
 		8D1107320486CEB800E47090 /* Fence.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Fence.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		949F9F8815B32EC6007B8B42 /* zh-Hans */ = {isa = PBXFileReference; fileEncoding = 10; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		949F9F8D15B333A1007B8B42 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
-		A1B2C3D4E5F6789012345678 /* SCLogExportWindowController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = SCLogExportWindowController.h; sourceTree = "<group>"; };
 		AA5F3568C5F305D28DF0F7AC /* MenuBarFence@2x.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = "MenuBarFence@2x.png"; sourceTree = "<group>"; };
 		AF899A50A17F0C6C8C6B84A2 /* libPods-SCKillerHelper.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-SCKillerHelper.a"; sourceTree = BUILT_PRODUCTS_DIR; };
-		B2C3D4E5F678901234567890 /* SCLogExportWindowController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = SCLogExportWindowController.m; sourceTree = "<group>"; };
 		C72025F2499F9F07E281CB50 /* Pods-SelfControl-SelfControlTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SelfControl-SelfControlTests.release.xcconfig"; path = "Pods/Target Support Files/Pods-SelfControl-SelfControlTests/Pods-SelfControl-SelfControlTests.release.xcconfig"; sourceTree = "<group>"; };
 		C85A094F15E20A0DB58665A8 /* libPods-selfcontrol-cli.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-selfcontrol-cli.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB0EEF5D20FD8CE00024D27B /* SelfControlTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SelfControlTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1752,8 +1750,6 @@
 				3F481A9B3BB13815269D74D1 /* SCStartupSafetyCheck.m */,
 				EC9A7B9C279AFE0B72259B2B /* SCSafetyCheckWindowController.h */,
 				5AA687B207D9494C0056038B /* SCSafetyCheckWindowController.m */,
-				A1B2C3D4E5F6789012345678 /* SCLogExportWindowController.h */,
-				B2C3D4E5F678901234567890 /* SCLogExportWindowController.m */,
 				28BCD291A785AB33E7343087 /* MenuBarFence.png */,
 				AA5F3568C5F305D28DF0F7AC /* MenuBarFence@2x.png */,
 				224DFCFB2F041AF300D97A1C /* Secrets.xcconfig */,
@@ -4025,7 +4021,6 @@
 				2283551C2EFB7C5100E77469 /* SCWeekScheduleWindowController.m in Sources */,
 				1FEB91F11AD92FF528C0B287 /* SCStartupSafetyCheck.m in Sources */,
 				B53EE81BF3FB170B3676BB71 /* SCSafetyCheckWindowController.m in Sources */,
-				C3D4E5F6789012345678901A /* SCLogExportWindowController.m in Sources */,
 				3B4BFB93FDE4E699EBAA9BC1 /* SCScheduleLaunchdBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -4059,6 +4054,7 @@
 				CB114284222CD4F0004B7868 /* SCSettings.m in Sources */,
 				22AE30B82F057AAD00B0FDE8 /* SCVersionTracker.m in Sources */,
 				CB0EEF7820FE49030024D27B /* SCUtilityTests.m in Sources */,
+				D1A6E5B90000000000000001 /* SCLogger.m in Sources */,
 				CB81A94D25B7B5B6006956F7 /* SCMigrationUtilities.m in Sources */,
 				2934E75ACAD30A9C99C7A2D3 /* SCScheduleLaunchdBridge.m in Sources */,
 				1AF1BBB2332DC8645D42B5C7 /* SCXPCClient.m in Sources */,

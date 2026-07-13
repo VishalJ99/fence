@@ -200,6 +200,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 - (void)clearSelection;
 - (CGFloat)yFromMinutes:(NSInteger)minutes;
 - (NSInteger)minutesFromY:(CGFloat)y;
+- (NSUInteger)renderedBlockCount;
 
 @end
 
@@ -263,6 +264,10 @@ static const CGFloat kDimmedOpacity = 0.2;
     // Map y position to minutes (0-1440)
     NSInteger minutes = (NSInteger)((y / self.timelineHeight) * 1440);
     return MAX(0, MIN(1439, minutes));
+}
+
+- (NSUInteger)renderedBlockCount {
+    return _blockViews.count;
 }
 
 - (NSInteger)snapToGrid:(NSInteger)minutes {
@@ -1330,6 +1335,33 @@ static const CGFloat kDimmedOpacity = 0.2;
         self.emptyStateLabel.frame = NSMakeRect(x, y, labelWidth, labelHeight);
         [self.emptyStateLabel.superview addSubview:self.emptyStateLabel positioned:NSWindowAbove relativeTo:nil];
     }
+}
+
+- (NSUInteger)telemetryDayColumnCount {
+    return self.dayColumns.count;
+}
+
+- (NSUInteger)telemetryExpectedAllowBlockCount {
+    NSUInteger count = 0;
+    for (SCCalendarDayColumn *column in self.dayColumns) {
+        for (SCBlockBundle *bundle in self.bundles) {
+            SCWeeklySchedule *schedule = self.schedules[bundle.bundleID];
+            count += [schedule allowedWindowsForDay:column.day].count;
+        }
+    }
+    return count;
+}
+
+- (NSUInteger)telemetryRenderedAllowBlockCount {
+    NSUInteger count = 0;
+    for (SCCalendarDayColumn *column in self.dayColumns) {
+        count += [column renderedBlockCount];
+    }
+    return count;
+}
+
+- (BOOL)telemetryEmptyStateVisible {
+    return self.emptyStateLabel != nil && !self.emptyStateLabel.hidden;
 }
 
 - (void)handleScheduleUpdate:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {

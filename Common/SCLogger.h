@@ -2,25 +2,29 @@
 //  SCLogger.h
 //  SelfControl
 //
-//  Log export utility for user support
+//  Privacy-safe, Sentry-only diagnostic reporting for user support.
 //
 
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+FOUNDATION_EXPORT NSString * const SCDiagnosticReportErrorDomain;
+
+typedef NS_ENUM(NSInteger, SCDiagnosticReportErrorCode) {
+    SCDiagnosticReportErrorReportingDisabled = 1,
+    SCDiagnosticReportErrorCaptureFailed = 2,
+};
+
 @interface SCLogger : NSObject
 
-// Call on app startup to create ~/.fence/logs/ directory
-+ (void)ensureDirectoriesExist;
-
-// Export logs from the last 24 hours for Fence/selfcontrold processes
-// Saves to ~/.fence/logs/fence-logs-{timestamp}.txt, reveals in Finder, opens email
-+ (void)exportLogsForSupport;
-
-// Removes user-entered block entries, bundle identifiers, credentials, tokens,
-// and user-specific paths from unified-log text before it can be exported.
-+ (NSString*)sanitizedSupportLogContent:(NSString*)content;
+/// Captures a fresh allowlisted app/UI/daemon snapshot in Sentry. uiSnapshot
+/// must contain counts and booleans only; unknown values are discarded before
+/// the typed telemetry boundary. Completion runs on the main thread after the
+/// SDK flush attempt and returns a support reference such as FENCE-1234ABCD.
++ (void)sendDiagnosticReportWithUISnapshot:(nullable NSDictionary<NSString *, NSNumber *> *)uiSnapshot
+                                completion:(void (^)(NSString * _Nullable reference,
+                                                     NSError * _Nullable error))completion;
 
 @end
 

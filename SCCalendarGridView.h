@@ -78,6 +78,13 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 /// Clear all block selections
 - (void)clearAllSelections;
 
+/// Privacy-safe render counters used only by the user-triggered diagnostic
+/// snapshot. These expose counts, never bundle IDs, names, or schedule times.
+- (NSUInteger)telemetryDayColumnCount;
+- (NSUInteger)telemetryExpectedAllowBlockCount;
+- (NSUInteger)telemetryRenderedAllowBlockCount;
+- (BOOL)telemetryEmptyStateVisible;
+
 @end
 
 NS_ASSUME_NONNULL_END

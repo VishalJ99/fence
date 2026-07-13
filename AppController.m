@@ -125,6 +125,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 - (void)captureStartupDivergenceFields:(NSDictionary<NSString *, id> *)fields;
 - (void)synchronizeTelemetryConsentAndDrain;
 - (void)drainTelemetrySpoolWithRemainingBatches:(NSUInteger)remainingBatches;
+- (void)sendDiagnosticReportFromUserAction;
 
 @end
 
@@ -141,6 +142,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     BOOL daemonUnreachableInstalledHelperPresentBefore_;
     BOOL daemonUnreachableBundledHelperPresent_;
     BOOL daemonUnreachableTelemetryEmitted_;
+    BOOL diagnosticReportInFlight_;
 }
 
 @synthesize addingBlock;
@@ -364,6 +366,9 @@ static BOOL SCFileExistsAtPath(NSString *path) {
             [SCMenuBarController sharedController].onRepairPermissions = ^{
                 [weakSelf repairFencePermissionsFromUserAction];
             };
+            [SCMenuBarController sharedController].onSendDiagnosticReport = ^{
+                [weakSelf sendDiagnosticReportFromUserAction];
+            };
 
             // apparently, a block is running, so make sure FirstBlockStarted is true
             [defaults_ setBool: YES forKey: @"FirstBlockStarted"];
@@ -408,6 +413,9 @@ static BOOL SCFileExistsAtPath(NSString *path) {
             };
             [SCMenuBarController sharedController].onRepairPermissions = ^{
                 [weakSelf repairFencePermissionsFromUserAction];
+            };
+            [SCMenuBarController sharedController].onSendDiagnosticReport = ^{
+                [weakSelf sendDiagnosticReportFromUserAction];
             };
         } else if (blockWasOn) {
             // Not committed + just transitioned off: show week schedule
@@ -552,8 +560,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     }
 
     [SCSentry startSentry: @"org.eyebeam.SelfControl"];
-    [SCLogger ensureDirectoriesExist];
-
     // Fence's rebrand changed the application bundle identifier and therefore
     // its NSUserDefaults domain. Restore an orphaned calendar only when the new
     // domain has no schedule state of its own; never overwrite a Fence calendar.
@@ -1320,7 +1326,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     } else {
         alert.alertStyle = NSAlertStyleWarning;
         alert.messageText = NSLocalizedString(@"Fence could not repair permissions", @"Permissions repair failure title");
-        alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, choose Export Logs for Support from the Help menu.", @"Permissions repair failure message");
+        alert.informativeText = error.localizedDescription ?: NSLocalizedString(@"Restart Fence and try again. If the problem continues, choose Send Diagnostic Report Now from the Fence menu.", @"Permissions repair failure message");
     }
     [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
     [NSApp activateIgnoringOtherApps:YES];
@@ -1673,9 +1679,73 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [[NSWorkspace sharedWorkspace] openURL: url];
 }
 
-- (IBAction)exportLogsForSupport:(id)sender {
-    [SCSentry addBreadcrumb: @"Exporting logs for support" category:@"app"];
-    [SCLogger exportLogsForSupport];
+- (void)sendDiagnosticReportFromUserAction {
+    if (diagnosticReportInFlight_) return;
+
+    if (![SCSentry errorReportingEnabled]) {
+        NSAlert *consentAlert = [[NSAlert alloc] init];
+        consentAlert.messageText = NSLocalizedString(@"Turn On Error Reporting", @"Diagnostic report consent alert title");
+        consentAlert.informativeText = NSLocalizedString(@"Enable “Send Anonymized Error Reports” in the Fence menu, then try again.", @"Diagnostic report consent alert body");
+        consentAlert.alertStyle = NSAlertStyleInformational;
+        [consentAlert addButtonWithTitle:NSLocalizedString(@"OK", @"Alert confirmation button")];
+        [NSApp activateIgnoringOtherApps:YES];
+        [consentAlert runModal];
+        return;
+    }
+
+    diagnosticReportInFlight_ = YES;
+    [SCSentry addBreadcrumb:@"Requested diagnostic report" category:@"app"];
+    NSDictionary<NSString *, NSNumber *> *uiSnapshot = self.weekScheduleWindowController != nil
+        ? [self.weekScheduleWindowController telemetryRenderSnapshot]
+        : nil;
+
+    NSAlert *progressAlert = [[NSAlert alloc] init];
+    progressAlert.messageText = NSLocalizedString(@"Sending Diagnostic Report…", @"Diagnostic report progress title");
+    progressAlert.informativeText = NSLocalizedString(@"Fence is collecting anonymized app, calendar, and blocker state. No websites, app names, or blocklist contents are included.", @"Diagnostic report progress body");
+    progressAlert.alertStyle = NSAlertStyleInformational;
+    NSButton *progressButton = [progressAlert addButtonWithTitle:NSLocalizedString(@"Sending…", @"Diagnostic report progress button")];
+    progressButton.enabled = NO;
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 20, 20)];
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    spinner.indeterminate = YES;
+    progressAlert.accessoryView = spinner;
+    [spinner startAnimation:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [progressAlert.window center];
+    [progressAlert.window makeKeyAndOrderFront:nil];
+
+    [SCLogger sendDiagnosticReportWithUISnapshot:uiSnapshot
+                                      completion:^(NSString *reference, NSError *error) {
+        [spinner stopAnimation:nil];
+        [progressAlert.window close];
+        self->diagnosticReportInFlight_ = NO;
+
+        if (reference.length < 8 || error != nil) {
+            NSAlert *failureAlert = [[NSAlert alloc] init];
+            failureAlert.messageText = NSLocalizedString(@"Couldn’t Send Diagnostic Report", @"Diagnostic report failure title");
+            failureAlert.informativeText = NSLocalizedString(@"Check that anonymized error reporting is enabled and that this Mac is online, then try again.", @"Diagnostic report failure body");
+            failureAlert.alertStyle = NSAlertStyleWarning;
+            [failureAlert addButtonWithTitle:NSLocalizedString(@"OK", @"Alert confirmation button")];
+            [NSApp activateIgnoringOtherApps:YES];
+            [failureAlert runModal];
+            return;
+        }
+
+        NSAlert *successAlert = [[NSAlert alloc] init];
+        successAlert.messageText = NSLocalizedString(@"Diagnostic Report Sent", @"Diagnostic report success title");
+        successAlert.informativeText = [NSString stringWithFormat:
+            NSLocalizedString(@"Reference: %@\n\nShare this reference with Fence support so we can find the report.", @"Diagnostic report success body"),
+            reference];
+        successAlert.alertStyle = NSAlertStyleInformational;
+        [successAlert addButtonWithTitle:NSLocalizedString(@"Copy Reference", @"Copy diagnostic reference button")];
+        [successAlert addButtonWithTitle:NSLocalizedString(@"Done", @"Finish diagnostic report button")];
+        [NSApp activateIgnoringOtherApps:YES];
+        if ([successAlert runModal] == NSAlertFirstButtonReturn) {
+            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+            [pasteboard clearContents];
+            [pasteboard setString:reference forType:NSPasteboardTypeString];
+        }
+    }];
 }
 
 #pragma mark - Week Schedule (New UX)

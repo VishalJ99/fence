@@ -270,16 +270,32 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                 },
                 @"booleans": @[@"settings_available", @"block_running", @"app_has_schedule_state", @"legacy_domain_has_state",
                                  @"daemon_reachable", @"pf_active", @"hosts_active", @"app_monitoring",
-                                 @"physical_layers_match", @"active_counts_match", @"approval_counts_match"],
+                                 @"physical_layers_match", @"active_counts_match", @"approval_counts_match",
+                                 @"week_window_initialized", @"week_window_loaded", @"week_window_visible",
+                                 @"ui_snapshot_available", @"ui_calendar_attached", @"ui_calendar_has_area",
+                                 @"ui_empty_state_visible", @"ui_bundle_counts_match", @"ui_schedule_counts_match",
+                                 @"ui_allow_block_counts_match", @"ui_empty_despite_model"],
                 @"unsigned": @[@"app_bundle_count", @"app_week_count", @"app_commitment_count",
                                  @"daemon_active_entry_count", @"daemon_approval_count", @"daemon_job_count",
-                                 @"collector_error_count", @"daemon_protocol"],
+                                 @"collector_error_count", @"daemon_protocol", @"raw_bundle_count",
+                                 @"decoded_bundle_count", @"raw_schedule_count", @"decoded_schedule_count",
+                                 @"selected_week_offset", @"ui_model_bundle_count", @"ui_model_schedule_count",
+                                 @"ui_rendered_bundle_count", @"ui_rendered_schedule_count", @"ui_day_column_count",
+                                 @"ui_expected_allow_block_count", @"ui_rendered_allow_block_count"],
                 @"required": @[@"collector_status", @"last_strictify_outcome", @"settings_available", @"block_running",
                                  @"app_has_schedule_state", @"legacy_domain_has_state", @"daemon_reachable",
                                  @"pf_active", @"hosts_active", @"app_monitoring", @"physical_layers_match",
                                  @"active_counts_match", @"approval_counts_match", @"app_bundle_count",
                                  @"app_week_count", @"app_commitment_count", @"daemon_active_entry_count",
-                                 @"daemon_approval_count", @"daemon_job_count", @"collector_error_count", @"daemon_protocol"]
+                                 @"daemon_approval_count", @"daemon_job_count", @"collector_error_count", @"daemon_protocol",
+                                 @"raw_bundle_count", @"decoded_bundle_count", @"raw_schedule_count", @"decoded_schedule_count",
+                                 @"week_window_initialized", @"week_window_loaded", @"week_window_visible",
+                                 @"ui_snapshot_available", @"ui_calendar_attached", @"ui_calendar_has_area",
+                                 @"ui_empty_state_visible", @"ui_bundle_counts_match", @"ui_schedule_counts_match",
+                                 @"ui_allow_block_counts_match", @"ui_empty_despite_model", @"selected_week_offset",
+                                 @"ui_model_bundle_count", @"ui_model_schedule_count", @"ui_rendered_bundle_count",
+                                 @"ui_rendered_schedule_count", @"ui_day_column_count", @"ui_expected_allow_block_count",
+                                 @"ui_rendered_allow_block_count"]
             }
         };
     });
@@ -886,6 +902,27 @@ static atomic_bool SCSentryTransmissionAllowed = ATOMIC_VAR_INIT(false);
 #else
     return NO;
 #endif
+}
+
++ (void)flushWithTimeout:(NSTimeInterval)timeout completion:(void (^)(void))completion {
+    void (^finishOnMainThread)(void) = ^{
+        if (completion == nil) return;
+        dispatch_async(dispatch_get_main_queue(), completion);
+    };
+
+    if (![self isSentryReady]) {
+        finishOnMainThread();
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+#if SENTRY_ENABLED
+        [SentrySDK flush:MAX(0, timeout)];
+#else
+        (void)timeout;
+#endif
+        finishOnMainThread();
+    });
 }
 
 + (BOOL)isSentryReady {

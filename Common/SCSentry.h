@@ -55,6 +55,11 @@ typedef NS_ENUM(NSInteger, SCTelemetryEventLevel) {
 /// return NO and never initialize a network transport.
 + (BOOL)isSentrySDKActive;
 
+/// Flushes queued Sentry envelopes off the main thread, then invokes completion
+/// on the main thread. The completion means the SDK flush attempt finished;
+/// offline transports may still retain the event for a later retry.
++ (void)flushWithTimeout:(NSTimeInterval)timeout completion:(void (^)(void))completion;
+
 // Pure-Foundation privacy helpers used by focused serializer tests. The test
 // target also compiles SCSentry.m alone through its non-TESTING SDK path for a
 // network-free final-envelope integration test.

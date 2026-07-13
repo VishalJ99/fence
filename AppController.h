@@ -137,9 +137,6 @@
 // opens the SelfControl Support Hub in the default browser
 - (IBAction)openSupportHub:(id)sender;
 
-// exports logs for support ticket
-- (IBAction)exportLogsForSupport:(id)sender;
-
 // opens the Week Schedule window (new UX)
 - (IBAction)showWeekSchedule:(id)sender;
 

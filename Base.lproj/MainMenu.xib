@@ -224,13 +224,6 @@
                                     <action selector="openFAQ:" target="469" id="903"/>
                                 </connections>
                             </menuItem>
-                            <menuItem isSeparatorItem="YES" id="LOG-SEP-001"/>
-                            <menuItem title="Export Logs for Support…" id="LOG-EXP-001">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="exportLogsForSupport:" target="469" id="LOG-ACT-001"/>
-                                </connections>
-                            </menuItem>
                         </items>
                     </menu>
                 </menuItem>

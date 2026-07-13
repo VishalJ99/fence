@@ -530,6 +530,71 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.weekGridView.frame = gridFrame;
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)telemetryRenderSnapshot {
+    BOOL windowLoaded = self.isWindowLoaded;
+    BOOL windowVisible = windowLoaded && self.window.isVisible;
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    NSInteger selectedWeekOffset = MAX(0, MIN(1, self.currentWeekOffset));
+    NSUInteger modelBundleCount = manager.bundles.count;
+    NSUInteger modelScheduleCount = [manager schedulesForWeekOffset:selectedWeekOffset].count;
+
+    BOOL calendarAttached = NO;
+    BOOL calendarHasArea = NO;
+    BOOL emptyStateVisible = NO;
+    NSUInteger renderedBundleCount = 0;
+    NSUInteger renderedScheduleCount = 0;
+    NSUInteger dayColumnCount = 0;
+    NSUInteger expectedAllowBlockCount = 0;
+    NSUInteger renderedAllowBlockCount = 0;
+
+    if (windowLoaded && kUseCalendarUI && self.calendarGridView != nil) {
+        calendarAttached = self.calendarGridView.superview != nil;
+        calendarHasArea = NSWidth(self.calendarGridView.bounds) > 1 && NSHeight(self.calendarGridView.bounds) > 1;
+        renderedBundleCount = self.calendarGridView.bundles.count;
+        renderedScheduleCount = self.calendarGridView.schedules.count;
+        dayColumnCount = [self.calendarGridView telemetryDayColumnCount];
+        expectedAllowBlockCount = [self.calendarGridView telemetryExpectedAllowBlockCount];
+        renderedAllowBlockCount = [self.calendarGridView telemetryRenderedAllowBlockCount];
+        emptyStateVisible = [self.calendarGridView telemetryEmptyStateVisible];
+    } else if (windowLoaded && !kUseCalendarUI && self.weekGridView != nil) {
+        calendarAttached = self.weekGridView.superview != nil;
+        calendarHasArea = NSWidth(self.weekGridView.bounds) > 1 && NSHeight(self.weekGridView.bounds) > 1;
+        renderedBundleCount = self.weekGridView.bundles.count;
+        renderedScheduleCount = self.weekGridView.schedules.count;
+    }
+
+    BOOL snapshotAvailable = windowLoaded && calendarAttached;
+    BOOL bundleCountsMatch = snapshotAvailable && renderedBundleCount == modelBundleCount;
+    BOOL scheduleCountsMatch = snapshotAvailable && renderedScheduleCount == modelScheduleCount;
+    BOOL allowBlockCountsMatch = snapshotAvailable && renderedAllowBlockCount == expectedAllowBlockCount;
+    BOOL emptyDespiteModel = snapshotAvailable &&
+        ((modelBundleCount > 0 && renderedBundleCount == 0) ||
+         (modelScheduleCount > 0 && renderedScheduleCount == 0) ||
+         (expectedAllowBlockCount > 0 && renderedAllowBlockCount == 0));
+
+    return @{
+        @"week_window_initialized": @YES,
+        @"week_window_loaded": @(windowLoaded),
+        @"week_window_visible": @(windowVisible),
+        @"ui_snapshot_available": @(snapshotAvailable),
+        @"ui_calendar_attached": @(calendarAttached),
+        @"ui_calendar_has_area": @(calendarHasArea),
+        @"ui_empty_state_visible": @(emptyStateVisible),
+        @"ui_bundle_counts_match": @(bundleCountsMatch),
+        @"ui_schedule_counts_match": @(scheduleCountsMatch),
+        @"ui_allow_block_counts_match": @(allowBlockCountsMatch),
+        @"ui_empty_despite_model": @(emptyDespiteModel),
+        @"selected_week_offset": @(selectedWeekOffset),
+        @"ui_model_bundle_count": @(modelBundleCount),
+        @"ui_model_schedule_count": @(modelScheduleCount),
+        @"ui_rendered_bundle_count": @(renderedBundleCount),
+        @"ui_rendered_schedule_count": @(renderedScheduleCount),
+        @"ui_day_column_count": @(dayColumnCount),
+        @"ui_expected_allow_block_count": @(expectedAllowBlockCount),
+        @"ui_rendered_allow_block_count": @(renderedAllowBlockCount),
+    };
+}
+
 - (void)updateStatusLabel {
     // Clear existing pills
     for (NSView *subview in [self.statusStackView.arrangedSubviews copy]) {
