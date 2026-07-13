@@ -8,4 +8,5 @@
 - `server/` — Node/Express license activation and trial API. Runtime configuration comes from environment variables such as `DATABASE_URL` and `WEBHOOK_SECRET`.
 - `web/functions/api/` — Cloudflare Pages Functions used for checkout webhooks, license generation, and email delivery.
 - `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
+- `dist/` — ignored local ZIP/DMG release artifacts produced by `scripts/build-release.sh`; the retained current release set includes a `reproduction.txt` recipe.
 - `docs/TELEMETRY.md` — PER-355 privacy contract, event schema, cross-process transport design, consistency invariants, and verification plan for Fence diagnostics.
