@@ -266,36 +266,64 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
             @"support.diagnostic_snapshot": @{
                 @"enums": @{
                     @"collector_status": @[@"complete", @"partial", @"failed"],
+                    @"projection_comparison_status": @[@"exact", @"unavailable", @"failed"],
                     @"last_strictify_outcome": @[@"none", @"verified", @"partial", @"failed", @"skipped"]
                 },
                 @"booleans": @[@"settings_available", @"block_running", @"app_has_schedule_state", @"legacy_domain_has_state",
                                  @"daemon_reachable", @"pf_active", @"hosts_active", @"app_monitoring",
                                  @"physical_layers_match", @"active_counts_match", @"approval_counts_match",
+                                 @"plist_counts_match", @"job_counts_match",
                                  @"week_window_initialized", @"week_window_loaded", @"week_window_visible",
                                  @"ui_snapshot_available", @"ui_calendar_attached", @"ui_calendar_has_area",
                                  @"ui_empty_state_visible", @"ui_bundle_counts_match", @"ui_schedule_counts_match",
-                                 @"ui_allow_block_counts_match", @"ui_empty_despite_model"],
+                                 @"ui_allow_block_counts_match", @"ui_block_geometry_counts_match",
+                                 @"ui_block_appearance_counts_match", @"ui_visible_allow_block_counts_match",
+                                 @"ui_render_objects_without_visible_blocks", @"ui_window_occlusion_visible",
+                                 @"ui_empty_despite_model"],
                 @"unsigned": @[@"app_bundle_count", @"app_week_count", @"app_commitment_count",
-                                 @"daemon_active_entry_count", @"daemon_approval_count", @"daemon_job_count",
+                                 @"daemon_active_entry_count", @"daemon_approval_count", @"daemon_approval_entry_count",
+                                 @"daemon_plist_count", @"daemon_job_count",
                                  @"collector_error_count", @"daemon_protocol", @"raw_bundle_count",
                                  @"decoded_bundle_count", @"raw_schedule_count", @"decoded_schedule_count",
+                                 @"active_expected_count", @"active_actual_count", @"active_missing_count", @"active_extra_count",
+                                 @"approval_expected_count", @"approval_actual_count", @"approval_missing_count", @"approval_extra_count",
+                                 @"plist_expected_count", @"plist_actual_count", @"plist_missing_count", @"plist_extra_count",
+                                 @"loaded_job_expected_count", @"loaded_job_actual_count", @"loaded_job_missing_count", @"loaded_job_extra_count",
+                                 @"launchd_probe_failure_count", @"invalid_approval_count", @"invalid_plist_count",
+                                 @"expired_approval_count", @"in_progress_approval_count", @"in_progress_plist_count",
                                  @"selected_week_offset", @"ui_model_bundle_count", @"ui_model_schedule_count",
                                  @"ui_rendered_bundle_count", @"ui_rendered_schedule_count", @"ui_day_column_count",
-                                 @"ui_expected_allow_block_count", @"ui_rendered_allow_block_count"],
-                @"required": @[@"collector_status", @"last_strictify_outcome", @"settings_available", @"block_running",
+                                 @"ui_expected_allow_block_count", @"ui_rendered_allow_block_count",
+                                 @"ui_nonzero_area_allow_block_count", @"ui_intersecting_allow_block_count",
+                                 @"ui_appearance_valid_allow_block_count", @"ui_visible_allow_block_count"],
+                @"required": @[@"collector_status", @"projection_comparison_status", @"last_strictify_outcome",
+                                 @"settings_available", @"block_running",
                                  @"app_has_schedule_state", @"legacy_domain_has_state", @"daemon_reachable",
                                  @"pf_active", @"hosts_active", @"app_monitoring", @"physical_layers_match",
-                                 @"active_counts_match", @"approval_counts_match", @"app_bundle_count",
+                                 @"active_counts_match", @"approval_counts_match", @"plist_counts_match", @"job_counts_match",
+                                 @"app_bundle_count",
                                  @"app_week_count", @"app_commitment_count", @"daemon_active_entry_count",
-                                 @"daemon_approval_count", @"daemon_job_count", @"collector_error_count", @"daemon_protocol",
+                                 @"daemon_approval_count", @"daemon_approval_entry_count", @"daemon_plist_count",
+                                 @"daemon_job_count", @"collector_error_count", @"daemon_protocol",
                                  @"raw_bundle_count", @"decoded_bundle_count", @"raw_schedule_count", @"decoded_schedule_count",
+                                 @"active_expected_count", @"active_actual_count", @"active_missing_count", @"active_extra_count",
+                                 @"approval_expected_count", @"approval_actual_count", @"approval_missing_count", @"approval_extra_count",
+                                 @"plist_expected_count", @"plist_actual_count", @"plist_missing_count", @"plist_extra_count",
+                                 @"loaded_job_expected_count", @"loaded_job_actual_count", @"loaded_job_missing_count", @"loaded_job_extra_count",
+                                 @"launchd_probe_failure_count", @"invalid_approval_count", @"invalid_plist_count",
+                                 @"expired_approval_count", @"in_progress_approval_count", @"in_progress_plist_count",
                                  @"week_window_initialized", @"week_window_loaded", @"week_window_visible",
                                  @"ui_snapshot_available", @"ui_calendar_attached", @"ui_calendar_has_area",
                                  @"ui_empty_state_visible", @"ui_bundle_counts_match", @"ui_schedule_counts_match",
-                                 @"ui_allow_block_counts_match", @"ui_empty_despite_model", @"selected_week_offset",
+                                 @"ui_allow_block_counts_match", @"ui_block_geometry_counts_match",
+                                 @"ui_block_appearance_counts_match", @"ui_visible_allow_block_counts_match",
+                                 @"ui_render_objects_without_visible_blocks", @"ui_window_occlusion_visible",
+                                 @"ui_empty_despite_model", @"selected_week_offset",
                                  @"ui_model_bundle_count", @"ui_model_schedule_count", @"ui_rendered_bundle_count",
                                  @"ui_rendered_schedule_count", @"ui_day_column_count", @"ui_expected_allow_block_count",
-                                 @"ui_rendered_allow_block_count"]
+                                 @"ui_rendered_allow_block_count", @"ui_nonzero_area_allow_block_count",
+                                 @"ui_intersecting_allow_block_count", @"ui_appearance_valid_allow_block_count",
+                                 @"ui_visible_allow_block_count"]
             }
         };
     });
@@ -1122,7 +1150,10 @@ static NSNumber *SCBooleanForBlockApplyStatus(id value) {
     }
 
     NSDictionary<NSString*, id> *source = fields ?: @{};
-    if (source.count > 64) return nil;
+    // Typed schemas still reject every unknown key below. Keep a separate,
+    // bounded scalar-field ceiling that is large enough for the intentionally
+    // dense support snapshot while preventing arbitrary payload growth.
+    if (source.count > 96) return nil;
 
     NSArray<NSString*> *requiredKeys = schema[@"required"] ?: @[];
     for (NSString *requiredKey in requiredKeys) {

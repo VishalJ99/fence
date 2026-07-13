@@ -18,6 +18,7 @@
 #import "SCBlockBundle.h"
 #import "SCScheduleManager.h"
 #import "SCLogger.h"
+#import "SCCalendarGridView.h"
 #import <Sentry/Sentry.h>
 #import <Sentry/Sentry-Swift.h>
 #import <zlib.h>
@@ -802,28 +803,47 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
 
 - (NSDictionary<NSString*, id>*)completeSupportSnapshotTelemetryFields {
     return @{
-        @"collector_status": @"complete", @"last_strictify_outcome": @"verified",
+        @"collector_status": @"complete", @"projection_comparison_status": @"exact",
+        @"last_strictify_outcome": @"verified",
         @"settings_available": @YES, @"block_running": @YES, @"app_has_schedule_state": @YES,
         @"legacy_domain_has_state": @NO, @"daemon_reachable": @YES,
         @"pf_active": @YES, @"hosts_active": @YES, @"app_monitoring": @YES,
         @"physical_layers_match": @YES, @"active_counts_match": @YES,
-        @"approval_counts_match": @YES, @"app_bundle_count": @2,
+        @"approval_counts_match": @YES, @"plist_counts_match": @YES, @"job_counts_match": @YES,
+        @"app_bundle_count": @2,
         @"app_week_count": @3, @"app_commitment_count": @1,
         @"daemon_active_entry_count": @4, @"daemon_approval_count": @2,
+        @"daemon_approval_entry_count": @4, @"daemon_plist_count": @2,
         @"daemon_job_count": @2, @"collector_error_count": @0,
         @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
         @"raw_bundle_count": @2, @"decoded_bundle_count": @2,
         @"raw_schedule_count": @3, @"decoded_schedule_count": @3,
+        @"active_expected_count": @4, @"active_actual_count": @4,
+        @"active_missing_count": @0, @"active_extra_count": @0,
+        @"approval_expected_count": @2, @"approval_actual_count": @2,
+        @"approval_missing_count": @0, @"approval_extra_count": @0,
+        @"plist_expected_count": @2, @"plist_actual_count": @2,
+        @"plist_missing_count": @0, @"plist_extra_count": @0,
+        @"loaded_job_expected_count": @2, @"loaded_job_actual_count": @2,
+        @"loaded_job_missing_count": @0, @"loaded_job_extra_count": @0,
+        @"launchd_probe_failure_count": @0, @"invalid_approval_count": @0,
+        @"invalid_plist_count": @0, @"expired_approval_count": @0,
+        @"in_progress_approval_count": @0, @"in_progress_plist_count": @0,
         @"week_window_initialized": @YES, @"week_window_loaded": @YES,
         @"week_window_visible": @YES, @"ui_snapshot_available": @YES,
         @"ui_calendar_attached": @YES, @"ui_calendar_has_area": @YES,
         @"ui_empty_state_visible": @NO, @"ui_bundle_counts_match": @YES,
         @"ui_schedule_counts_match": @YES, @"ui_allow_block_counts_match": @YES,
+        @"ui_block_geometry_counts_match": @YES, @"ui_block_appearance_counts_match": @YES,
+        @"ui_visible_allow_block_counts_match": @YES,
+        @"ui_render_objects_without_visible_blocks": @NO, @"ui_window_occlusion_visible": @YES,
         @"ui_empty_despite_model": @NO, @"selected_week_offset": @0,
         @"ui_model_bundle_count": @2, @"ui_model_schedule_count": @2,
         @"ui_rendered_bundle_count": @2, @"ui_rendered_schedule_count": @2,
         @"ui_day_column_count": @5, @"ui_expected_allow_block_count": @4,
-        @"ui_rendered_allow_block_count": @4,
+        @"ui_rendered_allow_block_count": @4, @"ui_nonzero_area_allow_block_count": @4,
+        @"ui_intersecting_allow_block_count": @4, @"ui_appearance_valid_allow_block_count": @4,
+        @"ui_visible_allow_block_count": @4,
     };
 }
 
@@ -843,17 +863,37 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"ui_calendar_attached": @YES, @"ui_calendar_has_area": @YES,
         @"ui_empty_state_visible": @YES, @"ui_bundle_counts_match": @NO,
         @"ui_schedule_counts_match": @NO, @"ui_allow_block_counts_match": @NO,
+        @"ui_block_geometry_counts_match": @NO, @"ui_block_appearance_counts_match": @NO,
+        @"ui_visible_allow_block_counts_match": @NO,
+        @"ui_render_objects_without_visible_blocks": @NO, @"ui_window_occlusion_visible": @YES,
         @"ui_empty_despite_model": @YES, @"selected_week_offset": @0,
         @"ui_model_bundle_count": @3, @"ui_model_schedule_count": @2,
         @"ui_rendered_bundle_count": @0, @"ui_rendered_schedule_count": @0,
         @"ui_day_column_count": @5, @"ui_expected_allow_block_count": @6,
-        @"ui_rendered_allow_block_count": @0,
+        @"ui_rendered_allow_block_count": @0, @"ui_nonzero_area_allow_block_count": @0,
+        @"ui_intersecting_allow_block_count": @0, @"ui_appearance_valid_allow_block_count": @0,
+        @"ui_visible_allow_block_count": @0,
     };
     NSDictionary<NSString *, id> *daemonSnapshot = @{
+        @"collector_status": @"complete", @"comparison_status": @"exact",
         @"settings_available": @YES, @"block_running": @YES,
         @"pf_active": @NO, @"hosts_active": @YES, @"app_monitoring": @YES,
-        @"active_entry_count": @5, @"approved_schedule_count": @2,
-        @"schedule_job_count": @2, @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
+        @"active_entry_count": @5, @"active_comparison_available": @YES,
+        @"active_entries_match": @YES, @"active_expected_count": @5, @"active_actual_count": @5,
+        @"active_missing_count": @0, @"active_extra_count": @0,
+        @"approved_schedule_count": @2, @"approved_entry_count": @4,
+        @"approval_schedules_match": @YES, @"approval_expected_count": @2, @"approval_actual_count": @2,
+        @"approval_missing_count": @0, @"approval_extra_count": @0,
+        @"schedule_plist_count": @2, @"plist_schedules_match": @YES,
+        @"plist_expected_count": @2, @"plist_actual_count": @2,
+        @"plist_missing_count": @0, @"plist_extra_count": @0,
+        @"schedule_job_count": @2, @"loaded_jobs_match": @YES,
+        @"loaded_job_expected_count": @2, @"loaded_job_actual_count": @2,
+        @"loaded_job_missing_count": @0, @"loaded_job_extra_count": @0,
+        @"launchd_probe_failure_count": @0, @"invalid_approval_count": @0,
+        @"invalid_plist_count": @0, @"expired_approval_count": @0,
+        @"in_progress_approval_count": @0, @"in_progress_plist_count": @0,
+        @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
     };
 
     NSDictionary<NSString *, id> *fields =
@@ -864,7 +904,9 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(fields[@"ui_empty_despite_model"], @YES);
     XCTAssertEqualObjects(fields[@"ui_expected_allow_block_count"], @6);
     XCTAssertEqualObjects(fields[@"ui_rendered_allow_block_count"], @0);
+    XCTAssertEqualObjects(fields[@"ui_visible_allow_block_count"], @0);
     XCTAssertEqualObjects(fields[@"block_running"], @YES);
+    XCTAssertEqualObjects(fields[@"projection_comparison_status"], @"exact");
     XCTAssertNotNil([SCSentry sanitizedTelemetryFields:fields
                                           forEventName:@"support.diagnostic_snapshot"]);
 
@@ -872,6 +914,87 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     unsafe[@"website"] = @"canary-telemetry-test.example";
     XCTAssertNil([SCSentry sanitizedTelemetryFields:unsafe
                                       forEventName:@"support.diagnostic_snapshot"]);
+}
+
+- (void)testCalendarVisibilityTelemetryDistinguishesCreatedBlocksFromHiddenBlocks {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Telemetry fixture"
+                                                   color:[SCBlockBundle colorBlue]];
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"17:00"]]
+                         forDay:SCDayOfWeekMonday];
+
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc]
+        initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    grid.showOnlyRemainingDays = NO;
+    grid.bundles = @[bundle];
+    grid.schedules = @{bundle.bundleID: schedule};
+    [grid reloadData];
+    [grid layoutSubtreeIfNeeded];
+
+    NSDictionary<NSString *, NSNumber *> *visible = [grid telemetryAllowBlockVisibilitySnapshot];
+    XCTAssertEqualObjects(visible[@"rendered_count"], @1);
+    XCTAssertEqualObjects(visible[@"nonzero_area_count"], @1);
+    XCTAssertEqualObjects(visible[@"intersecting_count"], @1);
+    XCTAssertEqualObjects(visible[@"appearance_valid_count"], @1);
+    XCTAssertEqualObjects(visible[@"visible_count"], @1);
+
+    grid.hidden = YES;
+    NSDictionary<NSString *, NSNumber *> *hidden = [grid telemetryAllowBlockVisibilitySnapshot];
+    XCTAssertEqualObjects(hidden[@"rendered_count"], @1);
+    XCTAssertEqualObjects(hidden[@"nonzero_area_count"], @1);
+    XCTAssertEqualObjects(hidden[@"intersecting_count"], @1);
+    XCTAssertEqualObjects(hidden[@"appearance_valid_count"], @0);
+    XCTAssertEqualObjects(hidden[@"visible_count"], @0);
+}
+
+- (void)testDiagnosticSnapshotCarriesExactLegacyApprovalDrift {
+    NSDictionary<NSString *, NSNumber *> *appSnapshot = @{
+        @"app_has_schedule_state": @YES,
+        @"raw_bundle_count": @1, @"decoded_bundle_count": @1,
+        @"raw_schedule_count": @1, @"decoded_schedule_count": @1,
+        @"commitment_count": @1, @"installed_schedule_job_count": @20,
+        @"active_projection_available": @YES, @"expected_active_entry_count": @5,
+        @"expected_active_app_entry_count": @1, @"expected_requires_hosts": @YES,
+        @"expected_requires_packet_filter": @NO,
+    };
+    NSDictionary<NSString *, id> *daemonSnapshot = @{
+        @"collector_status": @"partial", @"comparison_status": @"exact",
+        @"settings_available": @YES, @"block_running": @YES,
+        @"pf_active": @YES, @"hosts_active": @YES, @"app_monitoring": @YES,
+        @"active_entry_count": @5, @"active_comparison_available": @YES,
+        @"active_entries_match": @YES, @"active_expected_count": @5, @"active_actual_count": @5,
+        @"active_missing_count": @0, @"active_extra_count": @0,
+        @"approved_schedule_count": @20, @"approved_entry_count": @65,
+        @"approval_schedules_match": @NO, @"approval_expected_count": @13, @"approval_actual_count": @20,
+        @"approval_missing_count": @0, @"approval_extra_count": @7,
+        @"schedule_plist_count": @13, @"plist_schedules_match": @YES,
+        @"plist_expected_count": @13, @"plist_actual_count": @13,
+        @"plist_missing_count": @0, @"plist_extra_count": @0,
+        @"schedule_job_count": @13, @"loaded_jobs_match": @YES,
+        @"loaded_job_expected_count": @13, @"loaded_job_actual_count": @13,
+        @"loaded_job_missing_count": @0, @"loaded_job_extra_count": @0,
+        @"launchd_probe_failure_count": @0, @"invalid_approval_count": @7,
+        @"invalid_plist_count": @6, @"expired_approval_count": @0,
+        @"in_progress_approval_count": @0, @"in_progress_plist_count": @0,
+        @"daemon_protocol": @(SCDaemonProtocolVersionCurrent),
+    };
+
+    NSDictionary<NSString *, id> *fields =
+        [SCLogger diagnosticTelemetryFieldsForAppSnapshot:appSnapshot
+                                               uiSnapshot:[self completeSupportSnapshotTelemetryFields]
+                                           daemonSnapshot:daemonSnapshot
+                                          daemonReachable:YES];
+    XCTAssertEqualObjects(fields[@"collector_status"], @"partial");
+    XCTAssertEqualObjects(fields[@"projection_comparison_status"], @"exact");
+    XCTAssertEqualObjects(fields[@"active_counts_match"], @YES);
+    XCTAssertEqualObjects(fields[@"approval_counts_match"], @NO);
+    XCTAssertEqualObjects(fields[@"approval_expected_count"], @13);
+    XCTAssertEqualObjects(fields[@"approval_actual_count"], @20);
+    XCTAssertEqualObjects(fields[@"approval_extra_count"], @7);
+    XCTAssertEqualObjects(fields[@"invalid_approval_count"], @7);
+    XCTAssertEqualObjects(fields[@"invalid_plist_count"], @6);
+    XCTAssertNotNil([SCSentry sanitizedTelemetryFields:fields
+                                          forEventName:@"support.diagnostic_snapshot"]);
 }
 
 - (void)testTelemetryBlockApplyAdapterFlattensAndNormalizesTypedResults {
@@ -940,6 +1063,8 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                                       forEventName:@"state.app_daemon_diverged"]);
 
     NSDictionary *completeSupport = [self completeSupportSnapshotTelemetryFields];
+    XCTAssertGreaterThan(completeSupport.count, 64U);
+    XCTAssertLessThanOrEqual(completeSupport.count, 96U);
     XCTAssertNotNil([SCSentry sanitizedTelemetryFields:completeSupport
                                           forEventName:@"support.diagnostic_snapshot"]);
     NSMutableDictionary *incompleteSupport = [completeSupport mutableCopy];

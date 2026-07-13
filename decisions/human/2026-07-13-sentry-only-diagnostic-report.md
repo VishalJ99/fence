@@ -11,7 +11,7 @@ The manual report requires the existing global Fence telemetry consent. It does 
 
 ## Privacy boundary
 
-The report contains only typed allowlisted enums, booleans, and bounded counts. It may compare persisted, decoded, model, and rendered calendar state plus daemon enforcement and schedule state. It never includes bundle names or identifiers, websites, app names, schedule times, blocklist entries, email, identity, paths, raw logs, screenshots, or attachments.
+The report contains only typed allowlisted enums, booleans, and bounded counts. It may compare persisted, decoded, model, created-view, geometrically visible, and effectively visible calendar state plus exact aggregate daemon enforcement and schedule projections. It never includes bundle names or identifiers, websites, app names, schedule times or coordinates, block frames or colors, blocklist entries, email, identity, paths, raw logs, screenshots, or attachments.
 
 ## User experience
 
@@ -20,6 +20,7 @@ Fence shows progress while collecting and flushing the snapshot. Success display
 ## Consequences
 
 - Support can distinguish missing persisted data, decode loss, model/render divergence, empty calendar presentation, and daemon-only enforcement.
+- Support can distinguish block-view objects that exist from blocks with zero/clipped geometry or no visible appearance, and can see exact approval/plist/loaded-job drift in the same referenced event.
 - Users do not need to locate a hidden macOS Help menu or manually attach files.
 - Deep raw-log collection is intentionally unavailable; future diagnostics must extend the typed schema instead.
 

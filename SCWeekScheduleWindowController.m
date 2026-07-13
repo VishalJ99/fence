@@ -546,6 +546,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     NSUInteger dayColumnCount = 0;
     NSUInteger expectedAllowBlockCount = 0;
     NSUInteger renderedAllowBlockCount = 0;
+    NSUInteger nonzeroAreaAllowBlockCount = 0;
+    NSUInteger intersectingAllowBlockCount = 0;
+    NSUInteger appearanceValidAllowBlockCount = 0;
+    NSUInteger visibleAllowBlockCount = 0;
 
     if (windowLoaded && kUseCalendarUI && self.calendarGridView != nil) {
         calendarAttached = self.calendarGridView.superview != nil;
@@ -554,7 +558,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         renderedScheduleCount = self.calendarGridView.schedules.count;
         dayColumnCount = [self.calendarGridView telemetryDayColumnCount];
         expectedAllowBlockCount = [self.calendarGridView telemetryExpectedAllowBlockCount];
-        renderedAllowBlockCount = [self.calendarGridView telemetryRenderedAllowBlockCount];
+        [self.calendarGridView layoutSubtreeIfNeeded];
+        NSDictionary<NSString *, NSNumber *> *visibility =
+            [self.calendarGridView telemetryAllowBlockVisibilitySnapshot];
+        renderedAllowBlockCount = [visibility[@"rendered_count"] unsignedIntegerValue];
+        nonzeroAreaAllowBlockCount = [visibility[@"nonzero_area_count"] unsignedIntegerValue];
+        intersectingAllowBlockCount = [visibility[@"intersecting_count"] unsignedIntegerValue];
+        appearanceValidAllowBlockCount = [visibility[@"appearance_valid_count"] unsignedIntegerValue];
+        visibleAllowBlockCount = [visibility[@"visible_count"] unsignedIntegerValue];
         emptyStateVisible = [self.calendarGridView telemetryEmptyStateVisible];
     } else if (windowLoaded && !kUseCalendarUI && self.weekGridView != nil) {
         calendarAttached = self.weekGridView.superview != nil;
@@ -567,10 +578,21 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     BOOL bundleCountsMatch = snapshotAvailable && renderedBundleCount == modelBundleCount;
     BOOL scheduleCountsMatch = snapshotAvailable && renderedScheduleCount == modelScheduleCount;
     BOOL allowBlockCountsMatch = snapshotAvailable && renderedAllowBlockCount == expectedAllowBlockCount;
+    BOOL blockGeometryCountsMatch = snapshotAvailable &&
+        nonzeroAreaAllowBlockCount == expectedAllowBlockCount &&
+        intersectingAllowBlockCount == expectedAllowBlockCount;
+    BOOL blockAppearanceCountsMatch = snapshotAvailable &&
+        appearanceValidAllowBlockCount == expectedAllowBlockCount;
+    BOOL visibleAllowBlockCountsMatch = snapshotAvailable &&
+        visibleAllowBlockCount == expectedAllowBlockCount;
+    BOOL renderObjectsWithoutVisibleBlocks = snapshotAvailable &&
+        renderedAllowBlockCount > 0 && visibleAllowBlockCount == 0;
     BOOL emptyDespiteModel = snapshotAvailable &&
         ((modelBundleCount > 0 && renderedBundleCount == 0) ||
          (modelScheduleCount > 0 && renderedScheduleCount == 0) ||
-         (expectedAllowBlockCount > 0 && renderedAllowBlockCount == 0));
+         (expectedAllowBlockCount > 0 && visibleAllowBlockCount == 0));
+    BOOL windowOcclusionVisible = windowVisible &&
+        (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
 
     return @{
         @"week_window_initialized": @YES,
@@ -583,6 +605,11 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         @"ui_bundle_counts_match": @(bundleCountsMatch),
         @"ui_schedule_counts_match": @(scheduleCountsMatch),
         @"ui_allow_block_counts_match": @(allowBlockCountsMatch),
+        @"ui_block_geometry_counts_match": @(blockGeometryCountsMatch),
+        @"ui_block_appearance_counts_match": @(blockAppearanceCountsMatch),
+        @"ui_visible_allow_block_counts_match": @(visibleAllowBlockCountsMatch),
+        @"ui_render_objects_without_visible_blocks": @(renderObjectsWithoutVisibleBlocks),
+        @"ui_window_occlusion_visible": @(windowOcclusionVisible),
         @"ui_empty_despite_model": @(emptyDespiteModel),
         @"selected_week_offset": @(selectedWeekOffset),
         @"ui_model_bundle_count": @(modelBundleCount),
@@ -592,6 +619,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         @"ui_day_column_count": @(dayColumnCount),
         @"ui_expected_allow_block_count": @(expectedAllowBlockCount),
         @"ui_rendered_allow_block_count": @(renderedAllowBlockCount),
+        @"ui_nonzero_area_allow_block_count": @(nonzeroAreaAllowBlockCount),
+        @"ui_intersecting_allow_block_count": @(intersectingAllowBlockCount),
+        @"ui_appearance_valid_allow_block_count": @(appearanceValidAllowBlockCount),
+        @"ui_visible_allow_block_count": @(visibleAllowBlockCount),
     };
 }
 

@@ -201,6 +201,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 - (CGFloat)yFromMinutes:(NSInteger)minutes;
 - (NSInteger)minutesFromY:(CGFloat)y;
 - (NSUInteger)renderedBlockCount;
+- (NSDictionary<NSString *, NSNumber *> *)telemetryBlockVisibilitySnapshot;
 
 @end
 
@@ -268,6 +269,57 @@ static const CGFloat kDimmedOpacity = 0.2;
 
 - (NSUInteger)renderedBlockCount {
     return _blockViews.count;
+}
+
+static BOOL SCViewIsEffectivelyVisibleForTelemetry(NSView *view) {
+    CGFloat effectiveAlpha = 1.0;
+    for (NSView *candidate = view; candidate != nil; candidate = candidate.superview) {
+        if (candidate.hidden) return NO;
+        effectiveAlpha *= candidate.alphaValue;
+        if (effectiveAlpha <= 0.01) return NO;
+    }
+    return YES;
+}
+
+static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockView) {
+    CALayer *layer = blockView.layer;
+    if (!SCViewIsEffectivelyVisibleForTelemetry(blockView) || layer == nil ||
+        layer.hidden || layer.opacity <= 0.01) {
+        return NO;
+    }
+    CGColorRef backgroundColor = layer.backgroundColor;
+    CGColorRef borderColor = layer.borderColor;
+    BOOL backgroundVisible = backgroundColor != nil && CGColorGetAlpha(backgroundColor) > 0.01;
+    BOOL borderVisible = borderColor != nil && layer.borderWidth > 0 && CGColorGetAlpha(borderColor) > 0.01;
+    return backgroundVisible || borderVisible;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)telemetryBlockVisibilitySnapshot {
+    NSUInteger nonzeroAreaCount = 0;
+    NSUInteger intersectingCount = 0;
+    NSUInteger appearanceValidCount = 0;
+    NSUInteger visibleCount = 0;
+
+    for (SCAllowBlockView *blockView in _blockViews) {
+        NSRect frame = blockView.frame;
+        BOOL hasNonzeroArea = NSWidth(frame) > 1 && NSHeight(frame) > 1;
+        NSRect intersection = hasNonzeroArea ? NSIntersectionRect(frame, self.bounds) : NSZeroRect;
+        BOOL intersectsColumn = NSWidth(intersection) > 1 && NSHeight(intersection) > 1;
+        BOOL appearanceValid = SCBlockViewHasVisibleAppearanceForTelemetry(blockView);
+
+        if (hasNonzeroArea) nonzeroAreaCount += 1;
+        if (intersectsColumn) intersectingCount += 1;
+        if (appearanceValid) appearanceValidCount += 1;
+        if (hasNonzeroArea && intersectsColumn && appearanceValid) visibleCount += 1;
+    }
+
+    return @{
+        @"rendered_count": @(_blockViews.count),
+        @"nonzero_area_count": @(nonzeroAreaCount),
+        @"intersecting_count": @(intersectingCount),
+        @"appearance_valid_count": @(appearanceValidCount),
+        @"visible_count": @(visibleCount),
+    };
 }
 
 - (NSInteger)snapToGrid:(NSInteger)minutes {
@@ -1358,6 +1410,31 @@ static const CGFloat kDimmedOpacity = 0.2;
         count += [column renderedBlockCount];
     }
     return count;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)telemetryAllowBlockVisibilitySnapshot {
+    NSUInteger renderedCount = 0;
+    NSUInteger nonzeroAreaCount = 0;
+    NSUInteger intersectingCount = 0;
+    NSUInteger appearanceValidCount = 0;
+    NSUInteger visibleCount = 0;
+
+    for (SCCalendarDayColumn *column in self.dayColumns) {
+        NSDictionary<NSString *, NSNumber *> *snapshot = [column telemetryBlockVisibilitySnapshot];
+        renderedCount += [snapshot[@"rendered_count"] unsignedIntegerValue];
+        nonzeroAreaCount += [snapshot[@"nonzero_area_count"] unsignedIntegerValue];
+        intersectingCount += [snapshot[@"intersecting_count"] unsignedIntegerValue];
+        appearanceValidCount += [snapshot[@"appearance_valid_count"] unsignedIntegerValue];
+        visibleCount += [snapshot[@"visible_count"] unsignedIntegerValue];
+    }
+
+    return @{
+        @"rendered_count": @(renderedCount),
+        @"nonzero_area_count": @(nonzeroAreaCount),
+        @"intersecting_count": @(intersectingCount),
+        @"appearance_valid_count": @(appearanceValidCount),
+        @"visible_count": @(visibleCount),
+    };
 }
 
 - (BOOL)telemetryEmptyStateVisible {

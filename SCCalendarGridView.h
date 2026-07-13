@@ -83,6 +83,7 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 - (NSUInteger)telemetryDayColumnCount;
 - (NSUInteger)telemetryExpectedAllowBlockCount;
 - (NSUInteger)telemetryRenderedAllowBlockCount;
+- (NSDictionary<NSString *, NSNumber *> *)telemetryAllowBlockVisibilitySnapshot;
 - (BOOL)telemetryEmptyStateVisible;
 
 @end
