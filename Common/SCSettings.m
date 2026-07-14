@@ -41,6 +41,20 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
         CFGetTypeID((__bridge CFTypeRef)candidate) == CFBooleanGetTypeID();
 }
 
+static BOOL SCSettingsWeekKeyIsValid(id candidate) {
+    if (![candidate isKindOfClass:[NSString class]] || [candidate length] != 10) return NO;
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    for (NSUInteger index = 0; index < 10; index++) {
+        unichar character = [candidate characterAtIndex:index];
+        if (index == 4 || index == 7) {
+            if (character != '-') return NO;
+        } else if (![digits characterIsMember:character]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
 @interface SCSettings ()
 
 // Private vars
@@ -142,9 +156,21 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
         @"ActiveBlocklist": @[],
         @"ActiveBlockAsWhitelist": @NO,
         @"ActiveBlockControllingUID": @0,
+        @"ActiveBlockSource": @"none",
+        @"ActiveScheduleID": @"",
+        @"ActiveScheduleCommitmentID": @"",
+        @"ActiveScheduleGeneration": @"",
+        @"ActiveSchedulePolicyRevision": @"",
+        @"ActiveScheduleWeekKey": @"",
 
         @"BlockIsRunning": @NO, // tells us whether a block is actually running on the system (to the best of our knowledge)
         @"TamperingDetected": @NO,
+        @"IsTestBlock": @NO,
+        @"ApprovedSchedules": @{},
+        // V2 commitments are kept separately from their segment records so
+        // even an intentionally empty week remains immutable at the root
+        // authority until its absolute window expires.
+        @"ApprovedScheduleCommitments": @{},
 
         // block settings
         // the user sets these in defaults, then when a block is started they're copied over to settings
@@ -235,6 +261,15 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
     id controllingUID = settings[@"ActiveBlockControllingUID"];
     if (controllingUID != nil && !SCSettingsIntegerNumberInRange(controllingUID, UINT_MAX)) return NO;
 
+    NSArray<NSString *> *activeStringKeys = @[
+        @"ActiveBlockSource", @"ActiveScheduleID", @"ActiveScheduleCommitmentID",
+        @"ActiveScheduleGeneration", @"ActiveSchedulePolicyRevision", @"ActiveScheduleWeekKey"
+    ];
+    for (NSString *key in activeStringKeys) {
+        id value = settings[key];
+        if (value != nil && ![value isKindOfClass:[NSString class]]) return NO;
+    }
+
     NSArray<NSString *> *dateKeys = @[@"BlockEndDate", @"LastSettingsUpdate"];
     for (NSString *key in dateKeys) {
         id value = settings[key];
@@ -245,7 +280,7 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
         @"ActiveBlockAsWhitelist", @"BlockIsRunning", @"TamperingDetected",
         @"EvaluateCommonSubdomains", @"IncludeLinkedDomains", @"BlockSoundShouldPlay",
         @"ClearCaches", @"AllowLocalNetworks", @"EnableErrorReporting",
-        @"DebugBlockingDisabled"
+        @"DebugBlockingDisabled", @"IsTestBlock"
     ];
     for (NSString *key in booleanKeys) {
         id value = settings[key];
@@ -270,6 +305,9 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
             id schedule = approvedSchedules[scheduleID];
             if (![schedule isKindOfClass:[NSDictionary class]]) return NO;
             NSDictionary *scheduleDictionary = schedule;
+            id schemaVersion = scheduleDictionary[@"schemaVersion"];
+            if (schemaVersion != nil &&
+                (!SCSettingsIntegerNumberInRange(schemaVersion, 2) || [schemaVersion integerValue] < 1)) return NO;
             id blocklist = scheduleDictionary[@"blocklist"];
             if (blocklist != nil) {
                 if (![blocklist isKindOfClass:[NSArray class]]) return NO;
@@ -284,6 +322,11 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
                 @"approvedStartDate": NSDate.class,
                 @"approvedEndDate": NSDate.class,
                 @"registeredAt": NSDate.class,
+                @"weekKey": NSString.class,
+                @"commitmentID": NSString.class,
+                @"generation": NSString.class,
+                @"policyRevision": NSString.class,
+                @"sourceBundleIDs": NSArray.class,
             };
             for (NSString *key in knownTypes) {
                 id value = scheduleDictionary[key];
@@ -297,6 +340,72 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
             NSDate *endDate = scheduleDictionary[@"approvedEndDate"];
             if (startDate != nil && endDate != nil && [endDate compare:startDate] != NSOrderedDescending) {
                 return NO;
+            }
+            if ([schemaVersion integerValue] == 2) {
+                NSString *weekKey = scheduleDictionary[@"weekKey"];
+                NSArray *sourceBundleIDs = scheduleDictionary[@"sourceBundleIDs"];
+                if ([[NSUUID alloc] initWithUUIDString:scheduleID] == nil ||
+                    !SCSettingsWeekKeyIsValid(weekKey) ||
+                    [[NSUUID alloc] initWithUUIDString:scheduleDictionary[@"commitmentID"]] == nil ||
+                    [[NSUUID alloc] initWithUUIDString:scheduleDictionary[@"generation"]] == nil ||
+                    [[NSUUID alloc] initWithUUIDString:scheduleDictionary[@"policyRevision"]] == nil ||
+                    startDate == nil || endDate == nil ||
+                    ![blocklist isKindOfClass:[NSArray class]] || [blocklist count] == 0 ||
+                    ![scheduleDictionary[@"blockSettings"] isKindOfClass:[NSDictionary class]] ||
+                    !SCSettingsIntegerNumberInRange(scheduleDictionary[@"controllingUID"], UINT_MAX) ||
+                    [scheduleDictionary[@"controllingUID"] unsignedIntValue] == 0 ||
+                    !SCSettingsNumberIsBoolean(scheduleDictionary[@"isAllowlist"]) ||
+                    [scheduleDictionary[@"isAllowlist"] boolValue] ||
+                    ![sourceBundleIDs isKindOfClass:[NSArray class]] || sourceBundleIDs.count == 0) return NO;
+                for (id bundleID in sourceBundleIDs) {
+                    if (![bundleID isKindOfClass:[NSString class]] ||
+                        [[NSUUID alloc] initWithUUIDString:bundleID] == nil) return NO;
+                }
+            }
+        }
+    }
+
+    id approvedCommitments = settings[@"ApprovedScheduleCommitments"];
+    if (approvedCommitments != nil) {
+        if (![approvedCommitments isKindOfClass:[NSDictionary class]] ||
+            [approvedCommitments count] > 512) return NO;
+        for (id commitmentKey in approvedCommitments) {
+            if (![commitmentKey isKindOfClass:[NSString class]] ||
+                [[NSUUID alloc] initWithUUIDString:commitmentKey] == nil) return NO;
+            id value = approvedCommitments[commitmentKey];
+            if (![value isKindOfClass:[NSDictionary class]]) return NO;
+            NSDictionary *commitment = value;
+            id schemaVersion = commitment[@"schemaVersion"];
+            id owner = commitment[@"controllingUID"];
+            id weekKey = commitment[@"weekKey"];
+            id weekStart = commitment[@"weekStartDate"];
+            id weekEnd = commitment[@"weekEndDate"];
+            id commitmentID = commitment[@"commitmentID"];
+            id generation = commitment[@"generation"];
+            id scheduleIDs = commitment[@"scheduleIDs"];
+            id registeredAt = commitment[@"registeredAt"];
+            if (!SCSettingsIntegerNumberInRange(schemaVersion, 1) ||
+                [schemaVersion integerValue] != 1 ||
+                !SCSettingsIntegerNumberInRange(owner, UINT_MAX) ||
+                [owner unsignedIntValue] == 0 ||
+                !SCSettingsWeekKeyIsValid(weekKey) ||
+                ![weekStart isKindOfClass:[NSDate class]] ||
+                ![weekEnd isKindOfClass:[NSDate class]] ||
+                [weekEnd compare:weekStart] != NSOrderedDescending ||
+                ![commitmentID isKindOfClass:[NSString class]] ||
+                ![commitmentID isEqual:commitmentKey] ||
+                [[NSUUID alloc] initWithUUIDString:commitmentID] == nil ||
+                ![generation isKindOfClass:[NSString class]] ||
+                [[NSUUID alloc] initWithUUIDString:generation] == nil ||
+                ![scheduleIDs isKindOfClass:[NSArray class]] ||
+                [scheduleIDs count] > 512 ||
+                ![registeredAt isKindOfClass:[NSDate class]]) return NO;
+            NSMutableSet<NSString *> *uniqueScheduleIDs = [NSMutableSet set];
+            for (id scheduleID in scheduleIDs) {
+                if (![scheduleID isKindOfClass:[NSString class]] ||
+                    [[NSUUID alloc] initWithUUIDString:scheduleID] == nil ||
+                    [uniqueScheduleIDs containsObject:scheduleID]) return NO;
+                [uniqueScheduleIDs addObject:scheduleID];
             }
         }
     }
@@ -314,6 +423,17 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
         if (![settings[@"ActiveBlockAsWhitelist"] boolValue] &&
             [settings[@"ActiveBlocklist"] count] == 0) {
             return NO;
+        }
+        NSString *source = settings[@"ActiveBlockSource"];
+        NSSet *validSources = [NSSet setWithArray:@[
+            @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"unknown"
+        ]];
+        // Source/provenance was added after the original active-block schema.
+        // An absent value remains valid and is treated as unknown so an upgrade
+        // never discards the only declared record of an already-running block.
+        if (source != nil && (![source isKindOfClass:[NSString class]] || ![validSources containsObject:source])) return NO;
+        if ([source isEqualToString:@"legacy_schedule"] || [source isEqualToString:@"scheduler_v2"]) {
+            if ([[NSUUID alloc] initWithUUIDString:settings[@"ActiveScheduleID"]] == nil) return NO;
         }
     }
 
@@ -761,9 +881,10 @@ static BOOL SCSettingsNumberIsBoolean(id candidate) {
     // stopPropagation is a flag that stops one setting change from bouncing back and forth for ages
     // between two processes. It indicates that the change started in another process
     if (!stopPropagation) {
-        // Never broadcast setting values across sessions. ActiveBlocklist and
-        // ApprovedSchedules are private; receivers reload the authoritative
-        // file after this version-only invalidation signal.
+        // Never broadcast setting values across sessions. ActiveBlocklist,
+        // ApprovedSchedules, and ApprovedScheduleCommitments are private;
+        // receivers reload the authoritative file after this version-only
+        // invalidation signal.
         [[NSDistributedNotificationCenter defaultCenter] postNotificationName: @"org.eyebeam.SelfControl.SCSettingsValueChanged"
                                                                        object: self.description
                                                                      userInfo: @{

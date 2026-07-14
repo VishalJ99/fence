@@ -17,6 +17,7 @@
 #import "Block Management/SCWeeklySchedule.h"
 #import "Common/SCLicenseManager.h"
 #import "Common/SCSentry.h"
+#import "SCMiscUtilities.h"
 #import "SCLicenseWindowController.h"
 #include <errno.h>
 
@@ -757,7 +758,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.dateFormat = @"EEEE";
         NSDate *endDate = [manager commitmentEndDateForWeekOffset:self.currentWeekOffset];
-        NSString *endDay = [formatter stringFromDate:endDate];
+        // V2 uses the next Monday as an exclusive half-open week bound.
+        NSString *endDay = [formatter stringFromDate:[endDate dateByAddingTimeInterval:-1]];
         self.commitmentLabel.stringValue = [NSString stringWithFormat:@"Until %@", endDay];
         self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
     } else {
@@ -931,18 +933,30 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [self removeCmdQMonitor];
 
         if (returnCode == NSAlertFirstButtonReturn) {
-            BOOL committed = [manager commitToWeekWithOffset:weekOffset];
-            [self reloadData];
-            // Restore focus after auth dialog closes
-            [self.window makeKeyAndOrderFront:nil];
-            [NSApp activateIgnoringOtherApps:YES];
-            if (!committed) {
+            self.commitButton.title = @"Committing…";
+            self.commitButton.enabled = NO;
+            self.commitmentLabel.stringValue = @"Saving with the Fence helper";
+            __weak typeof(self) weakSelf = self;
+            [manager commitToWeekWithOffset:weekOffset completion:^(BOOL verified, NSError *error) {
+                typeof(self) strongSelf = weakSelf;
+                if (strongSelf == nil) return;
+
+                [strongSelf reloadData];
+                [strongSelf.window makeKeyAndOrderFront:nil];
+                [NSApp activateIgnoringOtherApps:YES];
+                if (verified || [SCMiscUtilities errorIsAuthCanceled:error]) return;
+
+                BOOL rootStorePersisted = [manager isCommittedForWeekOffset:weekOffset];
                 NSAlert *failureAlert = [[NSAlert alloc] init];
-                failureAlert.messageText = @"Schedule Was Not Committed";
-                failureAlert.informativeText = @"Fence could not verify every scheduled job, so it did not record the schedule as committed and attempted to remove partial jobs. Your schedule remains editable; existing active blocks are unchanged.";
+                failureAlert.messageText = rootStorePersisted
+                    ? @"Schedule Saved; Verification Incomplete"
+                    : @"Schedule Was Not Committed";
+                failureAlert.informativeText = rootStorePersisted
+                    ? (error.localizedDescription ?: @"Fence saved and locked the root-owned schedule, but immediate enforcement verification did not finish. The daemon will continue retrying; use Send Diagnostic Report Now if this persists.")
+                    : (error.localizedDescription ?: @"Fence could not verify the root-owned schedule store. Your schedule remains editable and existing active blocks are unchanged.");
                 failureAlert.alertStyle = NSAlertStyleCritical;
-                [failureAlert runModal];
-            }
+                [failureAlert beginSheetModalForWindow:strongSelf.window completionHandler:nil];
+            }];
         }
     }];
 }

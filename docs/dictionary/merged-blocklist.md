@@ -32,8 +32,9 @@ Merged Blocklist: facebook.com, twitter.com, reddit.com, app:com.apple.Terminal
 ## Context/Trigger
 
 - Created at commit time for each Segment
-- Written to disk as `.selfcontrol` file in schedules directory
-- Referenced by segment ID when launchd triggers the block
+- Stored inside the V2 root-owned schedule batch
+- Selected by segment ID when `selfcontrold` reconciles an absolute boundary
+- Draining V1 jobs may still use a `.selfcontrol` file/LaunchAgent bridge
 
 ---
 
@@ -41,12 +42,19 @@ Merged Blocklist: facebook.com, twitter.com, reddit.com, app:com.apple.Terminal
 
 | File | Purpose |
 |------|---------|
-| `Block Management/SCScheduleLaunchdBridge.m` | `writeMergedBlocklistForBundles:segmentID:error:` |
-| `Block Management/SCScheduleLaunchdBridge.m` | Merge logic in `installJobForSegmentWithBundles:` |
+| `Block Management/SCScheduleManager.m` | Current V2 canonical merge during commitment |
+| `Daemon/SCDaemonXPC.m` | Batch validation and root-store persistence |
+| `Block Management/SCScheduleLaunchdBridge.m` | V1 file/job compatibility path |
 
 ---
 
-## Storage Format
+## Current V2 Storage
+
+The canonical merged entries are the `blocklist` field of the corresponding
+[Root-Owned Schedule](root-owned-schedule.md). They are sent only across the
+authenticated local XPC boundary and persisted in root settings.
+
+## Legacy V1 Storage Format
 
 ```
 ~/Library/Application Support/SelfControl/Schedules/{segmentID}.selfcontrol
@@ -64,15 +72,15 @@ Contents (plist):
 
 ```mermaid
 graph TD
-    A[Segment created with activeBundles] --> B[writeMergedBlocklistForBundles:segmentID:error:]
-    B --> C[Create NSMutableOrderedSet for deduplication]
+    A[Segment created with activeBundles] --> B[Create NSMutableOrderedSet for canonical deduplication]
+    B --> C[Collect source bundle UUIDs]
     C --> D[For each bundle in activeBundles]
     D --> E[Add bundle.entries to set]
-    E --> F[Write to {segmentID}.selfcontrol file]
-    F --> G[Return file URL]
+    E --> F[Add blocklist to authenticated V2 batch]
+    F --> G[Daemon persists root-owned record]
 
     subgraph "At Execution Time"
-        H[launchd triggers with --schedule-id] --> I[Daemon reads registered schedule]
+        H[Root scheduler selects absolute segment] --> I[Daemon reads registered schedule]
         I --> J[Apply merged blocklist]
     end
 
@@ -88,6 +96,7 @@ graph TD
 - [Entry](entry.md) - Individual items in the blocklist
 - [Bundle](bundle.md) - Source of entries to merge
 - [Pre-Authorized Schedule](pre-authorized-schedule.md) - Contains the merged blocklist
+- [Root-Owned Schedule](root-owned-schedule.md) - Current V2 storage/execution form
 
 ---
 

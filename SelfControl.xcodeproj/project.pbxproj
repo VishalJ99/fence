@@ -10,6 +10,9 @@
 		A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
 		A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
 		A17E1E110000000000000003 /* SCTelemetrySpoolTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */; };
+		D38300000000000000000004 /* SCDaemonScheduler.m in Sources */ = {isa = PBXBuildFile; fileRef = D38300000000000000000002 /* SCDaemonScheduler.m */; };
+		D38300000000000000000005 /* SCDaemonScheduler.m in Sources */ = {isa = PBXBuildFile; fileRef = D38300000000000000000002 /* SCDaemonScheduler.m */; };
+		D38300000000000000000006 /* SCDaemonSchedulerTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D38300000000000000000003 /* SCDaemonSchedulerTests.m */; };
 		07CCB4F5C9424725B598B04E /* SCDebugUtilities.m in Sources */ = {isa = PBXBuildFile; fileRef = 520B6A02C0CE497EBCB5CCF3 /* SCDebugUtilities.m */; };
 		167A631F7107878D77965A24 /* MenuBarFence@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = AA5F3568C5F305D28DF0F7AC /* MenuBarFence@2x.png */; };
 		1869042B4D754EE781990073 /* AppBlocker.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B4CBC9BC7A744309802C589 /* AppBlocker.m */; };
@@ -602,6 +605,9 @@
 		A17E1E120000000000000001 /* SCTelemetrySpool.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCTelemetrySpool.h; sourceTree = "<group>"; };
 		A17E1E120000000000000002 /* SCTelemetrySpool.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpool.m; sourceTree = "<group>"; };
 		A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpoolTests.m; sourceTree = "<group>"; };
+		D38300000000000000000001 /* SCDaemonScheduler.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCDaemonScheduler.h; sourceTree = "<group>"; };
+		D38300000000000000000002 /* SCDaemonScheduler.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCDaemonScheduler.m; sourceTree = "<group>"; };
+		D38300000000000000000003 /* SCDaemonSchedulerTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCDaemonSchedulerTests.m; sourceTree = "<group>"; };
 		0534B42090794A569FD6AAA4 /* SCDebugUtilities.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = SCDebugUtilities.h; path = Common/SCDebugUtilities.h; sourceTree = SOURCE_ROOT; };
 		1058C7A1FEA54F0111CA2CBB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = /System/Library/Frameworks/Cocoa.framework; sourceTree = "<absolute>"; };
 		1FF38B4CA7B04483AB6E70BB /* AppBlocker.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppBlocker.h; sourceTree = "<group>"; };
@@ -1807,6 +1813,7 @@
 		CB0EEF5E20FD8CE00024D27B /* SelfControlTests */ = {
 			isa = PBXGroup;
 			children = (
+				D38300000000000000000003 /* SCDaemonSchedulerTests.m */,
 				A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */,
 				CB0EEF7720FE49020024D27B /* SCUtilityTests.m */,
 				CB0EEF6120FD8CE00024D27B /* Info.plist */,
@@ -1903,6 +1910,8 @@
 			isa = PBXGroup;
 			children = (
 				CB74D1032480E4D9002B2079 /* DaemonMain.m */,
+				D38300000000000000000001 /* SCDaemonScheduler.h */,
+				D38300000000000000000002 /* SCDaemonScheduler.m */,
 				CB74D0FC2480E3E6002B2079 /* SCDaemon.h */,
 				CB74D0FD2480E3E6002B2079 /* SCDaemon.m */,
 				CB62FC3C24B1298500ADBC40 /* SCDaemonBlockMethods.h */,
@@ -4030,6 +4039,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D38300000000000000000006 /* SCDaemonSchedulerTests.m in Sources */,
+				D38300000000000000000005 /* SCDaemonScheduler.m in Sources */,
 				A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */,
 				A17E1E110000000000000003 /* SCTelemetrySpoolTests.m in Sources */,
 				CB066F6C2652037E0076964D /* HostFileBlocker.m in Sources */,
@@ -4068,6 +4079,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D38300000000000000000004 /* SCDaemonScheduler.m in Sources */,
 				A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */,
 				CB74D11F2480E55D002B2079 /* DaemonMain.m in Sources */,
 				CB850F3925130F5300EE2E2D /* NSString+IPAddress.m in Sources */,

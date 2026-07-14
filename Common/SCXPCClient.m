@@ -57,7 +57,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         allowedCommands = [NSSet setWithArray:@[
-            @"start", @"update", @"register_schedule", @"unregister_schedule",
+            @"start", @"update", @"register_schedule", @"replace_schedule", @"unregister_schedule",
             @"clear_schedules", @"install", @"repair"
         ]];
     });
@@ -621,9 +621,35 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
         return NO;
     }
 
+    if (![self isDaemonProtocolVersion:protocolVersion
+                           capabilities:capabilities
+          supportsRootScheduleCommitWithReason:reason]) {
+        return NO;
+    }
+
     if (reason != NULL) {
         *reason = @"compatible";
     }
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>*)capabilities
+supportsRootScheduleCommitWithReason:(NSString**)reason {
+    if (protocolVersion < SCDaemonProtocolVersionRootScheduler) {
+        if (reason != NULL) *reason = @"root-scheduler-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityRootScheduleStore]) {
+        if (reason != NULL) *reason = @"root-schedule-store-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRootScheduleTimer]) {
+        if (reason != NULL) *reason = @"root-schedule-timer-missing";
+        return NO;
+    }
+    if (reason != NULL) *reason = @"compatible";
     return YES;
 }
 
@@ -808,6 +834,68 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
 }
 
 #pragma mark - Schedule Registration (Pre-Authorization System)
+
+- (void)replaceScheduledCommitmentForWeekKey:(NSString *)weekKey
+                               weekStartDate:(NSDate *)weekStartDate
+                                 weekEndDate:(NSDate *)weekEndDate
+                                commitmentID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                    segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self getCompatibilityInfo:^(NSInteger protocolVersion,
+                                 NSString *buildVersion,
+                                 NSString *marketingVersion,
+                                 NSArray<NSString *> *capabilities,
+                                 NSError *handshakeError) {
+        #pragma unused(buildVersion)
+        #pragma unused(marketingVersion)
+        if (handshakeError != nil) {
+            reply(@{}, handshakeError);
+            return;
+        }
+
+        NSString *reason = nil;
+        if (![SCXPCClient isDaemonProtocolVersion:protocolVersion
+                                      capabilities:capabilities
+                     supportsRootScheduleCommitWithReason:&reason]) {
+            NSError *compatibilityError = [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                                                               code:SCXPCDaemonCompatibilityErrorHandshake
+                                                           userInfo:@{
+                NSLocalizedDescriptionKey: @"The installed Fence helper does not support root-owned schedules.",
+                @"reason": reason ?: @"root-scheduler-incompatible",
+            }];
+            reply(@{}, compatibilityError);
+            return;
+        }
+
+        [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+            if (connectError != nil) {
+                reply(@{}, connectError);
+                return;
+            }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                NSLog(@"Replace scheduled commitment failed (domain=%@ code=%ld)",
+                      proxyError.domain, (long)proxyError.code);
+                reply(@{}, proxyError);
+            }] replaceScheduledCommitmentForWeekKey:weekKey
+                                      weekStartDate:weekStartDate
+                                        weekEndDate:weekEndDate
+                                       commitmentID:commitmentID
+                                         generation:generation
+                                           segments:segments
+                                      authorization:self.authorization
+                                              reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+                BOOL authorizationFailure =
+                    [SCXPCClient recordAuthorizationRejectionForCommand:@"replace_schedule" error:error];
+                if (error != nil && ![SCMiscUtilities errorIsAuthCanceled:error] && !authorizationFailure) {
+                    NSLog(@"Replace scheduled commitment failed (domain=%@ code=%ld)",
+                          error.domain, (long)error.code);
+                }
+                reply([result isKindOfClass:[NSDictionary class]] ? result : @{}, error);
+            }];
+        }];
+    }];
+}
 
 - (void)registerScheduleWithID:(NSString*)scheduleId
                      blocklist:(NSArray<NSString*>*)blocklist

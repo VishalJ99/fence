@@ -52,6 +52,7 @@ static NSString *SCStrictifyFailureStageFromDaemonStage(NSString *stage, BOOL ac
 static NSString * const kBundlesKey = @"SCScheduleBundles";
 static NSString * const kWeekSchedulesPrefix = @"SCWeekSchedules_"; // + week key (e.g., "2024-12-23")
 static NSString * const kWeekCommitmentPrefix = @"SCWeekCommitment_"; // + week key
+static NSString * const kWeekScheduleManifestPrefix = @"SCScheduleManifest_"; // local V2 ID/source mapping
 static NSString * const kCommitmentEndDateKey = @"SCCommitmentEndDate";
 static NSString * const kIsCommittedKey = @"SCIsCommitted";
 static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
@@ -59,6 +60,9 @@ static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnl
 static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 static NSString * const kLastScheduleCommitOutcomeKey = @"SCLastScheduleCommitOutcome";
 static NSString * const kLastScheduleCommitFailureStageKey = @"SCLastScheduleCommitFailureStage";
+static NSString * const SCScheduleCommitErrorDomain = @"org.eyebeam.Fence.ScheduleCommit";
+static const NSUInteger SCScheduleMaximumCommitmentEntries = 4096;
+static const NSUInteger SCScheduleMaximumCommitmentSegments = 512;
 
 static BOOL SCScheduleWaitForSemaphore(dispatch_semaphore_t semaphore,
                                        NSTimeInterval timeout) {
@@ -79,43 +83,39 @@ static BOOL SCScheduleWaitForSemaphore(dispatch_semaphore_t semaphore,
     return YES;
 }
 
-static void SCEmitScheduleCommitFailure(NSString *stage,
-                                        NSUInteger segmentsPlanned,
-                                        NSUInteger segmentsInstalled,
-                                        NSInteger weekOffset,
-                                        NSInteger errorCode) {
-    [SCSentry captureTelemetryEvent:@"schedule.commit_install_failed"
+static void SCEmitScheduleCommitStoreFailure(NSString *stage,
+                                             NSUInteger segmentsPlanned,
+                                             NSUInteger segmentsStored,
+                                             NSInteger weekOffset,
+                                             NSInteger errorCode,
+                                             BOOL storePersisted,
+                                             BOOL postWriteMatch,
+                                             BOOL reconcileSucceeded) {
+    [SCSentry captureTelemetryEvent:@"schedule.commit_store_failed"
                               level:SCTelemetryEventLevelError
                              fields:@{
         @"stage": stage,
         @"segments_planned": @(segmentsPlanned),
-        @"segments_installed": @(segmentsInstalled),
+        @"segments_stored": @(segmentsStored),
         @"week_offset": @(MAX(0, weekOffset)),
-        @"error_code": @(errorCode),
+        @"error_code": @(MAX(-1000000000, MIN(1000000000, errorCode))),
+        @"store_persisted": @(storePersisted),
+        @"post_write_match": @(postWriteMatch),
+        @"reconcile_succeeded": @(reconcileSucceeded),
     }];
 }
 
-static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
-                                       SCScheduleLaunchdBridge *bridge,
-                                       SCXPCClient *xpc) {
-    __block BOOL rollbackSucceeded = YES;
-    for (NSString *segmentID in segmentIDs.reverseObjectEnumerator) {
-        NSError *unloadError = nil;
-        if (![bridge uninstallJobForSegmentID:segmentID error:&unloadError]) {
-            rollbackSucceeded = NO;
-        }
-
-        dispatch_semaphore_t unregisterSema = dispatch_semaphore_create(0);
-        __block NSError *unregisterError = nil;
-        [xpc unregisterScheduleWithID:segmentID reply:^(NSError *error) {
-            unregisterError = error;
-            dispatch_semaphore_signal(unregisterSema);
-        }];
-        if (!SCScheduleWaitForSemaphore(unregisterSema, 10) || unregisterError != nil) {
-            rollbackSucceeded = NO;
-        }
-    }
-    return rollbackSucceeded;
+static NSError *SCScheduleCommitError(NSInteger code,
+                                      NSString *stage,
+                                      NSString *description,
+                                      BOOL storePersisted) {
+    return [NSError errorWithDomain:SCScheduleCommitErrorDomain
+                               code:code
+                           userInfo:@{
+        NSLocalizedDescriptionKey: description,
+        @"stage": stage,
+        @"store_persisted": @(storePersisted),
+    }];
 }
 
 @class SCBlockSegment;
@@ -154,6 +154,9 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
 - (NSArray<SCBlockBundle *> *)enabledBundlesForCommittedBlockCalculations;
 - (NSArray<NSString *> *)expectedBlocklistForSegment:(SCBlockSegment *)segment oldBundle:(SCBlockBundle *)oldBundle;
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)installedMergedScheduleIDsByStartKey;
+- (nullable NSDictionary<NSString *, id> *)v2ManifestForWeekOffset:(NSInteger)weekOffset;
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)v2ExpectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle
+                                                                                          oldBundle:(SCBlockBundle *)oldBundle;
 - (nullable NSArray<NSString *> *)expectedActiveBlocklistForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle;
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)expectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle;
 - (void)appendCommittedAdditions:(NSArray<NSString *> *)addedEntries
@@ -321,9 +324,18 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
         // Live strictify: If committed and a block is running, update the active block
         // ═══════════════════════════════════════════════════════════════════════════
 
-        BOOL blocklistFilePersisted = !usedInCommittedSchedule;
-        if (usedInCommittedSchedule) {
-            // Always update the blocklist file for future jobs
+        BOOL legacyCommittedJobUsesBundle = NO;
+        for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+            if ([self isCommittedForWeekOffset:weekOffset] &&
+                [self v2ManifestForWeekOffset:weekOffset] == nil &&
+                [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset] != nil) {
+                legacyCommittedJobUsesBundle = YES;
+                break;
+            }
+        }
+        BOOL blocklistFilePersisted = !legacyCommittedJobUsesBundle;
+        if (legacyCommittedJobUsesBundle) {
+            // Only draining V1 LaunchAgents read bundle blocklist files.
             SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
             NSError *error = nil;
             blocklistFilePersisted = [bridge writeBlocklistFileForBundle:bundle error:&error];
@@ -487,16 +499,80 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
     return scheduleIDsByStartKey;
 }
 
+- (nullable NSDictionary<NSString *, id> *)v2ManifestForWeekOffset:(NSInteger)weekOffset {
+    NSString *weekKey = [self weekKeyForOffset:weekOffset];
+    id value = [[NSUserDefaults standardUserDefaults]
+        objectForKey:[kWeekScheduleManifestPrefix stringByAppendingString:weekKey]];
+    NSDictionary *manifest = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+    if ([manifest[@"schemaVersion"] integerValue] != 2 ||
+        ![manifest[@"weekKey"] isEqualToString:weekKey] ||
+        ![manifest[@"schedules"] isKindOfClass:[NSArray class]]) {
+        return nil;
+    }
+    return manifest;
+}
+
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)v2ExpectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle
+                                                                                          oldBundle:(SCBlockBundle *)oldBundle {
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *expected = [NSMutableDictionary dictionary];
+    NSDate *now = [NSDate date];
+
+    for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
+        if (![self isCommittedForWeekOffset:weekOffset]) continue;
+        NSDictionary *manifest = [self v2ManifestForWeekOffset:weekOffset];
+        for (id rawRecord in manifest[@"schedules"] ?: @[]) {
+            NSDictionary *record = [rawRecord isKindOfClass:[NSDictionary class]] ? rawRecord : nil;
+            NSString *scheduleID = record[@"scheduleID"];
+            NSDate *approvedEndDate = record[@"approvedEndDate"];
+            NSArray<NSString *> *sourceBundleIDs = record[@"sourceBundleIDs"];
+            if (![[NSUUID alloc] initWithUUIDString:scheduleID] ||
+                ![approvedEndDate isKindOfClass:[NSDate class]] ||
+                [approvedEndDate compare:now] != NSOrderedDescending ||
+                ![sourceBundleIDs isKindOfClass:[NSArray class]] ||
+                ![sourceBundleIDs containsObject:bundle.bundleID]) {
+                continue;
+            }
+
+            NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+            BOOL allSourcesResolved = YES;
+            for (NSString *sourceBundleID in sourceBundleIDs) {
+                SCBlockBundle *sourceBundle = [sourceBundleID isEqualToString:oldBundle.bundleID]
+                    ? oldBundle : [self bundleWithID:sourceBundleID];
+                if (sourceBundle == nil) {
+                    allSourcesResolved = NO;
+                    break;
+                }
+                for (id rawEntry in sourceBundle.entries ?: @[]) {
+                    NSString *canonical = [rawEntry isKindOfClass:[NSString class]]
+                        ? [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] : nil;
+                    if (canonical == nil) {
+                        allSourcesResolved = NO;
+                        break;
+                    }
+                    [entries addObject:canonical];
+                }
+                if (!allSourcesResolved) break;
+            }
+            if (allSourcesResolved && entries.count > 0) {
+                expected[scheduleID] = entries.array;
+            }
+        }
+    }
+    return expected;
+}
+
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)expectedApprovedScheduleBlocklistsForBundle:(SCBlockBundle *)bundle oldBundle:(SCBlockBundle *)oldBundle {
     SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
     NSDictionary<NSString *, NSArray<NSString *> *> *installedScheduleIDsByStartKey = [self installedMergedScheduleIDsByStartKey];
     NSISO8601DateFormatter *isoFormatter = [[NSISO8601DateFormatter alloc] init];
     isoFormatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-    NSMutableDictionary<NSString *, NSArray<NSString *> *> *expectedBlocklistsByScheduleID = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *expectedBlocklistsByScheduleID =
+        [[self v2ExpectedApprovedScheduleBlocklistsForBundle:bundle oldBundle:oldBundle] mutableCopy];
 
     for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
         if (![self isCommittedForWeekOffset:weekOffset] ||
-            [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset] == nil) {
+            [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset] == nil ||
+            [self v2ManifestForWeekOffset:weekOffset] != nil) {
             continue;
         }
 
@@ -849,7 +925,9 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
         @"duration_milliseconds": @(durationMilliseconds),
         @"pf_exit_code": @([packetFilter[@"exit_code"] integerValue]),
         @"future_candidate_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
-        @"future_job_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
+        @"future_job_count": @([futureResult[@"legacy_candidate_count"] isKindOfClass:[NSNumber class]]
+            ? [futureResult[@"legacy_candidate_count"] unsignedIntegerValue]
+            : [futureResult[@"candidate_count"] unsignedIntegerValue]),
         @"future_loaded_job_count": @([futureResult[@"loaded_job_count"] unsignedIntegerValue]),
         @"future_launchd_probe_failure_count": @([futureResult[@"launchd_probe_failure_count"] unsignedIntegerValue]),
         @"approval_requested_count": @([futureResult[@"candidate_count"] unsignedIntegerValue]),
@@ -1213,214 +1291,233 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
 }
 
 - (BOOL)commitToWeekWithOffset:(NSInteger)weekOffset {
-    // Clean up old week data from NSUserDefaults before committing
-    [self cleanupExpiredCommitments];
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block BOOL verified = NO;
+    [self commitToWeekWithOffset:weekOffset completion:^(BOOL didVerify, NSError *error) {
+        #pragma unused(error)
+        verified = didVerify;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    SCScheduleWaitForSemaphore(semaphore, 0);
+    return verified;
+}
+
+- (void)commitToWeekWithOffset:(NSInteger)weekOffset
+                    completion:(void (^)(BOOL, NSError *))completion {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self commitToWeekWithOffset:weekOffset completion:completion];
+        });
+        return;
+    }
+
+    void (^finish)(BOOL, NSError *) = ^(BOOL verified, NSError *error) {
+        if (completion != nil) completion(verified, error);
+    };
+    if (weekOffset < 0 || weekOffset > 1) {
+        finish(NO, SCScheduleCommitError(1, @"validate", @"Fence can commit only this week or next week.", NO));
+        return;
+    }
 
     NSCalendar *calendar = [NSCalendar currentCalendar];
-
-    // Get the Monday of the target week
-    NSDate *weekStart;
-    if (weekOffset == 0) {
-        weekStart = [SCWeeklySchedule startOfCurrentWeek];
-    } else {
-        weekStart = [calendar dateByAddingUnit:NSCalendarUnitDay
-                                         value:weekOffset * 7
-                                        toDate:[SCWeeklySchedule startOfCurrentWeek]
-                                       options:0];
+    NSDate *weekStart = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                              value:weekOffset * 7
+                                             toDate:[SCWeeklySchedule startOfCurrentWeek]
+                                            options:0];
+    NSDate *weekEnd = [calendar dateByAddingUnit:NSCalendarUnitDay value:7 toDate:weekStart options:0];
+    NSString *weekKey = [self weekKeyForOffset:weekOffset];
+    if (weekStart == nil || weekEnd == nil || weekKey.length != 10) {
+        finish(NO, SCScheduleCommitError(2, @"validate", @"Fence could not resolve the selected week.", NO));
+        return;
     }
 
-    // Week ends on Sunday (6 days after Monday) at 23:59:59
-    NSDate *endOfWeek = [calendar dateByAddingUnit:NSCalendarUnitDay value:6 toDate:weekStart options:0];
-    // Move to end of day
-    NSDateComponents *endOfDayComponents = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay)
-                                                       fromDate:endOfWeek];
-    endOfDayComponents.hour = 23;
-    endOfDayComponents.minute = 59;
-    endOfDayComponents.second = 59;
-    endOfWeek = [calendar dateFromComponents:endOfDayComponents];
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Install launchd jobs using segment-based merging
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
-    NSError *error = nil;
-
-    // Cleanup only stale (expired) schedule jobs, preserving valid ones from other weeks
-    [self cleanupStaleScheduleJobs];
-
-    // Collect all enabled bundles
     NSMutableArray<SCBlockBundle *> *enabledBundles = [NSMutableArray array];
     for (SCBlockBundle *bundle in self.mutableBundles) {
-        if (bundle.enabled) {
-            [enabledBundles addObject:bundle];
-        } else {
-            NSLog(@"SCScheduleManager: Skipping one disabled bundle");
-        }
-    }
-
-    // Ensure all enabled bundles have a persisted schedule for the committed week
-    // Bundles with no drawn allow blocks get an empty schedule (blocked all week)
-    // This is scoped to weekOffset, so it won't affect other weeks
-    for (SCBlockBundle *bundle in enabledBundles) {
-        SCWeeklySchedule *schedule = [self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset];
-        if (!schedule) {
-            NSLog(@"SCScheduleManager: Creating one empty schedule (no allow blocks drawn)");
+        if (!bundle.enabled) continue;
+        [enabledBundles addObject:bundle];
+        if ([self scheduleForBundleID:bundle.bundleID weekOffset:weekOffset] == nil) {
             [self createScheduleForBundle:bundle weekOffset:weekOffset];
         }
     }
 
-    BOOL commitInstallSucceeded = YES;
-    NSString *commitFailureStage = @"verification";
-    NSInteger commitFailureCode = 0;
-    NSUInteger segmentsPlanned = 0;
-    NSUInteger segmentsInstalled = 0;
+    SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+    NSArray<SCBlockSegment *> *calculatedSegments =
+        [self calculateBlockSegmentsForBundles:enabledBundles weekOffset:weekOffset bridge:bridge];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL telemetryConsent = [defaults boolForKey:@"ErrorReportingPromptDismissed"] &&
+        [defaults boolForKey:@"EnableErrorReporting"];
+    NSDictionary *blockSettings = @{
+        @"ClearCaches": [defaults objectForKey:@"ClearCaches"] ?: @NO,
+        @"AllowLocalNetworks": [defaults objectForKey:@"AllowLocalNetworks"] ?: @YES,
+        @"EvaluateCommonSubdomains": [defaults objectForKey:@"EvaluateCommonSubdomains"] ?: @YES,
+        @"IncludeLinkedDomains": [defaults objectForKey:@"IncludeLinkedDomains"] ?: @YES,
+        @"BlockSoundShouldPlay": [defaults objectForKey:@"BlockSoundShouldPlay"] ?: @NO,
+        @"BlockSound": [defaults objectForKey:@"BlockSound"] ?: @5,
+        @"EnableErrorReporting": @(telemetryConsent),
+    };
 
-    if (enabledBundles.count == 0) {
-        NSLog(@"SCScheduleManager: No enabled bundles to schedule");
-    } else {
-        // Calculate merged segments
-        NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:enabledBundles
-                                                                          weekOffset:weekOffset
-                                                                              bridge:bridge];
+    NSString *commitmentID = NSUUID.UUID.UUIDString;
+    NSString *generation = NSUUID.UUID.UUIDString;
+    NSDate *now = [NSDate date];
+    NSMutableArray<NSDictionary<NSString *, id> *> *requestSegments = [NSMutableArray array];
+    NSMutableArray<NSDictionary<NSString *, id> *> *manifestRecords = [NSMutableArray array];
+    NSUInteger aggregateEntryCount = 0;
+    NSError *preflightError = nil;
 
-        NSLog(@"SCScheduleManager: Installing %lu segment-based jobs", (unsigned long)segments.count);
-
-        // Install daemon ONCE before registering any schedules (will prompt for password)
-        SCXPCClient *xpc = [SCXPCClient new];
-        dispatch_semaphore_t daemonSema = dispatch_semaphore_create(0);
-        __block NSError *daemonError = nil;
-
-        [xpc installDaemon:^(NSError *err) {
-            daemonError = err;
-            dispatch_semaphore_signal(daemonSema);
-        }];
-
-        // Authorization is an explicit user interaction and must not time out
-        // while the system password/Touch ID sheet is still open.
-        BOOL daemonCompleted = SCScheduleWaitForSemaphore(daemonSema, 0);
-
-        if (!daemonCompleted || daemonError) {
-            NSLog(@"ERROR: Failed to install daemon for schedule commit (domain=%@ code=%ld)",
-                  daemonError.domain, (long)daemonError.code);
-            commitInstallSucceeded = NO;
-            commitFailureStage = @"daemon_install";
-            commitFailureCode = daemonCompleted ? daemonError.code : 408;
+    for (SCBlockSegment *segment in calculatedSegments) {
+        if ([segment.endDate compare:now] != NSOrderedDescending ||
+            [segment.endDate compare:segment.startDate] != NSOrderedDescending) {
+            continue;
         }
 
-        if (!commitInstallSucceeded) {
-            SCEmitScheduleCommitFailure(commitFailureStage, segments.count, 0,
-                                        weekOffset, commitFailureCode);
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
-            [defaults setObject:commitFailureStage forKey:kLastScheduleCommitFailureStageKey];
-            [defaults synchronize];
-            return NO;
-        }
-
-        NSLog(@"SCScheduleManager: Daemon installed, proceeding with schedule registration");
-
-        // Install every future job before starting an in-progress segment. If
-        // anything fails, every attempted local job and root-owned approval is
-        // rolled back before the commitment is persisted.
-        NSMutableArray<SCBlockSegment *> *futureSegments = [NSMutableArray array];
-        NSMutableArray<SCBlockSegment *> *inProgressSegments = [NSMutableArray array];
-        for (SCBlockSegment *segment in segments) {
-            if (weekOffset == 0 && [segment.startDate timeIntervalSinceNow] < 0) {
-                if ([segment.endDate timeIntervalSinceNow] > 0) {
-                    [inProgressSegments addObject:segment];
-                } else {
-                    NSLog(@"SCScheduleManager: Skipping one past segment");
-                }
-            } else {
-                [futureSegments addObject:segment];
-            }
-        }
-        segmentsPlanned = futureSegments.count + inProgressSegments.count;
-        NSMutableArray<NSString *> *attemptedSegmentIDs = [NSMutableArray array];
-
-        for (SCBlockSegment *segment in futureSegments) {
-            [attemptedSegmentIDs addObject:segment.segmentID];
-            error = nil;
-            BOOL success = [bridge installJobForSegmentWithBundles:segment.activeBundles
-                                                         segmentID:segment.segmentID
-                                                         startDate:segment.startDate
-                                                           endDate:segment.endDate
-                                                               day:segment.day
-                                                      startMinutes:segment.startMinutes
-                                                        weekOffset:weekOffset
-                                                             error:&error];
-            if (!success) {
-                NSLog(@"ERROR: Failed to install segment job (domain=%@ code=%ld)",
-                      error.domain, (long)error.code);
-                commitInstallSucceeded = NO;
-                NSString *reportedStage = error.userInfo[SCScheduleLaunchdBridgeFailureStageKey];
-                commitFailureStage = [reportedStage isEqualToString:@"schedule_register"]
-                    ? @"schedule_register" : @"job_install";
-                commitFailureCode = error != nil ? error.code : -1;
+        NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+        NSMutableOrderedSet<NSString *> *sourceBundleIDs = [NSMutableOrderedSet orderedSet];
+        for (SCBlockBundle *bundle in segment.activeBundles) {
+            if ([[NSUUID alloc] initWithUUIDString:bundle.bundleID] == nil) {
+                preflightError = SCScheduleCommitError(3, @"validate", @"A scheduled bundle has an invalid local identifier.", NO);
                 break;
             }
-            segmentsInstalled += 1;
-        }
-
-        if (commitInstallSucceeded) {
-            for (SCBlockSegment *segment in futureSegments) {
-                if ([bridge installedJobLabelsForSegmentID:segment.segmentID].count == 0) {
-                    commitInstallSucceeded = NO;
-                    commitFailureStage = @"verification";
-                    commitFailureCode = 2;
+            [sourceBundleIDs addObject:bundle.bundleID];
+            for (id rawEntry in bundle.entries ?: @[]) {
+                NSString *canonical = [rawEntry isKindOfClass:[NSString class]]
+                    ? [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] : nil;
+                if (canonical == nil) {
+                    preflightError = SCScheduleCommitError(4, @"validate", @"A scheduled bundle contains an invalid block entry.", NO);
                     break;
                 }
+                [entries addObject:canonical];
             }
+            if (preflightError != nil) break;
         }
+        if (preflightError != nil) break;
+        if (entries.count == 0) continue;
+        BOOL exceedsAggregateEntryLimit = entries.count > SCScheduleMaximumCommitmentEntries ||
+            aggregateEntryCount > SCScheduleMaximumCommitmentEntries - entries.count;
+        if (exceedsAggregateEntryLimit ||
+            requestSegments.count >= SCScheduleMaximumCommitmentSegments) {
+            preflightError = SCScheduleCommitError(5, @"validate", @"The selected week is too large to commit safely.", NO);
+            break;
+        }
+        aggregateEntryCount += entries.count;
 
-        if (commitInstallSucceeded) {
-            for (SCBlockSegment *segment in inProgressSegments) {
-                [attemptedSegmentIDs addObject:segment.segmentID];
-                NSError *startError = nil;
-                NSLog(@"SCScheduleManager: Starting one in-progress segment immediately");
-                if (![bridge startMergedBlockImmediatelyForBundles:segment.activeBundles
-                                                        segmentID:segment.segmentID
-                                                          endDate:segment.endDate
-                                                            error:&startError]) {
-                    commitInstallSucceeded = NO;
-                    commitFailureStage = @"schedule_register";
-                    commitFailureCode = startError != nil ? startError.code : -1;
-                    break;
-                }
-                segmentsInstalled += 1;
-            }
-        }
-
-        if (!commitInstallSucceeded) {
-            BOOL rolledBack = SCRollbackScheduleSegments(attemptedSegmentIDs, bridge, xpc);
-            if (!rolledBack) NSLog(@"ERROR: Schedule commit rollback was incomplete");
-            SCEmitScheduleCommitFailure(commitFailureStage, segmentsPlanned,
-                                        segmentsInstalled, weekOffset, commitFailureCode);
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
-            [defaults setObject:commitFailureStage forKey:kLastScheduleCommitFailureStageKey];
-            [defaults synchronize];
-            [self postChangeNotification];
-            return NO;
-        }
+        NSString *policyRevision = NSUUID.UUID.UUIDString;
+        NSDictionary<NSString *, id> *requestRecord = @{
+            @"scheduleID": segment.segmentID,
+            @"approvedStartDate": segment.startDate,
+            @"approvedEndDate": segment.endDate,
+            @"blocklist": entries.array,
+            @"isAllowlist": @NO,
+            @"blockSettings": blockSettings,
+            @"sourceBundleIDs": sourceBundleIDs.array,
+            @"policyRevision": policyRevision,
+        };
+        [requestSegments addObject:requestRecord];
+        [manifestRecords addObject:@{
+            @"scheduleID": segment.segmentID,
+            @"approvedStartDate": segment.startDate,
+            @"approvedEndDate": segment.endDate,
+            @"sourceBundleIDs": sourceBundleIDs.array,
+            @"policyRevision": policyRevision,
+        }];
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    if (preflightError != nil) {
+        [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
+        [defaults setObject:@"validate" forKey:kLastScheduleCommitFailureStageKey];
+        [defaults synchronize];
+        SCEmitScheduleCommitStoreFailure(@"validate", requestSegments.count, 0, weekOffset,
+                                         preflightError.code, NO, NO, NO);
+        finish(NO, preflightError);
+        return;
+    }
 
-    // Store commitment end date with week-specific key
-    NSString *weekKey = [self weekKeyForOffset:weekOffset];
-    NSString *storageKey = [kWeekCommitmentPrefix stringByAppendingString:weekKey];
-    [[NSUserDefaults standardUserDefaults] setObject:endOfWeek forKey:storageKey];
-    [[NSUserDefaults standardUserDefaults] setObject:@"verified" forKey:kLastScheduleCommitOutcomeKey];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLastScheduleCommitFailureStageKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc replaceScheduledCommitmentForWeekKey:weekKey
+                                weekStartDate:weekStart
+                                  weekEndDate:weekEnd
+                                 commitmentID:commitmentID
+                                   generation:generation
+                                     segments:requestSegments
+                                        reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSUInteger storedCount = [result[@"segments_stored"] unsignedIntegerValue];
+            BOOL storePersisted = [result[@"store_persisted"] boolValue];
+            BOOL postWriteMatch = [result[@"post_write_match"] boolValue];
+            BOOL reconcileSucceeded = [result[@"reconcile_succeeded"] boolValue];
+            BOOL storeVerified = storePersisted && postWriteMatch && storedCount == requestSegments.count;
 
-    // Mark that user has committed (persistent - skips test block prompt on future launches)
-    [SCVersionTracker markHasEverCommitted];
+            NSString *stage = [result[@"failed_stage"] isKindOfClass:[NSString class]]
+                ? result[@"failed_stage"] : nil;
+            NSSet<NSString *> *allowedStages = [NSSet setWithArray:@[
+                @"authorize", @"validate", @"lock", @"persist", @"evaluate"
+            ]];
+            if (![allowedStages containsObject:stage]) {
+                if ([error.domain isEqualToString:NSOSStatusErrorDomain]) {
+                    stage = @"authorize";
+                } else if ([error.domain isEqualToString:@"org.eyebeam.Fence.DaemonCompatibility.Handshake"]) {
+                    stage = @"compatibility";
+                } else {
+                    stage = @"transport";
+                }
+            }
 
-    [self postChangeNotification];
-    return YES;
+            if (!storeVerified) {
+                [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
+                [defaults setObject:stage forKey:kLastScheduleCommitFailureStageKey];
+                [defaults synchronize];
+                if (![SCMiscUtilities errorIsAuthCanceled:error]) {
+                    SCEmitScheduleCommitStoreFailure(stage, requestSegments.count, storedCount,
+                                                     weekOffset, error.code, storePersisted,
+                                                     postWriteMatch, reconcileSucceeded);
+                }
+                NSError *reportedError = error ?: SCScheduleCommitError(
+                    6, stage, @"Fence could not verify the root-owned schedule store.", storePersisted);
+                finish(NO, reportedError);
+                return;
+            }
+
+            NSDictionary<NSString *, id> *manifest = @{
+                @"schemaVersion": @2,
+                @"weekKey": weekKey,
+                @"commitmentID": commitmentID,
+                @"generation": generation,
+                @"weekStartDate": weekStart,
+                @"weekEndDate": weekEnd,
+                @"schedules": manifestRecords,
+            };
+            [defaults setObject:weekEnd forKey:[kWeekCommitmentPrefix stringByAppendingString:weekKey]];
+            [defaults setObject:manifest forKey:[kWeekScheduleManifestPrefix stringByAppendingString:weekKey]];
+            [defaults setObject:(reconcileSucceeded ? @"verified" : @"stored")
+                         forKey:kLastScheduleCommitOutcomeKey];
+            if (reconcileSucceeded) {
+                [defaults removeObjectForKey:kLastScheduleCommitFailureStageKey];
+            } else {
+                [defaults setObject:@"evaluate" forKey:kLastScheduleCommitFailureStageKey];
+            }
+            BOOL localPersisted = [defaults synchronize];
+
+            [SCVersionTracker markHasEverCommitted];
+            [self postChangeNotification];
+            if (!localPersisted) {
+                NSError *manifestError = SCScheduleCommitError(
+                    7, @"manifest", @"The root schedule was saved, but Fence could not verify its local schedule index.", YES);
+                SCEmitScheduleCommitStoreFailure(@"manifest", requestSegments.count, storedCount,
+                                                 weekOffset, manifestError.code, YES, YES,
+                                                 reconcileSucceeded);
+                finish(NO, manifestError);
+                return;
+            }
+            if (!reconcileSucceeded) {
+                NSError *evaluationError = SCScheduleCommitError(
+                    8, @"evaluate", @"The root schedule was saved and locked, but immediate enforcement verification did not finish.", YES);
+                SCEmitScheduleCommitStoreFailure(@"evaluate", requestSegments.count, storedCount,
+                                                 weekOffset, evaluationError.code, YES, YES, NO);
+                finish(NO, evaluationError);
+                return;
+            }
+            finish(YES, nil);
+        });
+    }];
 }
 
 - (BOOL)changeWouldLoosenSchedule:(SCWeeklySchedule *)oldSchedule
@@ -1602,11 +1699,12 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:[kWeekCommitmentPrefix stringByAppendingString:currentWeekKey]];
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:[kWeekCommitmentPrefix stringByAppendingString:nextWeekKey]];
 
-    // Clear all week schedule data (SCWeekSchedules_*) - wipe schedule drawings
+    // Clear all local week schedules and V2 ID/source manifests.
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
     for (NSString *key in allDefaults.allKeys) {
-        if ([key hasPrefix:kWeekSchedulesPrefix]) {
+        if ([key hasPrefix:kWeekSchedulesPrefix] ||
+            [key hasPrefix:kWeekScheduleManifestPrefix]) {
             [defaults removeObjectForKey:key];
         }
     }
@@ -1668,10 +1766,12 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
             // Clear the commitment metadata
             NSString *storageKey = [kWeekCommitmentPrefix stringByAppendingString:weekKey];
             [[NSUserDefaults standardUserDefaults] removeObjectForKey:storageKey];
+            [[NSUserDefaults standardUserDefaults]
+                removeObjectForKey:[kWeekScheduleManifestPrefix stringByAppendingString:weekKey]];
         }
     }
 
-    // Clean up old week schedule data (SCWeekSchedules_* and SCWeekCommitment_* for past weeks)
+    // Clean up old week schedules, commitment markers, and V2 local manifests.
     NSString *currentWeekKey = [self weekKeyForOffset:0];
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
@@ -1682,6 +1782,8 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
             weekKey = [key substringFromIndex:kWeekSchedulesPrefix.length];
         } else if ([key hasPrefix:kWeekCommitmentPrefix]) {
             weekKey = [key substringFromIndex:kWeekCommitmentPrefix.length];
+        } else if ([key hasPrefix:kWeekScheduleManifestPrefix]) {
+            weekKey = [key substringFromIndex:kWeekScheduleManifestPrefix.length];
         }
 
         if (weekKey) {
@@ -1959,6 +2061,7 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
     SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
     for (NSInteger weekOffset = 0; weekOffset <= 1; weekOffset++) {
         if (![self isCommittedForWeekOffset:weekOffset]) continue;
+        BOOL usesRootScheduler = [self v2ManifestForWeekOffset:weekOffset] != nil;
 
         NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:enabledBundles
                                                                           weekOffset:weekOffset
@@ -1974,6 +2077,7 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
                     }
                 }
             }
+            if (segmentEntries.count == 0) continue;
             totalProjectedEntries += segmentEntries.count;
             if (expectedApprovals.count >= kMaximumProjectedSchedules ||
                 totalProjectedEntries > kMaximumProjectedEntries) {
@@ -1994,7 +2098,7 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
             };
             if ([segment.startDate compare:now] == NSOrderedDescending) {
                 [expectedApprovals addObject:descriptor];
-                [expectedJobs addObject:descriptor];
+                if (!usesRootScheduler) [expectedJobs addObject:descriptor];
             } else if (weekOffset == 0) {
                 [expectedActiveEntries addObjectsFromArray:segmentEntries.array];
             }
@@ -2015,10 +2119,18 @@ static BOOL SCRollbackScheduleSegments(NSArray<NSString *> *segmentIDs,
     [self.mutableBundles removeAllObjects];
     [self.weekSchedulesCache removeAllObjects];
 
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kBundlesKey];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kCommitmentEndDateKey];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kIsCommittedKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:kBundlesKey];
+    [defaults removeObjectForKey:kCommitmentEndDateKey];
+    [defaults removeObjectForKey:kIsCommittedKey];
+    for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
+        if ([key hasPrefix:kWeekSchedulesPrefix] ||
+            [key hasPrefix:kWeekCommitmentPrefix] ||
+            [key hasPrefix:kWeekScheduleManifestPrefix]) {
+            [defaults removeObjectForKey:key];
+        }
+    }
+    [defaults synchronize];
 
     [self postChangeNotification];
 }

@@ -1,6 +1,6 @@
 # Block Window
 
-<!-- KEYWORDS: block, window, blocking, active, computed, inverse, SCBlockWindow, launchd -->
+<!-- KEYWORDS: block, window, blocking, active, computed, inverse, SCBlockWindow, root scheduler -->
 
 **Also known as:** Blocking Period, Block Time, Active Block
 
@@ -14,7 +14,7 @@ A computed time range when blocking IS active - the inverse of Allowed Windows.
 
 ## Detailed Definition
 
-Block Windows are **not user-defined** - they are computed by inverting the user's Allowed Windows. Represented by `SCBlockWindow`, they contain absolute dates (not just times) and are used to create launchd jobs that trigger blocking at the right moments.
+Block Windows are **not user-defined** - they are computed by inverting the user's Allowed Windows. Represented by `SCBlockWindow`, they contain absolute dates (not just times) and are used to create merged segments stored for root-daemon reconciliation. Only legacy V1 commitments turn them into user LaunchAgent trigger points.
 
 | Allowed Windows | Computed Block Windows |
 |-----------------|------------------------|
@@ -29,7 +29,7 @@ Block Windows are **not user-defined** - they are computed by inverting the user
 
 - Computed at commit time by `SCScheduleLaunchdBridge`
 - Used as input to [Segmentation](segment.md)
-- Each Block Window becomes a potential launchd job trigger point
+- Each Block Window contributes start/end transitions to V2 segmentation
 
 ---
 

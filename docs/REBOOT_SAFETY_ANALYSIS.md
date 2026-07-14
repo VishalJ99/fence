@@ -4,23 +4,23 @@
 >
 > **Key Question:** "After a reboot, will my block still be active?"
 >
-> **Last Updated:** January 2026
+> **Last Updated:** July 2026 (PER-383)
 
 ---
 
 ## Executive Summary
 
-SelfControl uses a **three-layer persistence architecture** to ensure blocks survive system restarts:
+Fence uses a **three-layer persistence architecture** to ensure blocks survive system restarts:
 
 1. **Settings Flag** - `BlockIsRunning=YES` in root-owned plist
 2. **Filesystem Rules** - Blocking markers in `/etc/hosts` and PF anchors
-3. **Scheduled Block Recovery** - `startMissedBlockIfNeeded()` catches scheduled blocks that should be active
+3. **Root Schedule Reconciliation** - `SCDaemonScheduler` recomputes the desired V1/V2 record from absolute dates
 
 **Robustness Verdict:**
 
 | Aspect | Rating | Summary |
 |--------|--------|---------|
-| Reboot Persistence | **STRONG** | 3-layer detection ensures block survives |
+| Reboot Persistence | **STRONG** | Active state, physical remnants, and root schedule records are recovered at `RunAtLoad` |
 | Tampering Resistance | **STRONG** | Auto-repair within 1.5-15 seconds |
 | macOS Compatibility | **MODERATE** | Deprecated APIs, but safety check mitigates |
 | Edge Case Handling | **MODERATE** | Some gaps (Safe Mode, Recovery Mode) |
@@ -31,7 +31,7 @@ SelfControl uses a **three-layer persistence architecture** to ensure blocks sur
 
 1. [Multi-Layer Persistence Architecture](#1-multi-layer-persistence-architecture)
 2. [Daemon Boot Sequence](#2-daemon-boot-sequence)
-3. [Scheduled Block Recovery](#3-scheduled-block-recovery-startmissedbloclifneeded)
+3. [Scheduled Block Recovery](#3-scheduled-block-recovery)
 4. [Continuous Monitoring Architecture](#4-continuous-monitoring-architecture)
 5. [User Tampering Resistance](#5-user-tampering-resistance)
 6. [macOS Update Risks](#6-macos-update-risks)
@@ -68,10 +68,11 @@ launchd starts selfcontrold (RunAtLoad=true, KeepAlive=true)
 │  ├── /etc/pf.anchors/org.eyebeam contains rules                 │
 │  └── Check: SCBlockUtilities.blockRulesFoundOnSystem            │
 │                                                                  │
-│  LAYER 3: Scheduled Block Recovery                               │
-│  ├── ApprovedSchedules in daemon settings                       │
-│  ├── ~/Library/LaunchAgents/org.eyebeam.selfcontrol.schedule.*  │
-│  └── Check: startMissedBlockIfNeeded()                          │
+│  LAYER 3: Root Schedule Reconciliation                           │
+│  ├── V1/V2 ApprovedSchedules in daemon settings                 │
+│  ├── Immutable V2 ApprovedScheduleCommitments envelopes         │
+│  ├── Absolute half-open start/end bounds                        │
+│  └── Check: SCDaemonScheduler startup evaluation               │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
      │
@@ -90,7 +91,9 @@ ANY layer detects block → Start checkup timer (1-second monitoring)
 | Firewall rules | `/etc/pf.anchors/org.eyebeam` | root | 15-second integrity check |
 | Hosts backup | `/etc/hosts.bak` | root | Used for recovery |
 | Approved schedules | Daemon plist | root | Pre-authorized on commit |
-| Launchd jobs | `~/Library/LaunchAgents/` | user | launchd persistence |
+| V2 commitment envelopes | Daemon plist | root | Immutable owner/absolute-week admission, including zero segments |
+| Active provenance | Daemon plist | root | Distinguishes manual/test/V1/V2 ownership |
+| V1 Launchd jobs (drain only) | `~/Library/LaunchAgents/` | user | launchd persistence |
 
 ---
 
@@ -126,13 +129,12 @@ When the system boots, `launchd` starts the daemon due to `RunAtLoad=true` in it
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Step 3: Check for Missed Scheduled Blocks (async)               │
+│  Step 3: Start Root Schedule Evaluator                           │
 │                                                                  │
-│  dispatch_async(background_queue, ^{                             │
-│      [self startMissedBlockIfNeeded];                            │
-│  });                                                             │
+│  [self.scheduler start];                                         │
 │                                                                  │
-│  → Recovers scheduled blocks that should be active NOW           │
+│  → Reads root records, reconciles NOW, arms next exact boundary   │
+│  → Also registers wake/clock/timezone recovery triggers           │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -162,15 +164,50 @@ Each layer serves as a fallback for the others:
 
 ---
 
-## 3. Scheduled Block Recovery (startMissedBlockIfNeeded)
+## 3. Scheduled Block Recovery
 
-This is the most sophisticated recovery mechanism. It handles the case where:
+### Current V2 Root-Store Reconciliation
+
+At daemon startup, `SCDaemonScheduler` reads validated records owned by the
+relevant console/active user, selects the desired record using
+`approvedStartDate <= now < approvedEndDate`, and reconciles it through
+`SCDaemonBlockMethods`. It then arms a one-shot wall-clock timer for the next
+start/end boundary.
+
+The same evaluation runs after wake, wall-clock or timezone changes, schedule
+mutation, and active-block completion, plus a 60-second backstop. This makes
+restart recovery independent of login, Background Items permission, a CLI
+path, and per-segment user plists.
+
+Manual and test blocks are not replaced. A V2 mutation that selects a
+different schedule while a schedule-owned block is active also defers rather
+than executing an unsafe remove-then-add transition. The existing one-minute
+inter-segment compatibility gap remains.
+
+The separate root `ApprovedScheduleCommitments` map preserves admission state
+across reboot even when app-local commitment defaults/manifests are absent.
+The scheduler evaluates segment records; the envelope prevents a different
+unexpired overlapping commitment from being admitted, including when travel
+changed the local `weekKey` or the commitment has zero segments. Any unexpired
+overlapping schedule record blocks admission; live V1 records specifically
+drain rather than being replaced. Legacy registration reciprocally rejects a
+window overlapping an unexpired V2 envelope. Release builds cannot bulk-clear
+either authority map; the DEBUG-only test path clears records and envelopes
+together under the daemon mutation lock.
+
+### Legacy V1 `startMissedBlockIfNeeded` Reference
+
+> The following implementation description applies to the pre-PER-383 V1
+> LaunchAgent path and is retained for bounded rollback/drain support. It is
+> not the recovery mechanism for a V2 record.
+
+This legacy recovery mechanism handles the case where:
 - The system rebooted during a scheduled block window
 - The launchd job didn't fire because the system was off at the scheduled start time
 
 **Source:** `Daemon/SCDaemon.m:159-341`
 
-### Recovery Logic Flow
+#### Recovery Logic Flow
 
 ```
 startMissedBlockIfNeeded()
@@ -235,7 +272,7 @@ startMissedBlockIfNeeded()
 └─────────────────────────────────────────┘
 ```
 
-### Why authorization:nil Works
+#### Why authorization:nil Worked
 
 When the user commits to a week schedule:
 1. They authenticate with password (once)
@@ -261,6 +298,8 @@ Once a block is detected or started, the daemon runs continuous monitoring.
 |-------|----------|---------|--------|
 | Checkup timer | 1 second | Block expiration, state verification | `SCDaemon.m:111` |
 | Integrity check | 15 seconds | Full rule verification | `SCDaemonBlockMethods.m:355` |
+| Schedule boundary | One-shot absolute time | Prompt V1/V2 start/end reconciliation | `SCDaemonScheduler.m` |
+| Schedule backstop | 60 seconds | Recover missed/coalesced triggers | `SCDaemonScheduler.m` |
 | FSEventStream | ~1.5s throttle | Instant /etc/hosts detection | `SCFileWatcher.m` |
 | Settings sync | 30 seconds | Disk persistence | `SCSettings.m:477` |
 | App blocker poll | 500 ms | Process monitoring | `AppBlocker.m:16` |
@@ -460,7 +499,8 @@ The startup safety check (see [BLOCK_SAFETY_ANALYSIS.md](BLOCK_SAFETY_ANALYSIS.m
 |----------|------------------------|---------------------|
 | Normal reboot during active block | **ACTIVE** | `BlockIsRunning=YES` detected |
 | Block expires during shutdown | **CLEARED** | `checkupBlock` clears on first run |
-| Crash during scheduled block window | **RECOVERED** | `startMissedBlockIfNeeded()` |
+| Crash/reboot during V2 scheduled window | **RECOVERED** | Root scheduler startup evaluation |
+| Wake after crossing a V2 boundary | **RECOVERED** | Explicit wake evaluation plus 60-second backstop |
 | Settings file deleted/corrupted | **DETECTED** | `blockRulesFoundOnSystem()` fallback |
 | /etc/hosts manually cleared | **RESTORED** | `checkBlockIntegrity()` reinstalls |
 | PF rules flushed | **RESTORED** | 15-second integrity check |
@@ -490,11 +530,15 @@ User clicks "Start Block"
 
 ### Sleep/Wake Handling
 
-The daemon does **not** explicitly handle sleep/wake notifications. Instead, it relies on:
+The daemon explicitly observes `NSWorkspaceDidWakeNotification` and asks the
+serialized root scheduler to re-evaluate. It also relies on:
 
-1. **NSTimer auto-resume** - macOS automatically resumes timers after wake
-2. **Filesystem persistence** - Rules in `/etc/hosts` and PF survive sleep
-3. **No explicit state machine** - Checkup timer runs as if no sleep occurred
+1. **Root-store recomputation** - desired state is derived from absolute dates,
+   not from whether a timer fired while awake
+2. **60-second backstop** - recovers a coalesced/missed wake or clock event
+3. **Filesystem persistence** - active `/etc/hosts` and PF rules survive sleep
+4. **Checkup timer continuation** - active-block expiry/integrity resumes after
+   wake
 
 This works because:
 - The block end date is absolute (not a countdown)
@@ -565,7 +609,7 @@ When settings are read from disk:
 
 | Aspect | Rating | Justification |
 |--------|--------|---------------|
-| **Reboot Persistence** | **STRONG** | Three-layer detection (settings, filesystem, scheduled recovery) |
+| **Reboot Persistence** | **STRONG** | Active settings, filesystem remnants, and root schedule reconciliation |
 | **Tampering Resistance** | **STRONG** | Auto-repair within 1.5-15 seconds; KeepAlive restarts daemon |
 | **macOS Compatibility** | **MODERATE** | Uses deprecated APIs; safety check mitigates risk |
 | **Edge Case Handling** | **MODERATE** | Some gaps (Safe Mode, Recovery Mode, daemon corruption) |
@@ -576,7 +620,7 @@ When settings are read from disk:
 
 1. **Blocks reliably survive reboots** through three independent detection mechanisms
 2. **Tampering is auto-repaired** within 1.5 seconds (hosts) to 15 seconds (PF)
-3. **Scheduled blocks recover** even if launchd didn't fire during downtime
+3. **V2 scheduled blocks recover** from root records without a user login, LaunchAgent, or CLI path
 4. **The main risk is macOS platform changes**, but:
    - Block removal is more resilient than installation
    - Safety check detects issues before users can get stuck
@@ -588,7 +632,8 @@ When settings are read from disk:
 |----------|-------------|-----------|
 | **HIGH** | Migrate from `SMJobBless` to `SMAppService` | Replace deprecated API (macOS 13+) |
 | **MEDIUM** | Reduce PF integrity check to 5 seconds | Smaller tampering window |
-| **MEDIUM** | Add explicit sleep/wake handlers | Explicit over implicit behavior |
+| **MEDIUM** | Add fault-injection coverage for wake/clock/timezone coalescing | Prove every recovery trigger against persisted records |
+| **MEDIUM** | Build staged active-to-active replacement | Remove the one-minute compatibility gap without remove-then-add |
 | **LOW** | Add daemon health watchdog | Detect daemon hangs |
 
 ---
@@ -599,8 +644,9 @@ When settings are read from disk:
 
 | File | Purpose | Key Lines |
 |------|---------|-----------|
-| `Daemon/SCDaemon.m` | Boot sequence, XPC listener | 57-95 (start), 159-341 (missed block) |
-| `Daemon/SCDaemonBlockMethods.m` | Checkup timer, integrity checks | 306-371 (checkup), 373-434 (integrity) |
+| `Daemon/SCDaemon.m` | Boot sequence, XPC listener, scheduler trigger wiring | `-start`, `scheduleStateDidChangeWithTrigger:` |
+| `Daemon/SCDaemonScheduler.m` | Root record selection, exact boundary/backstop timers, serialized reconciliation | `performEvaluationForTrigger:`, `armBoundaryAfterDate:` |
+| `Daemon/SCDaemonBlockMethods.m` | Checkup timer, integrity checks, schedule provenance | `checkupBlock`, `checkBlockIntegrity`, scheduled start/end methods |
 | `Common/SCSettings.m` | Settings persistence | 179-223 (reload), 467-482 (sync) |
 | `Common/Utility/SCBlockUtilities.m` | Block state detection | 14-66 (all detection methods) |
 | `Common/SCFileWatcher.m` | FSEventStream wrapper | 42-93 (file monitoring) |
@@ -635,4 +681,4 @@ Key properties:
 
 ---
 
-*Last updated: January 2026*
+*Last updated: July 2026 (PER-383)*

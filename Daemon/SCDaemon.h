@@ -35,10 +35,17 @@ NS_ASSUME_NONNULL_BEGIN
 // The daemon will die if goes for too long without activity.
 - (void)resetInactivityTimer;
 
-// Cleans up a stale schedule by removing it from ApprovedSchedules
-// and deleting the corresponding launchd job plist.
-- (void)cleanupStaleScheduleWithID:(NSString *)scheduleId;
-- (void)cleanupStaleScheduleWithID:(NSString *)scheduleId controllingUID:(uid_t)controllingUID;
+/// Recompute the desired root-owned schedule state. Completion contains static
+/// status/stage/trigger strings only and is safe to return through XPC.
+- (void)scheduleStateDidChangeWithTrigger:(NSString *)trigger;
+- (void)scheduleStateDidChangeWithTrigger:(NSString *)trigger
+                                completion:(nullable void(^)(NSDictionary<NSString *, id> *result))completion;
+
+/// Removes only the user-domain LaunchAgent artifacts for a draining V1
+/// record after the caller has synchronously removed the expired root record.
+/// The root approval store is left untouched.
+- (void)cleanupLegacyScheduleArtifactsWithID:(NSString *)scheduleId
+                               controllingUID:(uid_t)controllingUID;
 
 @end
 

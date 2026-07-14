@@ -1,13 +1,18 @@
-# Timezone Handling in SelfControl
+# Timezone Handling in Fence
 
-This document explains how SelfControl handles timezone changes, including travel scenarios and the design decisions behind the implementation.
+This document explains how Fence handles timezone changes, including travel scenarios and the design decisions behind the implementation.
 
 ## Overview
 
-SelfControl uses a **timezone-rigid** design for anti-circumvention:
+Fence uses a **timezone-rigid** design for anti-circumvention:
 - Block times are stored as **absolute UTC timestamps**
 - Users cannot escape blocks by changing their system timezone
 - For travel, users should set their timezone to the destination **before** committing
+
+Under PER-383, `selfcontrold` is the timing authority for new V2 commitments.
+It compares `NSDate` values directly and re-evaluates when macOS reports a
+timezone or wall-clock change. A timezone change does not rewrite committed
+absolute boundaries.
 
 ---
 
@@ -17,9 +22,13 @@ SelfControl uses a **timezone-rigid** design for anti-circumvention:
 
 | Data | Storage Location | Format |
 |------|------------------|--------|
-| Block start/end times | launchd plist `ProgramArguments` | ISO8601 UTC (`2026-01-06T09:30:00Z`) |
-| When launchd fires | launchd plist `StartCalendarInterval` | Local time (weekday, hour, minute) |
+| V2 block start/end times | Root `ApprovedSchedules` record | `NSDate` absolute timestamps |
+| V2 commitment lock | Root `ApprovedScheduleCommitments` envelope | Owner + absolute week bounds + commitment/generation; present even with zero segments |
+| V2 next firing | `SCDaemonScheduler` wall-clock timer | Next absolute record boundary |
+| V1 block start/end times (drain only) | launchd plist `ProgramArguments` | ISO8601 UTC (`2026-01-06T09:30:00Z`) |
+| V1 launchd trigger (drain only) | launchd plist `StartCalendarInterval` | Local time (weekday, hour, minute) |
 | Commitment end date | NSUserDefaults (`SCWeekCommitment_{weekKey}`) | NSDate (absolute timestamp) |
+| V2 local manifest | NSUserDefaults (`SCScheduleManifest_{weekKey}`) | IDs and absolute dates for local mapping only |
 | Week key | Derived from local time | String (`"2024-12-23"`) |
 
 ### Drawn Allow Windows (Before Commit)
@@ -43,9 +52,19 @@ The timezone conversion only happens **at commit time**:
 
 This is why changing timezone before committing works - the drawn blocks stay visually the same, but the UTC conversion uses the new timezone.
 
-### The Timezone Mismatch
+### Current V2 Time Semantics
 
-There's an intentional mismatch between job firing and job validation:
+V2 has no local-calendar launch trigger after commit. The app uses the current
+calendar/timezone once to compile drawn minute offsets into absolute dates.
+Thereafter the daemon selects a record with the half-open predicate
+`start <= now < end`, arms its next absolute boundary, and re-runs selection on
+timezone or system-clock notifications. The 60-second backstop catches a
+coalesced/missed notification.
+
+### Legacy V1 Timezone Mismatch
+
+V1 rollback/drain jobs retain an intentional mismatch between job firing and
+job validation:
 
 ```
 launchd fires based on:     LOCAL clock time (StartCalendarInterval)
@@ -56,31 +75,43 @@ This prevents circumvention - changing timezone doesn't change when blocks end i
 
 ---
 
-## Job Launch Paths
+## Schedule Launch Paths
 
-Jobs can start via two paths, both using UTC validation:
+### Current Root Scheduler Path (V1 and V2)
 
 ```mermaid
 flowchart TD
-    subgraph Path1["Path 1: launchd → CLI"]
-        A1[launchd fires at local clock time] --> B1[CLI parses --startdate/--enddate]
-        B1 --> C1{now vs UTC dates}
-        C1 -->|now < startDate| D1[Skip - future week]
-        C1 -->|now > endDate| E1[Cleanup - expired]
-        C1 -->|in range| F1[Start block]
-    end
-
-    subgraph Path2["Path 2: Daemon Recovery"]
-        A2[Daemon starts on boot] --> B2[Scan plist files]
-        B2 --> C2[Parse --startdate/--enddate from args]
-        C2 --> D2{now vs UTC dates}
-        D2 -->|now < startDate| E2[Skip]
-        D2 -->|now > endDate| F2[Cleanup]
-        D2 -->|in range| G2[Start block]
-    end
+    A[V2 commit uses current local calendar] --> B[Convert drawn minutes to absolute NSDate bounds]
+    B --> C[Root ApprovedSchedules contains V1/V2 absolute bounds]
+    C --> D[SCDaemonScheduler arms next absolute boundary]
+    D --> E{startup / timer / wake / clock / timezone / mutation / completion / backstop}
+    E --> F[Reload root store and compare absolute now]
+    F -->|start <= now < end| G[Apply desired record or defer by provenance]
+    F -->|outside every window| H[Remain idle or end schedule-owned block]
 ```
 
-### Path 1: launchd → CLI
+A timezone change can change which week key the UI displays, but it cannot
+move the already-stored start/end instants. The scheduler reads both V1 and V2
+dates from root `ApprovedSchedules`; it does not recover timing by parsing a
+LaunchAgent. Separately, the root commitment envelope compares absolute week
+bounds, so a shifted `weekKey` cannot make an overlapping week recommittable.
+
+### Legacy V1 Redundant LaunchAgent Trigger
+
+Draining V1 records may also be triggered by their historical user
+LaunchAgent/CLI path. It is redundant with root-scheduler reconciliation and
+exists only for rollback/drain. New V2 commitments do not create this path.
+
+```mermaid
+flowchart TD
+    A1[launchd fires V1 job at local clock time] --> B1[CLI parses --startdate/--enddate]
+    B1 --> C1{now vs absolute dates}
+    C1 -->|now < startDate| D1[Skip - future week]
+    C1 -->|now > endDate| E1[Cleanup - expired]
+    C1 -->|in range| F1[Ask daemon to start approved V1 record]
+```
+
+#### launchd → CLI validation
 
 **File:** `cli-main.m` (lines 146-190)
 
@@ -101,26 +132,6 @@ if (blockEndDateArg == nil || [now compare:blockEndDateArg] == NSOrderedDescendi
     // Job has expired - cleanup
     // ...
 }
-```
-
-### Path 2: Daemon Recovery
-
-**File:** `Daemon/SCDaemon.m` (lines 273-304)
-
-```objc
-// Parse dates from plist ProgramArguments
-NSISO8601DateFormatter *isoFormatter = [[NSISO8601DateFormatter alloc] init];
-for (NSString *arg in args) {
-    if ([arg hasPrefix:@"--startdate="]) {
-        startDate = [isoFormatter dateFromString:[arg substringFromIndex:12]];
-    } else if ([arg hasPrefix:@"--enddate="]) {
-        endDate = [isoFormatter dateFromString:[arg substringFromIndex:10]];
-    }
-}
-
-// Check using absolute time
-BOOL expired = ([endDate timeIntervalSinceNow] <= 0);
-BOOL tooEarly = (startDate != nil && [now compare:startDate] == NSOrderedAscending);
 ```
 
 ---
@@ -243,14 +254,14 @@ flowchart TD
 flowchart TD
     subgraph Before["NYC - Monday 1am EST"]
         A1["'This Week' = 2024-12-23 🔒"]
-        A2["Committed, jobs installed"]
+        A2["Immutable root envelope stored"]
     end
 
     subgraph After["LA - Sunday 10pm PST"]
         B1["'This Week' = 2024-12-16 🔓"]
         B2["'Next Week' = 2024-12-23 🔒"]
         B3["Original schedule in 'Next Week'"]
-        B4["Can commit new schedule for 'This Week'"]
+        B4["Different overlapping 'This Week' batch is rejected"]
     end
 
     Before --> After
@@ -264,7 +275,12 @@ flowchart TD
 | "This Week" committed? | YES (locked) | NO (unlocked) |
 | "Next Week" committed? | N/A | YES (locked) |
 | Original schedule visible? | In "This Week" | In "Next Week" |
-| Can commit "This Week"? | No | Yes |
+| Can commit a different overlapping "This Week" batch? | No | **No — root absolute-week overlap rejects it** |
+
+The local UI may initially derive an unlocked state for the shifted
+`SCWeekCommitment_<weekKey>` key, but root admission is fail-closed. An exact
+commitment+generation retry is idempotent; a different overlapping batch is
+rejected independently of the local week key.
 
 ---
 
@@ -316,11 +332,31 @@ sequenceDiagram
     UI-->>User: Editing enabled ✅
 ```
 
+This UI projection is not the admission authority. If local marker lookup says
+unlocked while an unexpired root envelope overlaps the selected absolute week,
+a different commit is still rejected.
+
 ---
 
 ## Cleanup Safety
 
-### What Gets Cleaned vs Preserved
+Unexpired commitment envelopes are immutable, and admission cannot replace
+their segment records with a different batch. The only in-place record change
+is monotonic strictify, which can add enforcement but not loosen identity,
+bounds, mode, or content. Admission compares authenticated owner plus absolute
+week bounds, not only the local week key. An exact same-batch identity/content
+retry is idempotent; a different overlapping batch is rejected.
+Expired/out-of-window records can drain through normal cleanup, and an envelope
+with zero segments remains a real commitment until its absolute end.
+
+Unexpired V1 records are never removed to make room for V2. They continue to
+drain and reject an overlapping V2 envelope. The compatibility guard also runs
+in the other direction: a legacy V1 registration is rejected if its absolute
+window overlaps an unexpired V2 envelope, including after a timezone-derived
+week-key shift. Release builds reject bulk clearing; DEBUG tests clear both
+root maps together.
+
+### Legacy V1 Cleanup
 
 **File:** `Block Management/SCScheduleManager.m` (lines 851-925)
 
@@ -356,19 +392,27 @@ flowchart TD
 
 ### Recommit After Travel
 
-When user commits for "This Week" after traveling:
+When a user commits for "This Week" after traveling:
 
 1. **New endDate calculated** in current timezone
-2. **Overwrites** old commitment value (same key, new date)
-3. **New launchd jobs** created with new UTC dates
-4. **Stale jobs** cleaned if their endDate has passed
+2. **One V2 owner/absolute-week batch** is checked against root envelopes and
+   schedule records, including V1
+3. **Exact same identity and record content** returns idempotently
+4. **Different unexpired overlap** is rejected even if `weekKey` shifted
+5. **New non-overlapping commitment** stores an immutable envelope plus zero or
+   more records; the local manifest remains a mapping aid
+6. **No new LaunchAgents** are created, and live V1 jobs are not replaced
 
 ```objc
-// commitToWeekWithOffset: (lines 562-565)
-NSString *weekKey = [self weekKeyForOffset:weekOffset];  // "2024-12-16"
-NSString *storageKey = [kWeekCommitmentPrefix stringByAppendingString:weekKey];
-[[NSUserDefaults standardUserDefaults] setObject:endOfWeek forKey:storageKey];
-// endOfWeek = Sunday 23:59:59 in CURRENT timezone (LA)
+NSString *weekKey = [self weekKeyForOffset:weekOffset];
+// weekStart/weekEnd are resolved with the current local calendar.
+[xpc replaceScheduledCommitmentForWeekKey:weekKey
+                             weekStartDate:weekStart
+                               weekEndDate:weekEnd
+                              commitmentID:commitmentID
+                                generation:generation
+                                  segments:absoluteSegments
+                                     reply:...];
 ```
 
 ---
@@ -379,12 +423,20 @@ NSString *storageKey = [kWeekCommitmentPrefix stringByAppendingString:weekKey];
 
 > **Before traveling:** Change your Mac's timezone to your destination in System Preferences, **then** commit your schedule. Your blocks will operate correctly in the destination timezone.
 
+If the week is already committed, changing timezone does not move it and does
+not permit an overlapping replacement. The original absolute schedule remains
+authoritative until its envelope expires.
+
 ### Why This Matters
 
 | If you... | Then... |
 |-----------|---------|
-| Commit in origin timezone, then travel | Blocks fire at destination local time, but end at origin timezone's midnight |
+| Commit a V2 week in origin timezone, then travel | Every stored start/end remains the same absolute instant and therefore appears shifted in destination local time |
 | Change to destination timezone first, then commit | Everything aligned - blocks work correctly at destination |
+
+Draining V1 jobs retain their local `StartCalendarInterval`, but the CLI still
+validates the original absolute start/end dates. That compatibility behavior
+must not be used to infer V2 timing.
 
 ### Premature Unlock / Zombie Lock
 
@@ -403,15 +455,18 @@ This is intentional - it prevents timezone circumvention while providing predict
 
 | Component | Timezone Behavior |
 |-----------|-------------------|
-| `StartCalendarInterval` | Local time (when launchd fires) |
-| `--startdate` / `--enddate` | UTC (validation) |
+| V2 root start/end dates | Absolute `NSDate` values selected by `selfcontrold` |
+| V2 exact timer | Absolute wall-clock boundary; recomputed after clock/timezone changes |
+| V1 `StartCalendarInterval` | Local time (rollback/drain only) |
+| V1 `--startdate` / `--enddate` | UTC validation (rollback/drain only) |
 | Week key calculation | Local time (can shift) |
 | Commitment endDate | Absolute NSDate (doesn't shift) |
 | `isCommitted` check | Compares absolute times |
-| Cleanup logic | Uses UTC endDate comparison |
+| V2 admission | Authenticated owner + absolute-week overlap; immutable envelope survives local marker/week-key drift |
+| V1 cleanup | Uses absolute endDate comparison |
 
 **Design principle:** Blocks are anchored to **absolute time** for security. Users control their experience by setting timezone **before** committing.
 
 ---
 
-*Last updated: January 2025*
+*Last updated: July 2026 (PER-383)*

@@ -100,9 +100,17 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// Gets commitment end date for a specific week offset
 - (nullable NSDate *)commitmentEndDateForWeekOffset:(NSInteger)weekOffset;
 
-/// Commits to a specific week (0 = current, 1 = next). Returns YES only after
-/// every required daemon approval and launchd job has been installed and
-/// verified; a failed install is rolled back and is not recorded as committed.
+/// Commits to a specific week (0 = current, 1 = next) through the root-owned
+/// V2 schedule store. The callback is delivered on the main queue. `verified`
+/// is YES only when persistence, exact post-write verification, and immediate
+/// reconciliation all succeeded. If root persistence succeeded but immediate
+/// reconciliation did not, the week remains locally locked (fail closed) and
+/// the callback returns NO with an error describing that state.
+- (void)commitToWeekWithOffset:(NSInteger)weekOffset
+                    completion:(void(^)(BOOL verified, NSError * _Nullable error))completion;
+
+/// Synchronous compatibility wrapper. UI code should use the completion-based
+/// API so authorization and daemon reconciliation never block the main thread.
 - (BOOL)commitToWeekWithOffset:(NSInteger)weekOffset;
 
 /// Legacy method - commits to current week

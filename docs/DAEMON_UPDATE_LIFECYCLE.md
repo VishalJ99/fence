@@ -4,22 +4,31 @@ This document describes how the privileged daemon (`selfcontrold`) gets updated 
 
 ## Overview
 
-The daemon is installed via `SMJobBless` to `/Library/PrivilegedHelperTools/org.eyebeam.selfcontrold`. It only gets updated when the main app explicitly reinstalls it - **not** when launchd jobs fire.
+The daemon is installed via `SMJobBless` to
+`/Library/PrivilegedHelperTools/org.eyebeam.selfcontrold`. The current app runs
+a protocol-and-capability handshake after launch and repairs a missing,
+unreachable, or incompatible helper once. Marketing-version ordering is not
+the authority.
+
+PER-383 removes ordinary schedule commit as an installation trigger. A V2
+commit requires daemon protocol 5 plus `root-schedule-store-v2` and
+`root-schedule-timer-v1`; if the launch-time repair did not produce that
+contract, the commit fails closed instead of writing partial state. Manual
+block installation retains its existing explicit helper-install flow.
 
 ## Update Triggers
 
 ```mermaid
 flowchart TB
     subgraph Triggers["Daemon Update Triggers"]
-        T1[User commits a schedule]
-        T2[App launches with active block]
-        T3[User starts manual block]
+        T1[App launch handshake finds helper missing/unreachable/incompatible]
+        T2[User starts manual block]
     end
 
     subgraph NoUpdate["Does NOT Trigger Update"]
-        N1[Launchd job fires]
-        N2[App launches, no active block]
-        N3[CLI executes]
+        N1[Compatible V2 schedule commit]
+        N2[Root scheduler boundary fires]
+        N3[Legacy V1 CLI executes]
     end
 
     subgraph Update["Daemon Update Flow"]
@@ -31,13 +40,12 @@ flowchart TB
 
     T1 --> U1
     T2 --> U1
-    T3 --> U1
     U1 --> U2
     U2 --> U3
     U3 --> U4
 
     N1 -.->|Uses existing daemon| X[No update]
-    N2 -.->|Skips version check| X
+    N2 -.->|Existing daemon evaluates| X
     N3 -.->|Just XPC call| X
 ```
 
@@ -45,25 +53,24 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    A[App Launches] --> B{modernBlockIsRunning?}
+    A[App Launches] --> C[Wait 0.5s]
+    C --> D[XPC: getCompatibilityInfo]
+    D --> E{Protocol + required capabilities compatible?}
 
-    B -->|YES| C[Wait 0.5s]
-    C --> D[XPC: getVersion]
-    D --> E{Compare versions}
-
-    E -->|App > Daemon| F[reinstallDaemon]
+    E -->|NO / unreachable| F[One debounced reinstallDaemon attempt]
     F --> G[SMJobRemove]
     G --> H[SMJobBless]
     H --> I[New daemon installed ✓]
 
-    E -->|App <= Daemon| J[No action needed]
-
-    B -->|NO| K[Skip version check]
-    K --> L[Old daemon stays until next commit]
+    E -->|YES| J[Use existing daemon]
+    I --> K[Reconnect and repeat handshake once]
+    K --> L{Compatible now?}
+    L -->|yes| J
+    L -->|no| M[Report typed incompatibility; V2 commit remains blocked]
 
     style F fill:#ff9999
     style I fill:#99ff99
-    style L fill:#ffff99
+    style M fill:#ffff99
 ```
 
 ## Sparkle Update Scenario
@@ -75,36 +82,30 @@ sequenceDiagram
     participant App as Fence.app
     participant D as Daemon
 
-    Note over U,D: Scenario 1: Block is running during update
-
     U->>S: Check for updates
     S->>S: Download new Fence.app
     S->>App: Relaunch app
-    App->>App: modernBlockIsRunning? → YES
-    App->>D: XPC: getVersion
-    D-->>App: "4.0.1" (old)
-    App->>App: 4.0.2 > 4.0.1 → OUTDATED
-    App->>D: SMJobRemove (kill old)
-    App->>D: SMJobBless (install new)
-    Note over D: New daemon v4.0.2 running ✓
+    App->>D: getCompatibilityInfo
+    D-->>App: protocol, build, marketing version, capabilities
+    alt Compatible contract
+        App->>App: Keep installed helper
+    else Missing, unreachable, or incompatible
+        App->>D: One SMJobRemove + SMJobBless repair
+        App->>D: Reconnect and repeat handshake
+        D-->>App: Compatible contract or typed failure
+    end
 
-    Note over U,D: Scenario 2: No block running during update
-
-    U->>S: Check for updates
-    S->>S: Download new Fence.app
-    S->>App: Relaunch app
-    App->>App: modernBlockIsRunning? → NO
-    App->>App: Skip version check
-    Note over D: Old daemon stays installed
-
-    Note over U,D: Later: User commits schedule
+    Note over U,D: Later: user commits a V2 schedule
     U->>App: Click "Commit"
-    App->>App: installDaemon: called
-    App->>D: SMJobRemove + SMJobBless
-    Note over D: New daemon installed ✓
+    App->>D: Verify root-scheduler compatibility
+    App->>D: Authenticated owner/week batch
+    Note over D: No ordinary reinstall and no per-segment LaunchAgent
 ```
 
-## Launchd Job Flow (No Daemon Update)
+## Legacy V1 LaunchAgent Flow (No Daemon Update)
+
+> This section records rollback/drain behavior for already-installed V1 jobs.
+> New V2 commitments have no user LaunchAgent or CLI boundary process.
 
 ```mermaid
 flowchart TB
@@ -129,7 +130,8 @@ flowchart TB
     L2 --> C1
     C1 --> C2
     C2 --> C3
-    C3 --> D1
+    C3 --> C4
+    C4 --> D1
     D1 --> D2
 
     Note1[CLI talks to EXISTING daemon]
@@ -141,63 +143,65 @@ flowchart TB
     style Note3 fill:#ffff99
 ```
 
-## Version Comparison
+## Compatibility Authority
 
-Both app and daemon use the same version from `version-header.h`:
+Both app and daemon still expose release/build metadata, but it is diagnostic
+only. `AppController` and `SCXPCClient` gate behavior on the monotonic daemon
+protocol plus named capabilities. This avoids the retained-helper case where a
+numerically newer historical marketing version lacks selectors required by a
+newer Fence app.
 
-```c
-#define SELFCONTROL_VERSION_STRING @"4.0.2"
-```
+For PER-383 the root-schedule write requires:
 
-Comparison logic in `AppController.m`:
+- `SCDaemonProtocolVersionRootScheduler` (protocol 5 or newer);
+- `root-schedule-store-v2`; and
+- `root-schedule-timer-v1`.
 
-```objc
-if ([SELFCONTROL_VERSION_STRING compare:daemonVersion options:NSNumericSearch] == NSOrderedDescending) {
-    // App version > daemon version → reinstall
-    [self reinstallDaemon];
-}
-```
+The app performs at most one debounced repair attempt, reconnects, and repeats
+the handshake. It does not assume that `SMJobBless` success means the new
+contract is usable.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `Common/SCXPCClient.m` | `installDaemon:` method with SMJobBless |
-| `AppController.m` | Version check on app launch |
-| `version-header.h` | Single source of truth for version |
-| `Daemon/SCDaemonXPC.m` | `getVersionWithReply:` implementation |
+| `Common/SCXPCClient.m` | Protocol/capability predicates and root-schedule gate |
+| `AppController.m` | Launch-time compatibility check and single repair attempt |
+| `Daemon/SCDaemonProtocol.h` | Monotonic protocol and capability names |
+| `Daemon/SCDaemonXPC.m` | Compatibility reply and V2 batch implementation |
 
 ## Log Messages
 
 When the app launches, look for these log messages:
 
 ```
-# Block running → version check runs
-AppController: Daemon update check - modernBlockIsRunning=YES, appVersion=4.0.2
-AppController: Block is running, will check daemon version in 0.5s...
-AppController: Daemon version check - daemonVersion=4.0.2, appVersion=4.0.2
-AppController: Daemon UP-TO-DATE (4.0.2) - no action needed
+# App launch → compatibility check always runs
+AppController: Checking daemon protocol capabilities in 0.5s...
+AppController: Daemon compatible (protocol=5, build=..., marketing=...)
 
-# Block running, daemon outdated
-AppController: Daemon OUTDATED (4.0.1 < 4.0.2) - reinstalling...
+# Missing selector/capability → one repair
+AppController: Daemon incompatible (reason=..., protocol=..., build=..., marketing=...)
+Attempting to reinstall daemon...
 
-# No block running → skip check
-AppController: Daemon update check - modernBlockIsRunning=NO, appVersion=4.0.2
-AppController: No block running - skipping daemon version check (will update on next commit)
+# Repair is not trusted without a post-repair handshake
+Refreshing helper tool connection and verifying compatibility once...
 ```
 
 ## Summary
 
 | Event | Daemon Updated? | Why |
 |-------|-----------------|-----|
-| User commits schedule | ✅ Yes | `installDaemon:` called before registering jobs |
-| App launches with active block | ✅ Yes | Version check + reinstall if outdated |
+| App launches | Only if needed | Protocol/capability handshake repairs once when missing, unreachable, or incompatible |
+| User commits V2 schedule | ❌ No in ordinary flow | Compatible helper receives one authenticated root-store batch |
 | User starts manual block | ✅ Yes | `installDaemon:` called |
-| Launchd job fires | ❌ No | CLI just connects to existing daemon |
-| App launches, no block | ❌ No | Version check skipped |
+| Root scheduler boundary fires | ❌ No | Existing daemon evaluates its root store |
+| Legacy V1 LaunchAgent fires | ❌ No | CLI just connects to existing daemon |
 
-**Worst case:** User updates via Sparkle with no active block → old daemon until next commit (typically within a week).
+**Failure behavior:** If the post-repair contract is still incompatible, V2
+commitment creation fails before mutation. Existing root-owned records remain
+available to the installed daemon; no partial per-segment write is attempted.
 
 ---
 
-*Last updated: January 2026*
+*Last updated: July 2026 (PER-383)*

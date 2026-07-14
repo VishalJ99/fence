@@ -1,6 +1,6 @@
 # Fence System Architecture
 
-> **Version:** 3.4.7 (Build 647; historical targets still use SelfControl names)
+> **Version:** 3.4.11 telemetry baseline plus PER-383 scheduler cutover (historical targets still use SelfControl names)
 > **Purpose:** Comprehensive technical documentation for developers and AI agents
 > **Last Updated:** July 2026
 
@@ -36,6 +36,8 @@ Fence is a macOS application that blocks selected websites, network resources, a
 | **Settings in /usr/local/etc** | Survives app deletion; requires root to modify |
 | **App blocking via process kill** | Polls running apps every 500ms, kills blocked ones |
 | **Privacy-safe remote diagnostics** | Typed app events plus a root-owned, consent-gated daemon spool; raw entries never leave the machine |
+| **Root-owned schedule timing** | V2 owner/absolute-week commitment envelopes and segments are persisted atomically and reconciled by `selfcontrold`; user LaunchAgents are V1 drain-only |
+| **Immutable commitment admission** | An unexpired overlapping envelope or schedule record (including V1) rejects a different batch even if the local `weekKey` changed; an exact same-batch retry with matching commitment+generation and records is idempotent. The legacy registration path reciprocally rejects an unexpired overlapping V2 envelope |
 
 ### Technology Stack
 
@@ -56,7 +58,7 @@ Fence is a macOS application that blocks selected websites, network resources, a
 graph TB
     subgraph "User Space"
         APP[Fence.app<br/>Bundle: org.eyebeam.Fence]
-        CLI[selfcontrol-cli<br/>Command Line Tool]
+        CLI[selfcontrol-cli<br/>V1 Compatibility Tool]
     end
 
     subgraph "Privileged Space (root)"
@@ -66,7 +68,7 @@ graph TB
     subgraph "System Resources"
         HOSTS[/etc/hosts]
         PF[/etc/pf.conf<br/>+ /etc/pf.anchors/org.eyebeam]
-        SETTINGS[/usr/local/etc/.{hash}.plist]
+        SETTINGS[/usr/local/etc/.{hash}.plist<br/>active state + V1/V2 schedules]
         LAUNCHD[launchd]
     end
 
@@ -75,6 +77,7 @@ graph TB
     DAEMON -->|Modify| HOSTS
     DAEMON -->|pfctl| PF
     DAEMON -->|Read/Write| SETTINGS
+    SETTINGS -->|V2 wall-clock authority| DAEMON
     LAUNCHD -->|Manages| DAEMON
 
     style DAEMON fill:#ff6b6b,color:#fff
@@ -88,7 +91,7 @@ graph TB
 graph LR
     subgraph "Application Layer"
         A[SelfControl.app]
-        B[selfcontrol-cli]
+        B[selfcontrol-cli<br/>V1 compatibility]
     end
 
     subgraph "Service Layer"
@@ -162,11 +165,11 @@ classDiagram
 ```
 
 **Key Files:**
-| File | Lines | Purpose |
+| File | Lines (2026-07-14) | Purpose |
 |------|-------|---------|
-| `AppController.m` | ~806 | Main app controller, block installation |
-| `TimerWindowController.m` | ~450 | Timer display, add/extend sheets |
-| `DomainListWindowController.m` | ~300 | Blocklist editor table view |
+| `AppController.m` | 2018 | Main app controller, block installation, helper compatibility repair |
+| `TimerWindowController.m` | 482 | Timer display, add/extend sheets |
+| `DomainListWindowController.m` | 465 | Blocklist editor table view |
 
 ### 3.2 Daemon (selfcontrold)
 
@@ -178,8 +181,19 @@ classDiagram
         -NSXPCListener* listener
         -NSTimer* checkupTimer
         -NSTimer* inactivityTimer
+        -SCDaemonScheduler* scheduler
         +applicationDidFinishLaunching()
         +startCheckupTimer()
+        +scheduleStateDidChangeWithTrigger()
+    }
+
+    class SCDaemonScheduler {
+        -dispatch_queue_t queue
+        -dispatch_source_t boundaryTimer
+        -dispatch_source_t backstopTimer
+        +desiredScheduleRecordAtDate()
+        +nextBoundaryAfterDate()
+        +evaluateForTrigger()
     }
 
     class SCDaemonXPC {
@@ -205,16 +219,20 @@ classDiagram
     }
 
     SCDaemon --> SCDaemonXPC
+    SCDaemon --> SCDaemonScheduler
     SCDaemon --> SCDaemonBlockMethods
+    SCDaemonScheduler --> SCDaemonBlockMethods
     SCDaemonBlockMethods --> BlockManager
 ```
 
 **Key Files:**
-| File | Lines | Purpose |
+| File | Lines (2026-07-14) | Purpose |
 |------|-------|---------|
-| `Daemon/SCDaemon.m` | ~200 | Daemon lifecycle, timers |
-| `Daemon/SCDaemonBlockMethods.m` | ~388 | Block control methods |
-| `Daemon/SCDaemonXPC.m` | ~150 | XPC connection handling |
+| `Daemon/SCDaemon.m` | 475 | Daemon lifecycle plus scheduler trigger wiring |
+| `Daemon/SCDaemonScheduler.m` | 468 | V1/V2 selection, exact boundary timer, 60-second backstop, serialized reconciliation |
+| `Daemon/SCDaemonScheduler.h` | 79 | Injected scheduler contract, V2 keys, and active-source constants |
+| `Daemon/SCDaemonBlockMethods.m` | 1106 | Block control, provenance, physical apply/teardown |
+| `Daemon/SCDaemonXPC.m` | 2081 | Authenticated XPC, immutable V2 envelope, validated record store, strictify, diagnostics |
 
 ### 3.3 Block Management Layer
 
@@ -255,14 +273,72 @@ classDiagram
 ```
 
 **Key Files:**
-| File | Lines | Purpose |
+| File | Lines (2026-07-14) | Purpose |
 |------|-------|---------|
-| `Block Management/BlockManager.m` | ~531 | Orchestrates all blocking |
-| `Block Management/HostFileBlocker.m` | ~250 | /etc/hosts manipulation |
-| `Block Management/PacketFilter.m` | ~180 | PF rule generation |
-| `Block Management/SCBlockEntry.m` | ~120 | Block entry data model |
+| `Block Management/BlockManager.m` | 960 | Orchestrates all blocking |
+| `Block Management/HostFileBlocker.m` | 332 | /etc/hosts manipulation |
+| `Block Management/PacketFilter.m` | 491 | PF rule generation |
+| `Block Management/SCBlockEntry.m` | 154 | Block entry data model |
 
-### 3.4 Telemetry and consistency diagnostics
+### 3.4 Root-Owned Schedule Authority
+
+New commitments are V2 owner/absolute-week transactions. `SCScheduleManager`
+computes the complete week (which may contain zero blocking segments), and
+`SCXPCClient` sends one authenticated batch after
+requiring daemon protocol 5 plus `root-schedule-store-v2` and
+`root-schedule-timer-v1`. `SCDaemonXPC` derives the owner from the accepted XPC
+connection and validates the envelope and every segment. If the same
+commitment+generation and records are already stored, the call is idempotent. A different
+batch is rejected whenever its absolute week overlaps an unexpired commitment
+envelope or schedule record (including V1) owned by that user, regardless of a
+timezone-derived `weekKey` change. Otherwise the daemon atomically stores the immutable
+`ApprovedScheduleCommitments` envelope plus its `ApprovedSchedules` records,
+persists once, and verifies the envelope plus every validated record field in
+the post-sync SCSettings view (not through an independent raw-disk reread).
+
+```mermaid
+sequenceDiagram
+    participant App as Fence.app
+    participant XPC as SCXPCClient
+    participant Store as SCDaemonXPC/root settings
+    participant Scheduler as SCDaemonScheduler
+    participant Block as SCDaemonBlockMethods
+
+    App->>App: Compile non-overlapping absolute segments
+    App->>XPC: replaceScheduledCommitmentForWeekKey(...)
+    XPC->>XPC: Require protocol 5 + root scheduler capabilities
+    XPC->>Store: Authenticated owner/week batch
+    Store->>Store: Validate overlap/idempotency; persist + verify envelope/records
+    Store->>Scheduler: Reconcile mutation
+    Scheduler->>Scheduler: Select start <= now < end
+    Scheduler->>Block: Apply desired record or defer by provenance
+    Store-->>App: Aggregate verified result
+```
+
+The evaluator runs on a serial queue at startup, the next exact wall-clock
+boundary, wake, clock/timezone change, store mutation, active-block completion,
+and a 60-second backstop. Root records and recomputation are the correctness
+authority; timers provide promptness.
+
+Manual and test blocks are never replaced. An active-to-active V2 mutation is
+also deferred because the physical layer does not yet support staging new
+PF/hosts/AppBlocker rules before removing obsolete ones. The existing
+one-minute inter-segment compatibility gap remains in this cutover.
+
+Existing unexpired V1 approvals/jobs and CLI selectors remain only for bounded
+current/next-week rollback/drain. They are not replaced by a V2 commit: an
+overlapping V2 batch is rejected until they expire. Diagnostics and strictify
+inspect user LaunchAgents only for V1 records. See
+[`docs/SCHEDULE_JOB_LIFECYCLE.md`](docs/SCHEDULE_JOB_LIFECYCLE.md).
+
+The compatibility guard is bidirectional: the legacy V1 registration selector
+also rejects any request whose absolute start/end overlaps an unexpired V2
+envelope for the authenticated owner. Release builds reject the bulk
+approved-schedule clear selector. DEBUG builds keep that test escape hatch but
+clear `ApprovedSchedules` and `ApprovedScheduleCommitments` together so tests
+cannot leave an orphaned authority map.
+
+### 3.5 Telemetry and consistency diagnostics
 
 The app is the only process that links Sentry. `selfcontrold` never owns a
 network transport: it writes privacy-validated records under
@@ -284,12 +360,23 @@ Core boundaries:
   and the final serialized-payload privacy tripwire.
 - `Common/SCTelemetrySpool` owns locked/atomic per-UID queue storage, hard
   size/count/age bounds, consent generations, fetch/ack, and opt-out purge.
-- `SCScheduleManager` builds an app-local expected active/future projection.
-  `SCDaemonXPC` compares it to root settings, validated launchd plists, loaded
-  jobs, and hosts/PF/app state, returning no entries, dates, labels, or IDs.
+- `SCScheduleManager` builds an app-local expected active/future projection and
+  V2 manifest. `SCDaemonXPC` compares it to root settings and
+  hosts/PF/app state; validated plist/loaded-job probes apply only to V1. The
+  reply contains no entries, dates, labels, UIDs, revisions, or IDs.
+- `schedule.commit_store_failed` reports aggregate V2 transaction failures in
+  the app. `schedule.reconcile_anomaly` reports daemon apply/load/teardown
+  failures through the existing per-UID spool. Successful/no-op evaluations
+  and intentional arbitration deferrals do not emit.
 - `SCBlockApplyResult` and teardown results make physical postconditions—not
   declared settings mutation—the success authority for apply, strictify,
   integrity reapply, and cleanup.
+- Active schedule comparison checks owner/source, schedule and policy identity,
+  V2 commitment/generation, allowlist mode, and canonical content. When
+  strictify targets the currently active scheduled record, the daemon holds its
+  mutation lock while it physically applies and verifies additions, then
+  persists the stricter root record; a failed physical append cannot be
+  reported as a successful future-only mutation.
 - A corrupt/unreadable initial SCSettings file is an explicit unavailable
   state. Automatic teardown and ordinary mutation/persistence pause until a
   valid authoritative state recovers (or the narrow first-run bootstrap creates
@@ -465,10 +552,10 @@ flowchart TD
     G --> H[Clear hosts section]
     H --> I[Remove PF rules]
     I --> J[Update settings]
-    J --> K[Kill daemon]
+    J --> K[Stop active-block checkup; root scheduler remains available]
 
     style G fill:#4ecdc4,color:#fff
-    style K fill:#ff6b6b,color:#fff
+    style K fill:#4ecdc4,color:#fff
 ```
 
 ### 5.3 Settings Synchronization
@@ -520,6 +607,7 @@ SelfControl/
 ├── Daemon/                        # PRIVILEGED DAEMON
 │   ├── DaemonMain.m              # Entry point
 │   ├── SCDaemon.m/h              # Lifecycle & XPC listener
+│   ├── SCDaemonScheduler.m/h     # Root schedule timing/reconciliation
 │   ├── SCDaemonBlockMethods.m/h  # Block operations
 │   ├── SCDaemonXPC.m/h           # XPC handler
 │   └── SCDaemonProtocol.h        # XPC interface
@@ -548,6 +636,7 @@ SelfControl/
 | `PacketFilter` | PF rule generation | Firewall rules |
 | `SCBlockEntry` | Block entry data model | New entry formats |
 | `SCDaemonBlockMethods` | Daemon block operations | Block lifecycle |
+| `SCDaemonScheduler` | Root-owned schedule timing and selection | V2 boundaries, wake/reboot/clock recovery, arbitration |
 | `SCSettings` | Centralized settings | New preferences |
 | `SCXPCClient` | App→Daemon communication | New XPC methods |
 
@@ -767,6 +856,15 @@ The current architecture is extensible via:
 | `BlockEndDate` | NSDate | When does block expire? |
 | `ActiveBlocklist` | Array | Currently blocked entries |
 | `ActiveBlockAsWhitelist` | BOOL | Allowlist mode? |
+| `ApprovedSchedules` | Dictionary | Root-owned V1/V2 pre-authorized schedule records |
+| `ApprovedScheduleCommitments` | Dictionary | Root-owned immutable V2 owner/absolute-week envelopes, including zero-segment commitments |
+| `ActiveBlockSource` | String enum | `none`, `manual`, `test`, `legacy_schedule`, or `scheduler_v2` provenance |
+| `ActiveScheduleID` | String | Local idempotency/comparison identifier for a schedule-owned active block |
+| `ActiveScheduleCommitmentID` | String | Local V2 commitment provenance |
+| `ActiveScheduleGeneration` | String | Local V2 commitment generation/idempotency provenance |
+| `ActiveSchedulePolicyRevision` | String | Local V2 policy comparison revision |
+| `ActiveScheduleWeekKey` | String | Local week scope for active V2 provenance |
+| `IsTestBlock` | BOOL | Marks safety-test enforcement so schedule reconciliation defers |
 | `TamperingDetected` | BOOL | Was tampering found? |
 | `EvaluateCommonSubdomains` | BOOL | Auto-block www., mail., etc.? |
 | `IncludeLinkedDomains` | BOOL | Block related domains? |
@@ -805,6 +903,17 @@ The current architecture is extensible via:
 
 // Get daemon version
 - (void)getVersionWithReply:(void(^)(NSString*))reply;
+
+// Atomically admit one immutable authenticated V2 absolute-week commitment
+// (an exact same-batch identity/content retry is idempotent) and reconcile it
+- (void)replaceScheduledCommitmentForWeekKey:(NSString *)weekKey
+                               weekStartDate:(NSDate *)weekStartDate
+                                 weekEndDate:(NSDate *)weekEndDate
+                                commitmentID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                    segments:(NSArray<NSDictionary *> *)segments
+                               authorization:(NSData *)authorization
+                                       reply:(void(^)(NSDictionary *, NSError *))reply;
 ```
 
 ---
@@ -829,6 +938,7 @@ The current architecture is extensible via:
 | `modifyBlockLock` | TimerWindowController | Single add/extend sheet |
 | `strLock` | HostFileBlocker | Thread-safe hosts manipulation |
 | `daemonMethodLock` | SCDaemonBlockMethods | Exclusive block operations |
+| Scheduler serial queue | SCDaemonScheduler | Coalesced desired-state evaluation and timer ownership |
 
 ---
 

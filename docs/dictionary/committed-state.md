@@ -20,8 +20,17 @@ Committed State is entered when a user explicitly confirms their schedule for a 
 2. **Editor is disabled** - Clicking day cells shows an alert instead of opening Editor
 3. **Segments are pre-authorized** - Registered with daemon for password-free execution
 4. **Anti-cheat protection** - Cannot make schedule "looser" (add more allowed time)
+5. **Root envelope is immutable while unexpired** - A different overlapping
+   commitment is rejected even if local defaults are missing or travel changes
+   the displayed week key
+6. **Compatibility and release clears cannot bypass it** - Legacy registration
+   rejects an overlapping live V2 envelope, and release builds reject bulk
+   approved-schedule clearing
 
 The commitment lasts until `commitmentEndDate` (typically end of Sunday).
+The app-local date/manifest drives presentation and mapping, but the root
+`ApprovedScheduleCommitments` envelope is the fail-closed admission authority.
+Losing the local marker cannot permit a different overlapping commitment.
 
 ---
 
@@ -29,8 +38,9 @@ The commitment lasts until `commitmentEndDate` (typically end of Sunday).
 
 - User clicks "Commit to Week" button in `SCWeekScheduleWindowController`
 - Confirmation alert shown with commitment terms
-- Password prompt for daemon installation (once per session)
-- All segments registered with daemon
+- The app verifies daemon protocol/capability compatibility
+- All segments are written as one authenticated owner/week root-store batch
+- Committed UI state is persisted only after the daemon verifies the batch
 
 ---
 
@@ -39,7 +49,7 @@ The commitment lasts until `commitmentEndDate` (typically end of Sunday).
 | File | Purpose |
 |------|---------|
 | `Block Management/SCScheduleManager.h` | `isCommitted` property |
-| `Block Management/SCScheduleManager.m` | `commitScheduleForWeekOffset:` |
+| `Block Management/SCScheduleManager.m` | `commitToWeekWithOffset:completion:` |
 | `SCWeekScheduleWindowController.m` | Commit button action, UI restrictions |
 
 ---
@@ -49,13 +59,17 @@ The commitment lasts until `commitmentEndDate` (typically end of Sunday).
 ```objc
 // Per-week storage keys
 static NSString * const kWeekCommitmentPrefix = @"SCWeekCommitment_";
+static NSString * const kWeekScheduleManifestPrefix = @"SCScheduleManifest_";
 
-// Commitment metadata
-@{
-    @"isCommitted": @YES,
-    @"commitmentEndDate": <NSDate>,
-    @"commitmentStartDate": <NSDate>
-}
+// SCWeekCommitment_<weekKey> stores the absolute week end NSDate.
+// isCommitted is derived by comparing that date with now.
+
+// SCScheduleManifest_<weekKey> stores V2 local mapping metadata:
+// schemaVersion, weekKey, commitmentID, generation, week bounds,
+// and schedule IDs/bounds/source bundle IDs/policy revisions (no entries).
+
+// Root ApprovedScheduleCommitments stores the authoritative immutable
+// owner/absolute-week envelope, including commitments with zero segments.
 ```
 
 ---
@@ -67,12 +81,12 @@ graph TD
     A[User clicks 'Commit to Week'] --> B[Show confirmation alert]
     B --> C{User confirms?}
     C -->|No| D[Abort]
-    C -->|Yes| E[commitScheduleForWeekOffset:]
+    C -->|Yes| E[commitToWeekWithOffset:completion:]
     E --> F[Calculate segments from all bundles]
-    F --> G[Install daemon if needed - PASSWORD PROMPT]
-    G --> H[For each segment: register with daemon]
-    H --> I[For each segment: create launchd job]
-    I --> J[Set isCommitted = YES]
+    F --> G[Require protocol 5 + root scheduler capabilities]
+    G --> H[Send one authenticated owner/week batch]
+    H --> I[Daemon rejects overlap or atomically persists immutable envelope + records]
+    I --> J[Save local V2 manifest and committed end date]
     J --> K[Set commitmentEndDate = end of Sunday]
     K --> L[Reload UI - Editor disabled]
 
@@ -87,6 +101,7 @@ graph TD
 - [Editor](editor.md) - Cannot open when committed
 - [Segment](segment.md) - Created at commit time
 - [Pre-Authorized Schedule](pre-authorized-schedule.md) - Registered at commit time
+- [Root-Owned Schedule](root-owned-schedule.md) - Current V2 committed segment
 - [Week Offset](week-offset.md) - Commitment is per-week
 - [Emergency Unlock](emergency-unlock.md) - Escape mechanism (costs credits)
 

@@ -68,6 +68,8 @@ typedef NS_ENUM(NSInteger, SCDaemonCompatibilityFailureCode) {
     SCDaemonCompatibilityFailureActiveAppendMissing = 5,
     SCDaemonCompatibilityFailureApprovedAppendMissing = 6,
     SCDaemonCompatibilityFailureConsistencyProjectionMissing = 7,
+    SCDaemonCompatibilityFailureRootScheduleStoreMissing = 8,
+    SCDaemonCompatibilityFailureRootScheduleTimerMissing = 9,
 };
 
 static SCDaemonCompatibilityFailureCode SCDaemonCompatibilityFailureCodeForReason(NSString *reason) {
@@ -89,6 +91,12 @@ static SCDaemonCompatibilityFailureCode SCDaemonCompatibilityFailureCodeForReaso
     if ([reason isEqualToString:@"consistency-projection-missing"]) {
         return SCDaemonCompatibilityFailureConsistencyProjectionMissing;
     }
+    if ([reason isEqualToString:@"root-schedule-store-missing"]) {
+        return SCDaemonCompatibilityFailureRootScheduleStoreMissing;
+    }
+    if ([reason isEqualToString:@"root-schedule-timer-missing"]) {
+        return SCDaemonCompatibilityFailureRootScheduleTimerMissing;
+    }
     return SCDaemonCompatibilityFailureUnknown;
 }
 
@@ -98,6 +106,8 @@ static NSString *SCDaemonCompatibilityTelemetryReason(NSString *reason) {
     if ([reason isEqualToString:@"active-append-missing"]) return @"active_append_missing";
     if ([reason isEqualToString:@"approved-append-missing"]) return @"approved_append_missing";
     if ([reason isEqualToString:@"consistency-projection-missing"]) return @"consistency_projection_missing";
+    if ([reason isEqualToString:@"root-schedule-store-missing"]) return @"root_schedule_store_missing";
+    if ([reason isEqualToString:@"root-schedule-timer-missing"]) return @"root_schedule_timer_missing";
     return @"capabilities_missing";
 }
 

@@ -1,12 +1,146 @@
 # Schedule Job Lifecycle
 
-This document describes the complete lifecycle of scheduled blocking jobs, from user input to cleanup.
+This document describes the complete lifecycle of committed schedule segments,
+from user input to cleanup. New commitments use the V2 root scheduler. The
+older per-segment LaunchAgent lifecycle is retained below as a compatibility
+reference for draining V1 commitments.
 
 > **Note:** For timezone handling and travel scenarios, see [TIMEZONE_HANDLING.md](TIMEZONE_HANDLING.md).
 >
 > **Note:** For daemon timers, persistence, and sleep/wake behavior, see [DAEMON_LIFECYCLE.md](DAEMON_LIFECYCLE.md).
 
-## Overview Diagram
+## Current V2 Lifecycle (PER-383)
+
+```mermaid
+flowchart TD
+    A[User commits current or next week] --> B[SCScheduleManager computes absolute segments]
+    B --> C[Preserve existing one-minute inter-segment gap]
+    C --> D[One authenticated owner/week batch over XPC]
+    D --> E{Validate batch + absolute overlap}
+    E -->|same identity + records| F[Idempotent success]
+    E -->|different unexpired overlap or invalid| G[Reject without changing root store]
+    E -->|new non-overlapping commitment| H[Persist immutable envelope + zero or more segments]
+    H --> I[Verify identity in SCSettings post-sync view]
+    F --> J[SCDaemonScheduler recomputes desired record]
+    I --> J
+    J --> K{Desired half-open window active?}
+    K -->|yes, idle| L[Apply block and save local provenance]
+    K -->|no| M[Arm next wall-clock boundary]
+    K -->|manual/test active| N[Defer]
+    K -->|different schedule active| O[Defer active-to-active mutation]
+    L --> M
+    N --> M
+    O --> M
+```
+
+The V2 authority chain is intentionally short:
+
+1. `SCScheduleManager` compiles the weekly UI model into zero or more
+   non-overlapping absolute segments. Segment end dates retain the existing
+   one-minute compatibility gap. Even a zero-segment week is a commitment.
+2. `SCXPCClient` requires daemon protocol 5 and the
+   `root-schedule-store-v2` / `root-schedule-timer-v1` capabilities. Helper
+   repair belongs to this compatibility handshake; an ordinary commit does
+   not reinstall the daemon.
+3. `SCDaemonXPC` authenticates the caller and derives the owner from the audit
+   token. An exact stored batch with matching commitment+generation and records
+   is an idempotent retry. A
+   different batch is rejected when its absolute week overlaps an unexpired
+   commitment envelope or schedule record (including V1) for that owner, even
+   if its local `weekKey` changed after travel. The legacy V1 registration
+   selector applies the reciprocal guard: it rejects a requested segment that
+   overlaps an unexpired V2 commitment envelope.
+4. For a new admissible batch, the daemon persists one immutable
+   `ApprovedScheduleCommitments` envelope plus zero or more
+   `ApprovedSchedules` records. It verifies the envelope and every validated
+   record field in SCSettings' post-sync view before reporting success; this is
+   not an independent raw-disk reread.
+5. `SCDaemonScheduler` serializes evaluation and applies the desired record
+   through `SCDaemonBlockMethods`. The app stores a local V2 manifest only to
+   map its bundle/week model to root records for strictify and diagnostics.
+
+New V2 commits create **no** `~/Library/LaunchAgents` plist and do not invoke
+`selfcontrol-cli` at a segment boundary.
+
+The root envelope is also the commitment-lock authority when app-local state is
+missing or a timezone change maps the same absolute interval to a different
+week key. Loss of `SCWeekCommitment_*` / `SCScheduleManifest_*` can make the UI
+need repair, but it cannot authorize a different overlapping root batch.
+
+### Reconciliation Triggers
+
+| Trigger | Purpose |
+|---|---|
+| Daemon startup | Rebuild desired state after boot, crash, or helper restart |
+| Exact wall-clock boundary | Prompt start/end at the next absolute record boundary |
+| Wake | Catch boundaries crossed while asleep |
+| Clock or timezone change | Recompute from absolute dates after wall-time changes |
+| Store mutation | Apply a newly admitted commitment immediately |
+| Active-block completion | Select the next eligible record after teardown |
+| 60-second backstop | Recover from a missed/coalesced notification or timer |
+
+The timer is a promptness mechanism, not the authority. Every trigger reloads
+root records and derives desired state using half-open bounds
+`approvedStartDate <= now < approvedEndDate`.
+
+### Arbitration and Transition Safety
+
+- Manual and safety-test blocks win while active. The scheduler defers and
+  retries at later triggers rather than replacing them.
+- A V2 mutation that changes the desired record while another schedule-owned
+  policy is active also defers. The cutover does not perform remove-then-add.
+- Before treating an active schedule as already correct, the daemon compares
+  owner/source and schedule identity; for V2 it also compares
+  commitment/generation and policy revision, plus allowlist mode and canonical
+  content. A matching denylist may be stricter than the stored policy, but it
+  may not be weaker.
+- The current one-minute gap between adjacent computed segments remains.
+  Eliminating it requires a separate PF/hosts/AppBlocker primitive that stages
+  the replacement before obsolete rules are dropped.
+- Active provenance (`manual`, `test`, `legacy_schedule`, or `scheduler_v2`)
+  plus schedule/revision/generation identifiers is stored only in root
+  settings. It is used for idempotency and local comparison, not uploaded.
+
+### V2 Strictify and Diagnostics
+
+Live strictify remains monotonic. The app uses its local V2 manifest to map
+bundle additions to root records, and the daemon verifies record persistence.
+If one of those records is the currently active schedule, the daemon holds the
+same mutation lock across active physical append/verification and the future
+root-record update. It persists the stricter future record only after hosts,
+PF, required app-process enforcement, and active settings verify. A retry of an
+already-unioned active list still re-exercises the physical layers instead of
+trusting settings alone. LaunchAgent load/probe checks are performed only for
+V1 records because a V2 record deliberately has no user job.
+
+The same backend distinction applies to startup consistency and support
+snapshots:
+
+- V2: compare app projection → root record → active provenance/physical layers.
+- V1: additionally validate the plist and loaded launchd job.
+
+Remote telemetry receives typed aggregate outcomes only. IDs, dates, UIDs,
+bundle IDs, revisions, entries, and settings values remain local.
+
+### Destructive Test Boundary
+
+The legacy bulk-clear XPC selector is not a release recovery mechanism. Release
+builds reject it even after authorization. DEBUG builds retain it for tests and
+clear `ApprovedSchedules` plus `ApprovedScheduleCommitments` in the same
+locked, persisted mutation. Per-record cleanup otherwise removes only expired
+owner records/envelopes; a live V2 record cannot be unregistered through the
+legacy selector.
+
+## Legacy V1 Compatibility Lifecycle
+
+> The remainder of this document describes the pre-PER-383 LaunchAgent path.
+> Existing V1 approvals/jobs are supported only for bounded current/next-week
+> rollback and drain. Their redundant LaunchAgent/CLI trigger still works, but
+> V1 daemon recovery now comes from the same root-record scheduler described
+> above; the historical plist-scanning recovery diagrams below no longer run.
+> An unexpired V1 record blocks admission of an overlapping V2 commitment.
+
+### Legacy V1 Overview Diagram
 
 ```mermaid
 flowchart TB
@@ -45,9 +179,9 @@ flowchart TB
     I --> K
 ```
 
-## Job Firing Paths
+### Legacy V1 Job Firing Paths
 
-There are **three paths** that can trigger a scheduled block:
+There were **three paths** that could trigger a V1 scheduled block:
 
 | Path | Trigger | Use Case |
 |------|---------|----------|
@@ -134,9 +268,9 @@ flowchart TB
     D4 --> D5
 ```
 
-### Path 3: Why Periodic Sweep?
+#### Path 3: Why the Legacy Periodic Sweep Existed
 
-The 1-minute periodic sweep exists as a **backup mechanism** for cases where launchd (Path 1) fails:
+The pre-PER-383 1-minute periodic sweep existed as a **backup mechanism** for cases where launchd (Path 1) failed. V2 keeps a 60-second backstop but reads the root store directly and never scans a V2 LaunchAgent:
 
 | Scenario | launchd Behavior | Path 3 Saves the Day |
 |----------|------------------|----------------------|
@@ -200,104 +334,52 @@ This prevents users from bypassing blocks by removing entries mid-session.
 sequenceDiagram
     participant UI as Frontend<br/>(SCScheduleManager)
     participant XPC as XPC Client
-    participant D as Daemon<br/>(SCDaemonBlockMethods)
+    participant D as Daemon mutation lock
     participant BM as BlockManager
-    participant PF as PacketFilter
-    participant HB as HostBlocker
-    participant AB as AppBlocker
+    participant Store as Root ApprovedSchedules
 
     Note over UI: User edits bundle<br/>(adds twitter.com)
-
-    UI->>UI: updateBundle:
-    UI->>UI: Check isCommittedForWeekOffset:0
-    UI->>UI: Check anyBlockIsRunning
-
-    alt Block is running
-        UI->>XPC: updateBlocklist:bundle.entries
-        XPC->>D: XPC call with new blocklist
-
-        D->>D: Compare old vs new entries
-        Note over D: added = newList - oldList<br/>removed = oldList - newList
-
-        alt Items were removed
-            D->>D: Log WARNING:<br/>"removed items will not be updated"
+    UI->>UI: Preserve removals; canonicalize additions
+    par Active path when expected
+        UI->>XPC: appendEntriesToActiveBlocklist + exact old list
+        XPC->>D: Owner/precondition-checked request
+        D->>BM: Append hosts/PF/apps and verify physical result
+        D->>D: Persist and verify stricter ActiveBlocklist
+    and Current/future approval path
+        UI->>XPC: appendEntriesToApprovedSchedules + expected lists
+        XPC->>D: Match owner, schedule, mode, and exact content
+        alt Candidate is the active scheduled record
+            D->>BM: Physically apply and verify additions first
         end
-
-        D->>BM: enterAppendMode
-        D->>BM: addBlockEntriesFromStrings:added
-
-        BM->>PF: Append new PF rules
-        BM->>HB: Append to /etc/hosts
-
-        D->>BM: finishAppending
-
-        BM->>BM: waitUntilAllOperationsAreFinished<br/>(DNS resolution)
-        BM->>HB: writeNewFileContents
-        BM->>PF: refreshPFRules (pfctl reload)
-        BM->>AB: findAndKillBlockedApps
-
-        D->>D: Update ActiveBlocklist in SCSettings
-        D->>D: syncSettingsAndWait:5
-        D-->>XPC: Success
-        XPC-->>UI: Reply
+        D->>Store: Persist and verify stricter matching records
+        D->>D: Probe loaded jobs only for V1 candidates
     end
+    XPC-->>UI: Typed aggregate results
+    UI->>UI: Emit one block.strictify_result outcome
 ```
 
-### Timing
+Both daemon requests use the shared mutation lock, exact preconditions, and
+retry-safe union handling. In particular, the approval path cannot persist a
+stricter currently-active schedule while physical enforcement remains weaker:
+it applies and verifies the additions before writing that root record. A retry
+that sees the exact union in settings re-applies the physical layers rather
+than assuming settings are proof of enforcement.
 
-The update is **synchronous** — typically completes in **1-2 seconds**:
-
-| Step | Time |
-|------|------|
-| XPC connection | ~100ms |
-| DNS resolution for new domains | ~500ms-1s |
-| Write /etc/hosts | ~10ms |
-| Reload PF rules (pfctl) | ~100ms |
-| Kill blocked apps | ~50ms |
-
-### Launch Path Independence
-
-The update mechanism works identically regardless of how the block was started:
-
-| Launch Path | Storage Location | Update Works? |
-|-------------|------------------|---------------|
-| Path 1 (launchd) | `SCSettings.ActiveBlocklist` | ✅ Yes |
-| Path 2 (daemon startup) | `SCSettings.ActiveBlocklist` | ✅ Yes |
-| Path 3 (daemon sweep) | `SCSettings.ActiveBlocklist` | ✅ Yes |
-
-All paths store the blocklist in the same `SCSettings` location (`/usr/local/etc/.hash.plist`), so `updateBlocklist:` reads from and writes to the same place regardless of how the block was initiated.
+For scheduler reconciliation, an active V2 record matches only when
+schedule/owner provenance, commitment, generation, policy revision, mode, and
+content agree. Denylist enforcement may contain extra entries (strictification)
+but cannot omit any record entry. LaunchAgent verification applies only to V1
+candidates; V2 has no user job.
 
 ### Key Source Files
 
 | File | Method | Purpose |
 |------|--------|---------|
-| `Block Management/SCScheduleManager.m` | `updateBundle:` | Frontend trigger, checks if committed + running |
-| `Common/SCXPCClient.m` | `updateBlocklist:reply:` | XPC client wrapper |
-| `Daemon/SCDaemonXPC.m` | `updateBlocklist:authorization:reply:` | XPC handler, auth check |
-| `Daemon/SCDaemonBlockMethods.m` | `updateBlocklist:authorization:reply:` | Core logic: diff, append-only, sync |
-| `Block Management/BlockManager.m` | `enterAppendMode`, `finishAppending` | Append to existing block |
-| `Block Management/PacketFilter.m` | `enterAppendMode`, `finishAppending` | PF rule appending |
-
-### Code Snippet: Monotonic Enforcement
-
-From `SCDaemonBlockMethods.m:200-209`:
-
-```objc
-NSArray* activeBlocklist = [settings valueForKey: @"ActiveBlocklist"];
-NSMutableArray* added = [NSMutableArray arrayWithArray: newBlocklist];
-[added removeObjectsInArray: activeBlocklist];      // Items to ADD
-NSMutableArray* removed = [NSMutableArray arrayWithArray: activeBlocklist];
-[removed removeObjectsInArray: newBlocklist];       // Items user tried to REMOVE
-
-// Removed items are IGNORED - monotonic security
-if (removed.count > 0) {
-    NSLog(@"WARNING: Active blocklist has removed items; these will not be updated. Removed items are %@", removed);
-}
-
-[blockManager enterAppendMode];
-[blockManager addBlockEntriesFromStrings: added];   // Only ADD, never remove
-[blockManager finishAppending];
-```
+| `Block Management/SCScheduleManager.m` | `updateBundle:` / strictify orchestration | Preserves removals, resolves active/future candidates, aggregates telemetry |
+| `Common/SCXPCClient.m` | Structured append wrappers | Sends active and root-record updates |
+| `Daemon/SCDaemonXPC.m` | `appendEntriesToApprovedSchedules:...` | Lock-scoped record matching, active coupling, persistence, V1-only job probes |
+| `Daemon/SCDaemonBlockMethods.m` | `appendEntriesToActiveBlocklistWhileHoldingDaemonLock:...` | Canonical append, physical apply, settings persistence, postcondition verification |
+| `Daemon/SCDaemonScheduler.m` | `activeState:matchesRecord:` | Full provenance/mode/content match before a verified no-op |
 
 ## Cleanup Mechanisms
 
@@ -513,15 +595,17 @@ sequenceDiagram
 | File | Purpose |
 |------|---------|
 | `Block Management/SCScheduleManager.m` | Commit flow, segment calculation, cleanup orchestration, **live strictify trigger** |
-| `Block Management/SCScheduleLaunchdBridge.m` | Plist creation with startDate/endDate |
+| `Common/SCXPCClient.m` | V2 compatibility gate and authenticated owner/week batch |
+| `Daemon/SCDaemonScheduler.m` | V2 desired-state selection, boundary timer, backstop, and serialized reconciliation |
+| `Block Management/SCScheduleLaunchdBridge.m` | V1 plist creation/cleanup compatibility only |
 | `Block Management/BlockManager.m` | Block installation, **append mode for live updates** |
 | `Block Management/PacketFilter.m` | PF rule management, **append mode for live updates** |
-| `cli-main.m` | CLI arg parsing, validation, expired block detection, XPC calls |
-| `Common/SCXPCClient.m` | XPC client wrapper, **updateBlocklist:** |
-| `Daemon/SCDaemon.m` | Startup recovery, cleanup helper, **1-minute schedule sweep timer** |
-| `Daemon/SCDaemonXPC.m` | XPC handlers for start block + cleanup + clearExpiredBlock + **updateBlocklist** |
+| `cli-main.m` | V1 compatibility arg parsing, validation, and XPC calls |
+| `Daemon/SCDaemon.m` | Scheduler construction and startup/wake/clock/timezone triggers |
+| `Daemon/SCDaemonXPC.m` | Atomic V2 store, V1 bridge, strictify, diagnostics, and cleanup |
 | `Daemon/SCDaemonBlockMethods.m` | Actual block execution, checkup timer, **monotonic update enforcement** |
+| `Common/SCSentry.m` | Typed schedule/strictify telemetry schemas and privacy tripwire |
 
 ---
 
-*Last updated: January 2026*
+*Last updated: July 2026 (PER-383)*

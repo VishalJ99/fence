@@ -23,7 +23,11 @@ Week Offset is used throughout the scheduling system to reference different week
 | 2 | Week after next |
 | -1 | Previous week (read-only, for history) |
 
-This allows users to plan future weeks before committing, and the system to calculate correct dates for launchd jobs.
+This allows users to plan future weeks before committing, and the system to
+calculate the absolute dates and local week scope for a root-owned owner/week
+batch. Root admission ultimately compares the authenticated owner and absolute
+week bounds, so a timezone-derived key shift cannot bypass an unexpired
+commitment envelope.
 
 ---
 
@@ -40,7 +44,7 @@ This allows users to plan future weeks before committing, and the system to calc
 | File | Purpose |
 |------|---------|
 | `SCWeekScheduleWindowController.m` | `editingWeekOffset` property, navigation |
-| `Block Management/SCScheduleManager.m` | `commitScheduleForWeekOffset:` |
+| `Block Management/SCScheduleManager.m` | `commitToWeekWithOffset:completion:` |
 | `Block Management/SCScheduleLaunchdBridge.m` | `blockWindowsForSchedule:day:weekOffset:` |
 | `Block Management/SCWeeklySchedule.m` | `weekKeyForDate:`, week calculation helpers |
 

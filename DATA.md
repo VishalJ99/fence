@@ -3,10 +3,12 @@
 - `Sparkle.framework/` — ignored local binary framework required at the repo root for app compilation; copy or install it during local setup.
 - `Common/` — shared Objective-C code used across app and daemon targets, including licensing, XPC, and utility code.
 - `Block Management/` — blocking engine responsible for hosts-file, packet-filter, and app-block enforcement.
-- `Daemon/` — privileged helper implementation (`selfcontrold`) and related launch/install logic.
-- `SelfControlTests/` — XCTest target for project test coverage.
+- `Daemon/` — privileged helper implementation (`selfcontrold`), including the root-owned schedule evaluator/timers, and related launch/install logic.
+- `SelfControlTests/` — XCTest target for project coverage, including deterministic daemon-scheduler boundary tests.
 - `server/` — Node/Express license activation and trial API. Runtime configuration comes from environment variables such as `DATABASE_URL` and `WEBHOOK_SECRET`.
 - `web/functions/api/` — Cloudflare Pages Functions used for checkout webhooks, license generation, and email delivery.
 - `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
 - `dist/` — ignored local ZIP/DMG release artifacts produced by `scripts/build-release.sh`; the retained current release set includes a `reproduction.txt` recipe.
 - `docs/TELEMETRY.md` — PER-355 privacy contract, event schema, cross-process transport design, consistency invariants, and verification plan for Fence diagnostics.
+- `docs/dictionary/root-owned-schedule.md` — PER-383 term and lifecycle reference for immutable root commitment envelopes, daemon-timed V2 segments, and the bounded V1 drain path.
+- `decisions/agent/pending/PER-383-root-scheduler-authority-and-legacy-rollback.md` — pending maintainer review record for scheduler authority, commitment immutability, strictify coupling, and rollback boundaries.

@@ -86,6 +86,12 @@ NSString * const SCDiagnosticReportErrorDomain = @"app.usefence.DiagnosticReport
             containsObject:lastStrictifyOutcome]) {
         lastStrictifyOutcome = @"none";
     }
+    NSString *activeBlockSource = [daemonSnapshot[@"active_block_source"] isKindOfClass:[NSString class]]
+        ? daemonSnapshot[@"active_block_source"] : @"unknown";
+    if (![@[@"none", @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"unknown"]
+            containsObject:activeBlockSource]) {
+        activeBlockSource = @"unknown";
+    }
 
     NSDictionary<NSString *, NSNumber *> *safeUI = [uiSnapshot isKindOfClass:[NSDictionary class]]
         ? uiSnapshot : @{};
@@ -93,6 +99,7 @@ NSString * const SCDiagnosticReportErrorDomain = @"app.usefence.DiagnosticReport
         @"collector_status": collectorStatus,
         @"projection_comparison_status": comparisonStatus,
         @"last_strictify_outcome": lastStrictifyOutcome,
+        @"active_block_source": activeBlockSource,
         @"settings_available": @(settingsAvailable),
         @"block_running": @(blockRunning),
         @"app_has_schedule_state": appSnapshot[@"app_has_schedule_state"] ?: @NO,
@@ -114,6 +121,8 @@ NSString * const SCDiagnosticReportErrorDomain = @"app.usefence.DiagnosticReport
         @"daemon_approval_entry_count": daemonSnapshot[@"approved_entry_count"] ?: @0,
         @"daemon_plist_count": daemonSnapshot[@"schedule_plist_count"] ?: @0,
         @"daemon_job_count": daemonSnapshot[@"schedule_job_count"] ?: @0,
+        @"daemon_scheduler_record_count": daemonSnapshot[@"scheduler_record_count"] ?: @0,
+        @"daemon_legacy_approval_count": daemonSnapshot[@"legacy_approval_count"] ?: @0,
         @"collector_error_count": @(daemonReachable ? 0 : 1),
         @"daemon_protocol": daemonSnapshot[@"daemon_protocol"] ?: @0,
         @"raw_bundle_count": appSnapshot[@"raw_bundle_count"] ?: @0,

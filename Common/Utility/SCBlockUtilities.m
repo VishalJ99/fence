@@ -72,6 +72,12 @@
     [settings setValue: nil forKey: @"ActiveBlocklist"];
     [settings setValue: nil forKey: @"ActiveBlockAsWhitelist"];
     [settings setValue:@0 forKey:@"ActiveBlockControllingUID"];
+    [settings setValue:nil forKey:@"ActiveBlockSource"];
+    [settings setValue:nil forKey:@"ActiveScheduleID"];
+    [settings setValue:nil forKey:@"ActiveScheduleCommitmentID"];
+    [settings setValue:nil forKey:@"ActiveScheduleGeneration"];
+    [settings setValue:nil forKey:@"ActiveSchedulePolicyRevision"];
+    [settings setValue:nil forKey:@"ActiveScheduleWeekKey"];
 }
 
 @end

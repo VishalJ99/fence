@@ -86,7 +86,8 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
             @"target": @[@"active", @"future", @"active_and_future", @"none"],
             @"failed_stage": @[@"none", @"persist", @"canonicalize", @"commitment_resolution", @"lock",
                                  @"daemon_compatibility", @"active_precondition", @"active_apply",
-                                 @"physical_apply", @"future_resolution", @"future_apply", @"settings_sync", @"verification"],
+                                 @"physical_apply", @"future_resolution", @"future_apply", @"settings_sync",
+                                 @"job_verification", @"verification"],
             @"skip_reason": @[@"none", @"not_committed", @"bundle_not_in_committed_schedule",
                                 @"no_additions", @"no_active_segment", @"no_matching_future_jobs",
                                 @"daemon_incompatible"]
@@ -172,7 +173,8 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                 @"enums": @{@"reason": @[@"handshake_unavailable", @"protocol_too_old", @"capabilities_missing",
                                                    @"active_append_missing", @"approved_append_missing", @"post_repair_incompatible",
                                                    @"telemetry_spool_missing", @"strict_apply_results_missing",
-                                                   @"consistency_projection_missing"]},
+                                                   @"consistency_projection_missing", @"root_schedule_store_missing",
+                                                   @"root_schedule_timer_missing"]},
                 @"booleans": @[@"repair_attempted", @"repair_succeeded"],
                 @"unsigned": @[@"daemon_protocol"],
                 @"versions": @[@"daemon_build", @"daemon_marketing_version"],
@@ -202,7 +204,8 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                                  @"teardown_verified", @"settings_version"]
             },
             @"xpc.auth_rejected": @{
-                @"enums": @{@"command": @[@"start", @"update", @"register_schedule", @"unregister_schedule", @"clear_schedules", @"install", @"repair"]},
+                @"enums": @{@"command": @[@"start", @"update", @"register_schedule", @"replace_schedule",
+                                              @"unregister_schedule", @"clear_schedules", @"install", @"repair"]},
                 @"booleans": @[@"user_cancelled"],
                 @"signed": @[@"error_code"],
                 @"required": @[@"command", @"user_cancelled", @"error_code"]
@@ -243,11 +246,35 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                 @"required": @[@"path", @"block_already_running", @"minutes_late_bucket", @"approved_count",
                                  @"list_count", @"error_code"]
             },
+            @"schedule.reconcile_anomaly": @{
+                @"enums": @{
+                    @"trigger": @[@"startup", @"timer", @"wake", @"clock_change", @"session_change",
+                                    @"mutation", @"periodic", @"legacy"],
+                    @"transition": @[@"idle_idle", @"idle_active", @"active_idle", @"active_active"],
+                    @"stage": @[@"load", @"select", @"teardown", @"apply"],
+                    @"outcome": @[@"failed"],
+                    @"applied_source": @[@"none", @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"unknown"],
+                },
+                @"booleans": @[@"block_running"],
+                @"unsigned": @[@"stored_segment_count", @"minutes_late_bucket"],
+                @"signed": @[@"error_code"],
+                @"required": @[@"trigger", @"transition", @"stage", @"outcome", @"applied_source",
+                               @"block_running", @"stored_segment_count", @"minutes_late_bucket", @"error_code"]
+            },
             @"schedule.commit_install_failed": @{
                 @"enums": @{@"stage": @[@"daemon_install", @"schedule_register", @"job_install", @"verification"]},
                 @"unsigned": @[@"segments_planned", @"segments_installed", @"week_offset"],
                 @"signed": @[@"error_code"],
                 @"required": @[@"stage", @"segments_planned", @"segments_installed", @"week_offset", @"error_code"]
+            },
+            @"schedule.commit_store_failed": @{
+                @"enums": @{@"stage": @[@"compatibility", @"authorize", @"validate", @"lock", @"persist", @"evaluate",
+                                              @"manifest", @"transport"]},
+                @"booleans": @[@"store_persisted", @"post_write_match", @"reconcile_succeeded"],
+                @"unsigned": @[@"segments_planned", @"segments_stored", @"week_offset"],
+                @"signed": @[@"error_code"],
+                @"required": @[@"stage", @"store_persisted", @"post_write_match", @"reconcile_succeeded",
+                               @"segments_planned", @"segments_stored", @"week_offset", @"error_code"]
             },
             @"emergency.failed": @{
                 @"enums": @{@"stage": @[@"credit", @"script_write", @"script_execute", @"verification"]},
@@ -267,7 +294,8 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                 @"enums": @{
                     @"collector_status": @[@"complete", @"partial", @"failed"],
                     @"projection_comparison_status": @[@"exact", @"unavailable", @"failed"],
-                    @"last_strictify_outcome": @[@"none", @"verified", @"partial", @"failed", @"skipped"]
+                    @"last_strictify_outcome": @[@"none", @"verified", @"partial", @"failed", @"skipped"],
+                    @"active_block_source": @[@"none", @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"unknown"]
                 },
                 @"booleans": @[@"settings_available", @"block_running", @"app_has_schedule_state", @"legacy_domain_has_state",
                                  @"daemon_reachable", @"pf_active", @"hosts_active", @"app_monitoring",
@@ -282,7 +310,8 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                                  @"ui_empty_despite_model"],
                 @"unsigned": @[@"app_bundle_count", @"app_week_count", @"app_commitment_count",
                                  @"daemon_active_entry_count", @"daemon_approval_count", @"daemon_approval_entry_count",
-                                 @"daemon_plist_count", @"daemon_job_count",
+                                 @"daemon_plist_count", @"daemon_job_count", @"daemon_scheduler_record_count",
+                                 @"daemon_legacy_approval_count",
                                  @"collector_error_count", @"daemon_protocol", @"raw_bundle_count",
                                  @"decoded_bundle_count", @"raw_schedule_count", @"decoded_schedule_count",
                                  @"active_expected_count", @"active_actual_count", @"active_missing_count", @"active_extra_count",

@@ -449,6 +449,78 @@
     XCTAssertEqual(error.code, SCTelemetrySpoolErrorInvalidArgument);
 }
 
+- (void)testRootSchedulerTelemetrySchemasAcceptOnlyTypedPrivacySafeFields {
+    uid_t uid = 41007;
+    NSError *error = nil;
+    XCTAssertTrue([self.spool setConsentEnabled:YES generation:1 forUID:uid error:&error]);
+
+    XCTAssertTrue(([self.spool appendEventName:@"schedule.reconcile_anomaly"
+                                         level:SCTelemetryEventLevelError
+                                        fields:@{
+                                            @"trigger": @"wake",
+                                            @"transition": @"idle_active",
+                                            @"stage": @"apply",
+                                            @"outcome": @"failed",
+                                            @"applied_source": @"none",
+                                            @"block_running": @NO,
+                                            @"stored_segment_count": @3,
+                                            @"minutes_late_bucket": @5,
+                                            @"error_code": @500,
+                                        }
+                                        origin:SCTelemetryOriginDaemon
+                                        forUID:uid
+                              consentGeneration:1
+                                consentEnabled:YES
+                                         error:&error]));
+    XCTAssertNil(error);
+
+    XCTAssertTrue(([self.spool appendEventName:@"schedule.commit_store_failed"
+                                         level:SCTelemetryEventLevelError
+                                        fields:@{
+                                            @"stage": @"lock",
+                                            @"store_persisted": @NO,
+                                            @"post_write_match": @NO,
+                                            @"reconcile_succeeded": @NO,
+                                            @"segments_planned": @4,
+                                            @"segments_stored": @0,
+                                            @"week_offset": @1,
+                                            @"error_code": @500,
+                                        }
+                                        origin:SCTelemetryOriginApp
+                                        forUID:uid
+                              consentGeneration:1
+                                consentEnabled:YES
+                                         error:&error]));
+    XCTAssertNil(error);
+
+    error = nil;
+    XCTAssertFalse(([self.spool appendEventName:@"schedule.reconcile_anomaly"
+                                          level:SCTelemetryEventLevelError
+                                         fields:@{
+                                             @"trigger": @"wake",
+                                             @"transition": @"idle_active",
+                                             @"stage": @"apply",
+                                             @"outcome": @"failed",
+                                             @"applied_source": @"scheduler_v2",
+                                             @"block_running": @NO,
+                                             @"stored_segment_count": @3,
+                                             @"minutes_late_bucket": @5,
+                                             @"error_code": @500,
+                                             @"schedule_id": NSUUID.UUID.UUIDString,
+                                         }
+                                         origin:SCTelemetryOriginDaemon
+                                         forUID:uid
+                               consentGeneration:1
+                                 consentEnabled:YES
+                                          error:&error]));
+    XCTAssertEqual(error.code, SCTelemetrySpoolErrorPrivacyRejected);
+
+    error = nil;
+    NSArray *records = [self.spool recordsForUID:uid limit:25 error:&error];
+    XCTAssertNil(error);
+    XCTAssertEqual(records.count, 2U);
+}
+
 - (void)testTelemetryCapabilityIsRequiredForCurrentAndFutureProtocols {
     NSArray *required = @[
         SCDaemonCapabilityActiveBlocklistAppend,
@@ -457,6 +529,8 @@
         SCDaemonCapabilityStrictApplyResults,
         SCDaemonCapabilityScheduleOwnerBounds,
         SCDaemonCapabilityConsistencyProjection,
+        SCDaemonCapabilityRootScheduleStore,
+        SCDaemonCapabilityRootScheduleTimer,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
@@ -509,6 +583,24 @@
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent + 1
                                           capabilities:[required arrayByAddingObject:@"future-capability"]
                     compatibleWithCurrentAppWithReason:&reason]);
+
+    NSArray *missingRootStore = [required filteredArrayUsingPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRootScheduleStore];
+        }]];
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                           capabilities:missingRootStore
+                     compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"root-schedule-store-missing");
+
+    NSArray *missingRootTimer = [required filteredArrayUsingPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRootScheduleTimer];
+        }]];
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                           capabilities:missingRootTimer
+                     compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"root-schedule-timer-missing");
 }
 
 - (void)testActiveStrictifyOwnershipPredicateFailsClosed {
@@ -537,6 +629,20 @@
     XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfied(YES, 2, 2, YES, 2, 1));
     XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfied(YES, 2, 1, YES, 1, 0));
     XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfied(NO, 2, 2, YES, 2, 0));
+}
+
+- (void)testFutureStrictifyTreatsV2RecordsAsRootSchedulerOwned {
+    XCTAssertTrue(SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
+        YES, 3, 3, YES, 1, 1, 2, 0));
+    XCTAssertTrue(SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
+        YES, 2, 2, YES, 0, 0, 2, 0));
+
+    XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
+        YES, 3, 3, YES, 1, 0, 2, 0));
+    XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
+        YES, 3, 3, YES, 1, 1, 1, 0));
+    XCTAssertFalse(SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
+        YES, 3, 3, YES, 1, 1, 2, 1));
 }
 
 - (void)testActiveConsistencyFailsClosedOnPhysicalRemnantsWithoutProjection {

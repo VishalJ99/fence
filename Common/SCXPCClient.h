@@ -35,6 +35,13 @@ NS_ASSUME_NONNULL_BEGIN
                    capabilities:(NSArray<NSString*>* _Nullable)capabilities
 compatibleWithCurrentAppWithReason:(NSString* _Nullable * _Nullable)reason;
 
+/// Returns YES only for a daemon that can atomically persist V2 commitments
+/// and evaluate them without user LaunchAgents. Future protocol versions are
+/// accepted when they retain both monotonic capabilities.
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>* _Nullable)capabilities
+supportsRootScheduleCommitWithReason:(NSString* _Nullable * _Nullable)reason;
+
 // Builds the complete privacy-safe E7 payload used by AppController after an
 // initially unreachable daemon goes through its one allowed repair attempt.
 // Returning nil means the supplied state is internally inconsistent.
@@ -77,6 +84,19 @@ compatibleWithCurrentAppWithReason:(NSString* _Nullable * _Nullable)reason;
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply;
 
 // Schedule registration methods (for pre-authorized scheduled blocks)
+/// Negotiates the root-scheduler capability, then atomically replaces the
+/// authenticated user's records for one week. No helper installation or
+/// LaunchAgent mutation is performed by this method.
+- (void)replaceScheduledCommitmentForWeekKey:(NSString *)weekKey
+                               weekStartDate:(NSDate *)weekStartDate
+                                 weekEndDate:(NSDate *)weekEndDate
+                                commitmentID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                    segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
+
+// Legacy V1 methods retained while already-installed LaunchAgents drain.
 - (void)registerScheduleWithID:(NSString*)scheduleId
                      blocklist:(NSArray<NSString*>*)blocklist
                    isAllowlist:(BOOL)isAllowlist

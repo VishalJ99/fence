@@ -402,6 +402,8 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityStrictApplyResults,
         SCDaemonCapabilityScheduleOwnerBounds,
         SCDaemonCapabilityConsistencyProjection,
+        SCDaemonCapabilityRootScheduleStore,
+        SCDaemonCapabilityRootScheduleTimer,
         @"future-safe-capability-v1",
     ];
 
@@ -497,6 +499,15 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                 @"registeredAt": [NSDate date]
             }
         },
+        @"ApprovedScheduleCommitments": @{
+            @"private-commitment-id": @{
+                @"weekKey": @"2026-07-13",
+                @"weekStartDate": [NSDate date],
+                @"weekEndDate": [NSDate dateWithTimeIntervalSinceNow:600],
+                @"scheduleIDs": @[@"private-segment-id"],
+                @"privateCanary": @"private-envelope@example.invalid",
+            }
+        },
         @"BlockEndDate": [NSDate dateWithTimeIntervalSinceNow:600],
         @"LastSettingsUpdate": [NSDate date],
         @"FenceLicenseCode": @"FENCE-private@example.invalid-secret"
@@ -513,11 +524,14 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(sanitized[@"LastSettingsUpdatePresent"], @YES);
     XCTAssertNil(sanitized[@"ActiveBlocklist"]);
     XCTAssertNil(sanitized[@"ApprovedSchedules"]);
+    XCTAssertNil(sanitized[@"ApprovedScheduleCommitments"]);
     XCTAssertNil(sanitized[@"BlockEndDate"]);
     XCTAssertNil(sanitized[@"LastSettingsUpdate"]);
     XCTAssertNil(sanitized[@"FenceLicenseCode"]);
     XCTAssertFalse([[sanitized description] containsString:@"canary-telemetry-test.example"]);
     XCTAssertFalse([[sanitized description] containsString:@"private-segment-id"]);
+    XCTAssertFalse([[sanitized description] containsString:@"private-commitment-id"]);
+    XCTAssertFalse([[sanitized description] containsString:@"private-envelope@example.invalid"]);
 }
 
 - (void)testTelemetryEventContextSanitizerDropsSDKDeviceAndArbitraryContexts {
@@ -1110,6 +1124,19 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertNotNil([SCSentry sanitizedTelemetryFields:commitInstallFailure
                                           forEventName:@"schedule.commit_install_failed"]);
 
+    NSDictionary *commitStoreLockFailure = @{
+        @"stage": @"lock", @"store_persisted": @NO,
+        @"post_write_match": @NO, @"reconcile_succeeded": @NO,
+        @"segments_planned": @3, @"segments_stored": @0,
+        @"week_offset": @0, @"error_code": @5,
+    };
+    XCTAssertNotNil([SCSentry sanitizedTelemetryFields:commitStoreLockFailure
+                                          forEventName:@"schedule.commit_store_failed"]);
+    NSMutableDictionary *unsafeCommitStoreFailure = [commitStoreLockFailure mutableCopy];
+    unsafeCommitStoreFailure[@"schedule_id"] = NSUUID.UUID.UUIDString;
+    XCTAssertNil([SCSentry sanitizedTelemetryFields:unsafeCommitStoreFailure
+                                      forEventName:@"schedule.commit_store_failed"]);
+
     NSDictionary *verifiedEmergencyUnlock = @{
         @"outcome": @"success", @"credits_remaining": @4,
         @"settings_cleared": @YES, @"hosts_clean": @YES, @"pf_check": @YES,
@@ -1320,6 +1347,36 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     NSMutableDictionary *invalidSchedule = [validMinimal mutableCopy];
     invalidSchedule[@"ApprovedSchedules"] = @{@"segment": @[@"example.invalid"]};
     XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:invalidSchedule]);
+
+    NSString *commitmentID = @"10000000-0000-4000-8000-000000000001";
+    NSString *generation = @"20000000-0000-4000-8000-000000000001";
+    NSString *scheduleID = @"30000000-0000-4000-8000-000000000001";
+    NSDate *weekStart = [NSDate dateWithTimeIntervalSince1970:1783900800];
+    NSDate *weekEnd = [weekStart dateByAddingTimeInterval:7 * 24 * 60 * 60];
+    NSDictionary *envelope = @{
+        @"schemaVersion": @1,
+        @"controllingUID": @501,
+        @"weekKey": @"2026-07-13",
+        @"weekStartDate": weekStart,
+        @"weekEndDate": weekEnd,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"scheduleIDs": @[scheduleID],
+        @"registeredAt": [NSDate date],
+    };
+    NSMutableDictionary *withCommitment = [validMinimal mutableCopy];
+    withCommitment[@"ApprovedScheduleCommitments"] = @{commitmentID: envelope};
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:withCommitment]);
+
+    NSMutableDictionary *wrongIdentityEnvelope = [envelope mutableCopy];
+    wrongIdentityEnvelope[@"commitmentID"] = NSUUID.UUID.UUIDString;
+    withCommitment[@"ApprovedScheduleCommitments"] = @{commitmentID: wrongIdentityEnvelope};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:withCommitment]);
+
+    NSMutableDictionary *duplicateScheduleEnvelope = [envelope mutableCopy];
+    duplicateScheduleEnvelope[@"scheduleIDs"] = @[scheduleID, scheduleID];
+    withCommitment[@"ApprovedScheduleCommitments"] = @{commitmentID: duplicateScheduleEnvelope};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:withCommitment]);
 }
 
 - (void)testSettingsInitializationIsPerInstanceAndNeverLeavesDictionaryNil {

@@ -8,6 +8,7 @@
 #import "SCDaemonXPC.h"
 #import "SCDaemon.h"
 #import "SCDaemonBlockMethods.h"
+#import "SCDaemonScheduler.h"
 #import "SCXPCAuthorization.h"
 #import "SCHelperToolUtilities.h"
 #import "SCErr.h"
@@ -75,6 +76,163 @@ static NSUInteger SCScheduleCountOwnedApprovals(NSDictionary *approvedSchedules,
 static NSString * const SCDaemonConsistencyErrorDomain = @"org.eyebeam.Fence.DaemonConsistency";
 static const NSUInteger SCDaemonConsistencyMaximumSchedules = 512;
 static const NSUInteger SCDaemonConsistencyMaximumEntries = 4096;
+static NSString * const SCDaemonApprovedScheduleCommitmentsKey = @"ApprovedScheduleCommitments";
+
+static NSObject *SCDaemonScheduleStoreLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static BOOL SCDaemonUUIDString(id value) {
+    return [value isKindOfClass:[NSString class]] &&
+        [[NSUUID alloc] initWithUUIDString:(NSString *)value] != nil;
+}
+
+static BOOL SCDaemonWeekKeyIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]] || [value length] != 10) return NO;
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    for (NSUInteger index = 0; index < 10; index++) {
+        unichar character = [value characterAtIndex:index];
+        if (index == 4 || index == 7) {
+            if (character != '-') return NO;
+        } else if (![digits characterIsMember:character]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL SCDaemonCommitmentWindowIsCanonical(NSString *weekKey,
+                                                 NSDate *weekStartDate,
+                                                 NSDate *weekEndDate) {
+    if (!SCDaemonWeekKeyIsValid(weekKey) ||
+        ![weekStartDate isKindOfClass:[NSDate class]] ||
+        ![weekEndDate isKindOfClass:[NSDate class]]) return NO;
+
+    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.timeZone = [NSTimeZone localTimeZone];
+    NSDateComponents *startComponents = [calendar components:(NSCalendarUnitWeekday |
+        NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond)
+                                                       fromDate:weekStartDate];
+    if (startComponents.weekday != 2 || startComponents.hour != 0 ||
+        startComponents.minute != 0 || startComponents.second != 0) return NO;
+    NSDate *expectedEnd = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                               value:7
+                                              toDate:weekStartDate
+                                             options:0];
+    if (expectedEnd == nil || ![expectedEnd isEqualToDate:weekEndDate]) return NO;
+
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.calendar = calendar;
+    formatter.timeZone = calendar.timeZone;
+    formatter.dateFormat = @"yyyy-MM-dd";
+    return [[formatter stringFromDate:weekStartDate] isEqualToString:weekKey];
+}
+
+static NSDictionary<NSString *, id> *SCDaemonCommitmentEnvelope(
+    uid_t ownerUID,
+    NSString *weekKey,
+    NSDate *weekStartDate,
+    NSDate *weekEndDate,
+    NSString *commitmentID,
+    NSString *generation,
+    NSArray<NSString *> *scheduleIDs,
+    NSDate *registeredAt) {
+    return @{
+        @"schemaVersion": @1,
+        @"controllingUID": @(ownerUID),
+        @"weekKey": weekKey,
+        @"weekStartDate": weekStartDate,
+        @"weekEndDate": weekEndDate,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"scheduleIDs": scheduleIDs,
+        @"registeredAt": registeredAt,
+    };
+}
+
+static BOOL SCDaemonStoredCommitmentMatchesRequest(NSDictionary *stored,
+                                                    NSDictionary *proposed) {
+    NSArray<NSString *> *keys = @[@"schemaVersion", @"controllingUID", @"weekKey",
+        @"weekStartDate", @"weekEndDate", @"commitmentID", @"generation", @"scheduleIDs"];
+    for (NSString *key in keys) {
+        if (![stored[key] isEqual:proposed[key]]) return NO;
+    }
+    return YES;
+}
+
+static BOOL SCDaemonStoredScheduleMatchesValidatedRecord(NSString *scheduleID,
+                                                          NSDictionary *stored,
+                                                          NSDictionary *validated) {
+    if (![scheduleID isEqual:validated[@"scheduleID"]]) return NO;
+    NSArray<NSString *> *keys = @[SCDaemonScheduleSchemaVersionKey, SCDaemonScheduleWeekKey,
+        SCDaemonScheduleCommitmentIDKey, SCDaemonScheduleGenerationKey,
+        SCDaemonSchedulePolicyRevisionKey, SCDaemonScheduleSourceBundleIDsKey,
+        @"blocklist", @"isAllowlist", @"blockSettings", @"controllingUID",
+        @"approvedStartDate", @"approvedEndDate"];
+    for (NSString *key in keys) {
+        if (![stored[key] isEqual:validated[key]]) return NO;
+    }
+    return YES;
+}
+
+static NSDictionary<NSString *, id> *SCDaemonValidatedV2ScheduleRecord(
+    id value,
+    uid_t ownerUID,
+    NSString *weekKey,
+    NSDate *weekStartDate,
+    NSDate *weekEndDate,
+    NSString *commitmentID,
+    NSString *generation) {
+    if (![value isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *segment = value;
+    NSString *scheduleID = segment[@"scheduleID"];
+    NSDate *startDate = segment[@"approvedStartDate"];
+    NSDate *endDate = segment[@"approvedEndDate"];
+    NSArray *rawBlocklist = segment[@"blocklist"];
+    NSDictionary *blockSettings = segment[@"blockSettings"];
+    NSArray *sourceBundleIDs = segment[SCDaemonScheduleSourceBundleIDsKey];
+    NSString *policyRevision = segment[SCDaemonSchedulePolicyRevisionKey];
+    if (!SCDaemonUUIDString(scheduleID) || ![startDate isKindOfClass:[NSDate class]] ||
+        ![endDate isKindOfClass:[NSDate class]] || [endDate compare:startDate] != NSOrderedDescending ||
+        [startDate compare:weekStartDate] == NSOrderedAscending ||
+        [endDate compare:weekEndDate] == NSOrderedDescending ||
+        ![rawBlocklist isKindOfClass:[NSArray class]] || rawBlocklist.count == 0 ||
+        rawBlocklist.count > SCDaemonConsistencyMaximumEntries ||
+        ![blockSettings isKindOfClass:[NSDictionary class]] || [segment[@"isAllowlist"] boolValue] ||
+        ![sourceBundleIDs isKindOfClass:[NSArray class]] || sourceBundleIDs.count == 0 ||
+        !SCDaemonUUIDString(policyRevision)) return nil;
+
+    for (id bundleID in sourceBundleIDs) if (!SCDaemonUUIDString(bundleID)) return nil;
+    NSMutableOrderedSet<NSString *> *canonicalEntries = [NSMutableOrderedSet orderedSet];
+    for (id entry in rawBlocklist) {
+        if (![entry isKindOfClass:[NSString class]]) return nil;
+        NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+        if (canonical == nil) return nil;
+        [canonicalEntries addObject:canonical];
+    }
+    if (canonicalEntries.count == 0) return nil;
+
+    return @{
+        @"scheduleID": scheduleID,
+        SCDaemonScheduleSchemaVersionKey: @2,
+        SCDaemonScheduleWeekKey: weekKey,
+        SCDaemonScheduleCommitmentIDKey: commitmentID,
+        SCDaemonScheduleGenerationKey: generation,
+        SCDaemonSchedulePolicyRevisionKey: policyRevision,
+        SCDaemonScheduleSourceBundleIDsKey: [sourceBundleIDs copy],
+        @"blocklist": canonicalEntries.array,
+        @"isAllowlist": @NO,
+        @"blockSettings": [blockSettings copy],
+        @"controllingUID": @(ownerUID),
+        @"approvedStartDate": startDate,
+        @"approvedEndDate": endDate,
+        @"registeredAt": [NSDate date],
+    };
+}
 
 static NSSet<NSString *> *SCDaemonCanonicalEntrySet(id value, BOOL *valid) {
     if (![value isKindOfClass:[NSArray class]] || [value count] > SCDaemonConsistencyMaximumEntries) {
@@ -426,6 +584,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityStrictApplyResults,
               SCDaemonCapabilityScheduleOwnerBounds,
               SCDaemonCapabilityConsistencyProjection,
+              SCDaemonCapabilityRootScheduleStore,
+              SCDaemonCapabilityRootScheduleTimer,
           ]);
 }
 
@@ -552,6 +712,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     NSCountedSet<NSString *> *actualApprovals = [NSCountedSet set];
     NSUInteger invalidOwnedApprovalCount = 0;
     NSUInteger inProgressApprovalCount = 0;
+    NSUInteger schedulerApprovalCount = 0;
+    NSUInteger legacyApprovalCount = 0;
     for (id candidateID in approvedSchedules) {
         id candidate = approvedSchedules[candidateID];
         if (![candidate isKindOfClass:[NSDictionary class]]) continue;
@@ -582,7 +744,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                         (unsigned long)invalidOwnedApprovalCount]];
             continue;
         }
-        ownedSchedulesByID[candidateID] = schedule;
+        BOOL schedulerRecord = [schedule[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2;
+        if (schedulerRecord) {
+            schedulerApprovalCount += 1;
+        } else {
+            legacyApprovalCount += 1;
+            // Only V1 records have a user LaunchAgent to inspect/probe.
+            ownedSchedulesByID[candidateID] = schedule;
+        }
         BOOL blocklistValid = NO;
         NSUInteger canonicalBlocklistCount = SCDaemonCanonicalEntrySet(blocklist, &blocklistValid).count;
         if ([approvedStartDate compare:now] != NSOrderedDescending) {
@@ -753,7 +922,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                 if (descriptorValid && key != nil) [actualLoadedJobs addObject:key];
             }
         }
-    } else {
+    } else if (expectedJobs.count > 0 || ownedSchedulesByID.count > 0) {
         collectorPartial = YES;
     }
 
@@ -770,6 +939,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         comparisonRequested ? expectedJobs : [NSCountedSet set], actualLoadedJobs);
 
     NSBundle *daemonBundle = [NSBundle mainBundle];
+    NSString *activeSource = [settings valueForKey:@"ActiveBlockSource"];
+    NSSet<NSString *> *knownSources = [NSSet setWithArray:@[
+        @"none", SCDaemonActiveBlockSourceManual, SCDaemonActiveBlockSourceTest,
+        SCDaemonActiveBlockSourceLegacySchedule, SCDaemonActiveBlockSourceSchedulerV2,
+    ]];
+    if (![activeSource isKindOfClass:[NSString class]] || ![knownSources containsObject:activeSource]) {
+        activeSource = @"unknown";
+    }
     NSDictionary *snapshot = @{
         @"schema_version": @2,
         @"collector_status": collectorPartial ? @"partial" : @"complete",
@@ -777,6 +954,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
             (expectedActiveProjectionAvailable || ![expectedState[@"active_projection_available"] boolValue]
                 ? @"exact" : @"unavailable"),
         @"active_owner_state": activeOwnerState,
+        @"active_block_source": activeSource,
         @"settings_available": @(settingsAvailable),
         @"block_running": @(blockRunning),
         @"pf_active": @(pfActive),
@@ -785,6 +963,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"active_entry_count": @(activeEntryCount),
         @"approved_schedule_count": approvalDelta[@"actual_count"],
         @"approved_entry_count": @(approvedEntryCount),
+        @"scheduler_record_count": @(schedulerApprovalCount),
+        @"legacy_approval_count": @(legacyApprovalCount),
         @"schedule_plist_count": plistDelta[@"actual_count"],
         @"schedule_job_count": loadedJobDelta[@"actual_count"],
         @"expired_approval_count": @(expiredApprovalCount),
@@ -831,10 +1011,281 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
 #pragma mark - Schedule Registration (Pre-Authorization System)
 
+- (void)replaceScheduledCommitmentForWeekKey:(NSString *)weekKey
+                               weekStartDate:(NSDate *)weekStartDate
+                                 weekEndDate:(NSDate *)weekEndDate
+                                commitmentID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                    segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                               authorization:(NSData *)authData
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary<NSString *, id> *result = [@{
+        @"schema_version": @1,
+        @"outcome": @"failed",
+        @"failed_stage": @"validate",
+        @"segments_planned": @([segments isKindOfClass:[NSArray class]] ? segments.count : 0),
+        @"segments_stored": @0,
+        @"store_persisted": @NO,
+        @"post_write_match": @NO,
+        @"reconcile_succeeded": @NO,
+        @"legacy_records_replaced": @0,
+        @"expired_records_pruned": @0,
+    } mutableCopy];
+
+    NSError *authorizationError = [SCXPCAuthorization checkAuthorization:authData
+        command:@selector(replaceScheduledCommitmentForWeekKey:weekStartDate:weekEndDate:commitmentID:generation:segments:authorization:reply:)];
+    if (authorizationError != nil) {
+        result[@"failed_stage"] = @"authorize";
+        reply([result copy], authorizationError);
+        return;
+    }
+
+    BOOL basicInputValid = self.clientUID != 0 &&
+        SCDaemonCommitmentWindowIsCanonical(weekKey, weekStartDate, weekEndDate) &&
+        SCDaemonUUIDString(commitmentID) && SCDaemonUUIDString(generation) &&
+        [segments isKindOfClass:[NSArray class]] && segments.count <= SCDaemonConsistencyMaximumSchedules;
+    if (!basicInputValid) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid scheduled commitment envelope"]);
+        return;
+    }
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *validated = [NSMutableArray arrayWithCapacity:segments.count];
+    NSMutableSet<NSString *> *validatedScheduleIDs = [NSMutableSet setWithCapacity:segments.count];
+    NSUInteger aggregateEntryCount = 0;
+    for (id segment in segments) {
+        NSDictionary *record = SCDaemonValidatedV2ScheduleRecord(segment, self.clientUID, weekKey,
+                                                                 weekStartDate, weekEndDate,
+                                                                 commitmentID, generation);
+        NSString *scheduleID = record[@"scheduleID"];
+        NSUInteger recordEntryCount = [record[@"blocklist"] count];
+        BOOL aggregateWouldOverflow = !SCDaemonScheduleEntryCountCanAdd(
+            aggregateEntryCount, recordEntryCount, SCDaemonConsistencyMaximumEntries);
+        if (record == nil || [validatedScheduleIDs containsObject:scheduleID] || aggregateWouldOverflow) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid scheduled commitment segment"]);
+            return;
+        }
+        aggregateEntryCount += recordEntryCount;
+        [validatedScheduleIDs addObject:scheduleID];
+        [validated addObject:record];
+    }
+    [validated sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        return [left[@"approvedStartDate"] compare:right[@"approvedStartDate"]];
+    }];
+    for (NSUInteger index = 1; index < validated.count; index++) {
+        if ([validated[index - 1][@"approvedEndDate"] compare:validated[index][@"approvedStartDate"]] == NSOrderedDescending) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Scheduled commitment segments overlap"]);
+            return;
+        }
+    }
+
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *lockError) {
+        result[@"failed_stage"] = @"lock";
+        reply([result copy], lockError);
+    }]) return;
+
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        result[@"failed_stage"] = @"persist";
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    NSMutableDictionary<NSString *, NSDictionary<NSString *, id> *> *validatedByID = [NSMutableDictionary dictionary];
+    for (NSDictionary *record in validated) validatedByID[record[@"scheduleID"]] = record;
+    NSArray<NSString *> *proposedScheduleIDs =
+        [validatedScheduleIDs.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    NSDictionary<NSString *, id> *proposedEnvelope = SCDaemonCommitmentEnvelope(
+        self.clientUID, weekKey, weekStartDate, weekEndDate, commitmentID, generation,
+        proposedScheduleIDs, [NSDate date]);
+
+    __block NSArray<NSString *> *expiredLegacyIDs = @[];
+    __block NSUInteger expiredRecordsPruned = 0;
+    __block NSError *persistenceError = nil;
+    __block BOOL postWriteMatch = NO;
+    __block BOOL immutableConflict = NO;
+    __block BOOL exactRetry = NO;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:@"ApprovedSchedules"];
+        NSDictionary *oldSchedules = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *oldCommitmentValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
+        NSDictionary *oldCommitments = [oldCommitmentValue isKindOfClass:[NSDictionary class]]
+            ? oldCommitmentValue : @{};
+        NSDate *now = [NSDate date];
+        __block BOOL matchingEnvelopeFound = NO;
+        __block BOOL foreignCommitmentIDCollision = NO;
+
+        [oldCommitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+            NSDictionary *storedEnvelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+            NSNumber *owner = storedEnvelope[@"controllingUID"];
+            NSDate *start = storedEnvelope[@"weekStartDate"];
+            NSDate *end = storedEnvelope[@"weekEndDate"];
+            BOOL owned = storedEnvelope != nil && SCDaemonClientOwnsSchedule(self.clientUID, owner);
+            if ([key isEqual:commitmentID] && !owned) foreignCommitmentIDCollision = YES;
+            if (!owned || ![start isKindOfClass:[NSDate class]] ||
+                ![end isKindOfClass:[NSDate class]] || [end compare:now] != NSOrderedDescending) return;
+            if (!SCDaemonScheduleIntervalsOverlap(start, end, weekStartDate, weekEndDate)) return;
+            BOOL isMatchingEnvelope = [key isEqual:commitmentID] &&
+                SCDaemonStoredCommitmentMatchesRequest(storedEnvelope, proposedEnvelope);
+            if (isMatchingEnvelope && !matchingEnvelopeFound) {
+                matchingEnvelopeFound = YES;
+            } else {
+                immutableConflict = YES;
+            }
+        }];
+        if (foreignCommitmentIDCollision) immutableConflict = YES;
+
+        NSMutableSet<NSString *> *matchingRecordIDs = [NSMutableSet set];
+        [oldSchedules enumerateKeysAndObjectsUsingBlock:^(id scheduleID, id value, BOOL *stop) {
+            NSDictionary *storedRecord = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+            NSNumber *owner = storedRecord[@"controllingUID"];
+            NSDate *start = storedRecord[@"approvedStartDate"];
+            NSDate *end = storedRecord[@"approvedEndDate"];
+            BOOL owned = storedRecord != nil && SCDaemonClientOwnsSchedule(self.clientUID, owner);
+            BOOL expired = [end isKindOfClass:[NSDate class]] &&
+                [end compare:now] != NSOrderedDescending;
+            if ([validatedScheduleIDs containsObject:scheduleID] && !owned) {
+                immutableConflict = YES;
+                return;
+            }
+            if (!owned || expired) return;
+            // A malformed live owner record cannot be proven non-overlapping;
+            // refuse the mutation instead of deleting the only root evidence.
+            if (![start isKindOfClass:[NSDate class]] || ![end isKindOfClass:[NSDate class]]) {
+                immutableConflict = YES;
+                return;
+            }
+            if (!SCDaemonScheduleIntervalsOverlap(start, end, weekStartDate, weekEndDate)) {
+                if ([validatedScheduleIDs containsObject:scheduleID]) immutableConflict = YES;
+                return;
+            }
+            NSDictionary *proposedRecord = validatedByID[scheduleID];
+            if (!matchingEnvelopeFound || proposedRecord == nil ||
+                !SCDaemonStoredScheduleMatchesValidatedRecord(scheduleID, storedRecord, proposedRecord)) {
+                immutableConflict = YES;
+                return;
+            }
+            [matchingRecordIDs addObject:scheduleID];
+        }];
+
+        exactRetry = matchingEnvelopeFound && !immutableConflict &&
+            [matchingRecordIDs isEqualToSet:validatedScheduleIDs];
+        if (matchingEnvelopeFound && !exactRetry) immutableConflict = YES;
+
+        if (!immutableConflict && exactRetry) {
+            postWriteMatch = YES;
+        } else if (!immutableConflict) {
+            NSMutableDictionary *replacement = [oldSchedules mutableCopy];
+            NSMutableDictionary *replacementCommitments = [oldCommitments mutableCopy];
+            NSMutableSet<NSString *> *legacyIDs = [NSMutableSet set];
+
+            [oldSchedules enumerateKeysAndObjectsUsingBlock:^(id scheduleID, id value, BOOL *stop) {
+                NSDictionary *record = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+                NSNumber *owner = record[@"controllingUID"];
+                NSDate *end = record[@"approvedEndDate"];
+                BOOL expired = [end isKindOfClass:[NSDate class]] &&
+                    [end compare:now] != NSOrderedDescending;
+                if (record == nil || !SCDaemonClientOwnsSchedule(self.clientUID, owner) || !expired) return;
+                [replacement removeObjectForKey:scheduleID];
+                expiredRecordsPruned += 1;
+                if ([record[SCDaemonScheduleSchemaVersionKey] integerValue] < 2 &&
+                    [scheduleID isKindOfClass:[NSString class]]) [legacyIDs addObject:scheduleID];
+            }];
+            [oldCommitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+                NSDictionary *storedEnvelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+                NSNumber *owner = storedEnvelope[@"controllingUID"];
+                NSDate *end = storedEnvelope[@"weekEndDate"];
+                BOOL expired = [end isKindOfClass:[NSDate class]] &&
+                    [end compare:now] != NSOrderedDescending;
+                if (storedEnvelope != nil && SCDaemonClientOwnsSchedule(self.clientUID, owner) && expired) {
+                    [replacementCommitments removeObjectForKey:key];
+                }
+            }];
+
+            for (NSDictionary *record in validated) {
+                NSMutableDictionary *storedRecord = [record mutableCopy];
+                NSString *scheduleID = storedRecord[@"scheduleID"];
+                [storedRecord removeObjectForKey:@"scheduleID"];
+                replacement[scheduleID] = [storedRecord copy];
+            }
+            replacementCommitments[commitmentID] = proposedEnvelope;
+
+            [settings setValue:replacement forKey:@"ApprovedSchedules"];
+            [settings setValue:replacementCommitments forKey:SCDaemonApprovedScheduleCommitmentsKey];
+            persistenceError = [settings syncSettingsAndWait:5];
+            if (persistenceError == nil) {
+                NSDictionary *persistedSchedulesValue = [settings valueForKey:@"ApprovedSchedules"];
+                NSDictionary *persistedSchedules = [persistedSchedulesValue isKindOfClass:[NSDictionary class]]
+                    ? persistedSchedulesValue : @{};
+                NSDictionary *persistedCommitmentsValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
+                NSDictionary *persistedCommitments = [persistedCommitmentsValue isKindOfClass:[NSDictionary class]]
+                    ? persistedCommitmentsValue : @{};
+                NSDictionary *persistedEnvelope = persistedCommitments[commitmentID];
+                postWriteMatch = SCDaemonStoredCommitmentMatchesRequest(persistedEnvelope, proposedEnvelope);
+                for (NSDictionary *record in validated) {
+                    NSString *scheduleID = record[@"scheduleID"];
+                    if (!SCDaemonStoredScheduleMatchesValidatedRecord(
+                            scheduleID, persistedSchedules[scheduleID], record)) {
+                        postWriteMatch = NO;
+                        break;
+                    }
+                }
+                if (!postWriteMatch) {
+                    persistenceError = [SCErr errorWithCode:500
+                                             subDescription:@"Scheduled commitment did not verify after persistence"];
+                }
+            }
+            if (persistenceError != nil) {
+                [settings setValue:oldSchedules forKey:@"ApprovedSchedules"];
+                [settings setValue:oldCommitments forKey:SCDaemonApprovedScheduleCommitmentsKey];
+                [settings syncSettingsAndWait:5];
+            } else {
+                expiredLegacyIDs = legacyIDs.allObjects;
+            }
+        }
+    }
+
+    if (immutableConflict) {
+        result[@"failed_stage"] = @"validate";
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:403
+            subDescription:@"An unexpired root schedule commitment already owns this time window"]);
+        return;
+    }
+
+    if (persistenceError != nil) {
+        result[@"failed_stage"] = @"persist";
+        result[@"post_write_match"] = @(postWriteMatch);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], persistenceError);
+        return;
+    }
+
+    result[@"segments_stored"] = @(validated.count);
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @(postWriteMatch);
+    result[@"legacy_records_replaced"] = @0;
+    result[@"expired_records_pruned"] = @(expiredRecordsPruned);
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    for (NSString *legacyID in expiredLegacyIDs) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [[SCDaemon sharedDaemon] cleanupLegacyScheduleArtifactsWithID:legacyID
+                                                           controllingUID:self.clientUID];
+        });
+    }
+
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary<NSString *,id> *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqualToString:@"verified"] ||
+            [schedulerResult[@"status"] isEqualToString:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        result[@"failed_stage"] = reconciled ? @"none" : @"evaluate";
+        reply([result copy], nil);
+    }];
+}
+
 // Register a schedule - stores approved schedule in secure settings
-// Note: Authorization is already verified by installDaemon: before this call
-// (installDaemon acquires org.eyebeam.SelfControl.startBlock right)
-// Skipping redundant checkAuthorization here to avoid double prompt (password + Touch ID)
+// Legacy V1 registration remains available during the rollback/drain window.
 - (void)registerScheduleWithID:(NSString*)scheduleId
                      blocklist:(NSArray<NSString*>*)blocklist
                    isAllowlist:(BOOL)isAllowlist
@@ -844,7 +1295,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                      endDate:(NSDate*)endDate
                  authorization:(NSData *)authData
                          reply:(void(^)(NSError* error))reply {
-    NSLog(@"XPC method called: registerScheduleWithID (authorization previously verified)");
+    NSLog(@"XPC method called: registerScheduleWithID");
+
+    NSError *authorizationError = [SCXPCAuthorization checkAuthorization:authData
+        command:@selector(startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:)];
+    if (authorizationError != nil) {
+        reply(authorizationError);
+        return;
+    }
 
     BOOL validScheduleID = [scheduleId isKindOfClass:[NSString class]] &&
         [[NSUUID alloc] initWithUUIDString:scheduleId] != nil;
@@ -856,15 +1314,55 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         return;
     }
 
+    if (![SCDaemonBlockMethods lockOrTimeout:reply]) return;
+
     // Store the approved schedule in secure settings (root-only file)
     SCSettings* settings = [SCSettings sharedSettings];
     if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
         return;
     }
     NSMutableDictionary* approvedSchedules = [[settings valueForKey: @"ApprovedSchedules"] mutableCopy];
     if (approvedSchedules == nil) {
         approvedSchedules = [NSMutableDictionary new];
+    }
+    NSDictionary *existingSchedule = [approvedSchedules[scheduleId] isKindOfClass:[NSDictionary class]]
+        ? approvedSchedules[scheduleId] : nil;
+    NSNumber *existingOwner = existingSchedule[@"controllingUID"];
+    NSDate *existingEnd = existingSchedule[@"approvedEndDate"];
+    BOOL existingLiveV2 = [existingSchedule[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2 &&
+        [existingEnd isKindOfClass:[NSDate class]] && [existingEnd compare:[NSDate date]] == NSOrderedDescending;
+    if ((existingSchedule != nil && !SCDaemonClientOwnsSchedule(self.clientUID, existingOwner)) ||
+        existingLiveV2) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([SCErr errorWithCode:403 subDescription:@"Schedule ID cannot be replaced"]);
+        return;
+    }
+    NSDictionary *commitmentValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
+    NSDictionary *commitments = [commitmentValue isKindOfClass:[NSDictionary class]]
+        ? commitmentValue : @{};
+    NSDate *now = [NSDate date];
+    __block BOOL overlapsRootCommitment = NO;
+    [commitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+        NSDictionary *envelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+        NSNumber *owner = envelope[@"controllingUID"];
+        NSDate *commitmentStart = envelope[@"weekStartDate"];
+        NSDate *commitmentEnd = envelope[@"weekEndDate"];
+        if (envelope != nil && SCDaemonClientOwnsSchedule(self.clientUID, owner) &&
+            [commitmentStart isKindOfClass:[NSDate class]] &&
+            [commitmentEnd isKindOfClass:[NSDate class]] &&
+            [commitmentEnd compare:now] == NSOrderedDescending &&
+            SCDaemonScheduleIntervalsOverlap(startDate, endDate, commitmentStart, commitmentEnd)) {
+            overlapsRootCommitment = YES;
+            *stop = YES;
+        }
+    }];
+    if (overlapsRootCommitment) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([SCErr errorWithCode:403
+                    subDescription:@"Legacy registration overlaps an unexpired root commitment"]);
+        return;
     }
 
     // Store schedule details keyed by scheduleId
@@ -882,11 +1380,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     NSError *syncError = [settings syncSettingsAndWait:5];
     if (syncError != nil) {
         SCDaemonXPCLogError(@"Schedule registration persistence failed", syncError);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply(syncError);
         return;
     }
 
     NSLog(@"SCDaemonXPC: Schedule registered successfully");
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"legacy"];
     reply(nil);
 }
 
@@ -975,9 +1476,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
     // Extract schedule parameters
     NSArray* blocklist = schedule[@"blocklist"];
-    BOOL isAllowlist = [schedule[@"isAllowlist"] boolValue];
     NSDictionary* blockSettings = schedule[@"blockSettings"];
-    uid_t controllingUID = scheduleOwner.unsignedIntValue;
     if (![blocklist isKindOfClass:[NSArray class]] ||
         ![blockSettings isKindOfClass:[NSDictionary class]]) {
         spoolFailure(403);
@@ -993,14 +1492,11 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
     NSLog(@"DAEMON: Calling startBlockWithControllingUID...");
 
-    // Start the block without authorization (it was pre-approved)
-    [SCDaemonBlockMethods startBlockWithControllingUID: controllingUID
-                                             blocklist: blocklist
-                                           isAllowlist: isAllowlist
-                                               endDate: approvedEndDate
-                                         blockSettings: blockSettings
-                                         authorization: nil
-                                                 reply:^(NSError *error) {
+    // Start the block without authorization (it was pre-approved), while
+    // preserving the provenance required for idempotent legacy/V2 arbitration.
+    [SCDaemonBlockMethods startScheduledBlockWithID:scheduleId
+                                             record:schedule
+                                              reply:^(NSError *error) {
         if (error) {
             SCDaemonXPCLogError(@"startScheduledBlock failed", error);
             spoolFailure(error.code);
@@ -1028,24 +1524,42 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         return;
     }
 
+    if (![SCDaemonBlockMethods lockOrTimeout:reply]) return;
+
     SCSettings* settings = [SCSettings sharedSettings];
     if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
         return;
     }
     NSMutableDictionary* approvedSchedules = [[settings valueForKey: @"ApprovedSchedules"] mutableCopy];
     if (approvedSchedules != nil) {
+        NSDictionary *storedSchedule = [approvedSchedules[scheduleId] isKindOfClass:[NSDictionary class]]
+            ? approvedSchedules[scheduleId] : nil;
+        NSNumber *owner = storedSchedule[@"controllingUID"];
+        NSDate *end = storedSchedule[@"approvedEndDate"];
+        BOOL liveV2 = [storedSchedule[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2 &&
+            [end isKindOfClass:[NSDate class]] && [end compare:[NSDate date]] == NSOrderedDescending;
+        if (storedSchedule == nil || !SCDaemonClientOwnsSchedule(self.clientUID, owner) || liveV2) {
+            [SCDaemonBlockMethods.daemonMethodLock unlock];
+            reply([SCErr errorWithCode:403
+                        subDescription:@"Root-owned schedule cannot be unregistered before expiry"]);
+            return;
+        }
         [approvedSchedules removeObjectForKey: scheduleId];
         [settings setValue: approvedSchedules forKey: @"ApprovedSchedules"];
         NSError *syncError = [settings syncSettingsAndWait:5];
         if (syncError != nil) {
             SCDaemonXPCLogError(@"Schedule unregistration persistence failed", syncError);
+            [SCDaemonBlockMethods.daemonMethodLock unlock];
             reply(syncError);
             return;
         }
     }
 
     NSLog(@"SCDaemonXPC: Schedule unregistered successfully");
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
     reply(nil);
 }
 
@@ -1063,21 +1577,35 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         return;
     }
 
+    if (![SCDaemonBlockMethods lockOrTimeout:reply]) return;
+
+#ifndef DEBUG
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    reply([SCErr errorWithCode:403 subDescription:@"Bulk schedule clearing is debug-only"]);
+    return;
+#else
+
     SCSettings* settings = [SCSettings sharedSettings];
     if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
         return;
     }
-    [settings setValue: nil forKey: @"ApprovedSchedules"];
+    [settings setValue:nil forKey:@"ApprovedSchedules"];
+    [settings setValue:nil forKey:SCDaemonApprovedScheduleCommitmentsKey];
     NSError *syncError = [settings syncSettingsAndWait:5];
     if (syncError != nil) {
         SCDaemonXPCLogError(@"Approved schedule clear persistence failed", syncError);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply(syncError);
         return;
     }
 
     NSLog(@"INFO: All approved schedules cleared successfully");
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
     reply(nil);
+#endif
 }
 
 - (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
@@ -1106,6 +1634,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"matched_count": @0,
         @"updated_count": @0,
         @"skipped_count": @(candidateCount),
+        @"legacy_candidate_count": @0,
+        @"scheduler_record_count": @0,
         @"loaded_job_count": @0,
         @"launchd_probe_failure_count": @0,
         @"settings_persisted": @NO,
@@ -1179,6 +1709,19 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     __block NSUInteger matchedCount = 0;
     __block NSUInteger updatedCount = 0;
     __block NSUInteger retryMatchedCount = 0;
+    __block NSUInteger legacyCandidateCount = 0;
+    __block NSUInteger schedulerRecordCount = 0;
+    NSString *activeScheduleID = [[settings valueForKey:@"ActiveScheduleID"] isKindOfClass:[NSString class]]
+        ? [settings valueForKey:@"ActiveScheduleID"] : @"";
+    NSString *activeSource = [[settings valueForKey:@"ActiveBlockSource"] isKindOfClass:[NSString class]]
+        ? [settings valueForKey:@"ActiveBlockSource"] : @"";
+    NSNumber *activeOwner = [[settings valueForKey:@"ActiveBlockControllingUID"] isKindOfClass:[NSNumber class]]
+        ? [settings valueForKey:@"ActiveBlockControllingUID"] : @0;
+    BOOL schedulerOwnedActive = [SCBlockUtilities modernBlockIsRunning] &&
+        activeOwner.unsignedIntValue == self.clientUID &&
+        ([activeSource isEqualToString:SCDaemonActiveBlockSourceSchedulerV2] ||
+         [activeSource isEqualToString:SCDaemonActiveBlockSourceLegacySchedule]);
+    __block NSArray<NSString *> *activeExpectedBlocklist = nil;
     NSMutableSet<NSString *> *matchedScheduleIDs = [NSMutableSet set];
     [expectedBlocklistsByScheduleID enumerateKeysAndObjectsUsingBlock:^(id scheduleID,
                                                                         id expectedBlocklist,
@@ -1219,6 +1762,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
         matchedCount += 1;
         [matchedScheduleIDs addObject:scheduleID];
+        if (schedulerOwnedActive && [scheduleID isEqual:activeScheduleID]) {
+            activeExpectedBlocklist = sanitizedExpected;
+        }
+        if ([schedule[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2) {
+            schedulerRecordCount += 1;
+        } else {
+            legacyCandidateCount += 1;
+        }
 
         // A retry can observe the exact already-unioned root state. Count it
         // as matched and verified without rewriting or duplicating entries.
@@ -1242,6 +1793,29 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     result[@"matched_count"] = @(matchedCount);
     result[@"updated_count"] = @(updatedCount);
     result[@"skipped_count"] = @(skippedCount);
+    result[@"legacy_candidate_count"] = @(legacyCandidateCount);
+    result[@"scheduler_record_count"] = @(schedulerRecordCount);
+
+    __block NSError *activeCouplingError = nil;
+    if (activeExpectedBlocklist != nil && sanitizedEntries.count > 0) {
+        [SCDaemonBlockMethods appendEntriesToActiveBlocklistWhileHoldingDaemonLock:sanitizedEntries
+                                                         matchingExistingBlocklist:activeExpectedBlocklist
+                                                                        resultReply:^(NSDictionary<NSString *,id> *activeResult,
+                                                                                      NSError *error) {
+            activeCouplingError = error;
+            if (error != nil) {
+                NSString *stage = [activeResult[@"failed_stage"] isKindOfClass:[NSString class]]
+                    ? activeResult[@"failed_stage"] : @"physical_apply";
+                result[@"failed_stage"] = stage;
+            }
+        }];
+        if (activeCouplingError != nil) {
+            result[@"outcome"] = @"failed";
+            [SCDaemonBlockMethods.daemonMethodLock unlock];
+            replySafely(activeCouplingError);
+            return;
+        }
+    }
 
     NSError *syncError = nil;
     if (updatedCount > 0 || retryMatchedCount > 0) {
@@ -1249,11 +1823,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         syncError = [settings syncSettingsAndWait:5];
     }
     result[@"settings_persisted"] = @(syncError == nil);
+    NSDictionary *persistedApprovedValue = [settings valueForKey:@"ApprovedSchedules"];
+    NSDictionary *persistedApprovedSchedules = [persistedApprovedValue isKindOfClass:[NSDictionary class]]
+        ? persistedApprovedValue : @{};
 
     BOOL matchedSchedulesVerified = YES;
     NSSet *additionSet = [NSSet setWithArray:sanitizedEntries];
     for (NSString *scheduleID in matchedScheduleIDs) {
-        NSDictionary *schedule = approvedSchedules[scheduleID];
+        NSDictionary *schedule = persistedApprovedSchedules[scheduleID];
         NSArray *blocklist = [schedule[@"blocklist"] isKindOfClass:[NSArray class]]
             ? [SCDaemonBlockMethods sanitizedBlocklistEntries:schedule[@"blocklist"]] : @[];
         NSSet *blocklistSet = [NSSet setWithArray:blocklist];
@@ -1270,7 +1847,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     // five-second allowance.
     NSDate *launchdDeadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
     for (NSString *scheduleID in matchedScheduleIDs) {
-        NSDictionary *schedule = approvedSchedules[scheduleID];
+        NSDictionary *schedule = persistedApprovedSchedules[scheduleID];
+        if ([schedule[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2) continue;
         NSDate *startDate = [schedule[@"approvedStartDate"] isKindOfClass:[NSDate class]]
             ? schedule[@"approvedStartDate"] : nil;
         NSString *label = SCDaemonScheduleJobLabel(scheduleID, startDate);
@@ -1286,12 +1864,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     result[@"loaded_job_count"] = @(loadedJobCount);
     result[@"launchd_probe_failure_count"] = @(launchdProbeFailureCount);
 
-    BOOL futureVerified = SCDaemonFutureStrictifyPostconditionsSatisfied(
+    BOOL futureVerified = SCDaemonFutureStrictifyPostconditionsSatisfiedV2(
         syncError == nil,
         candidateCount,
         matchedCount,
         matchedSchedulesVerified,
+        legacyCandidateCount,
         loadedJobCount,
+        schedulerRecordCount,
         launchdProbeFailureCount);
     result[@"future_verified"] = @(futureVerified);
     NSError *resultError = nil;
@@ -1303,10 +1883,10 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         result[@"failed_stage"] = @"settings_sync";
         resultError = syncError;
     } else if (matchedCount == candidateCount && matchedSchedulesVerified &&
-               (loadedJobCount != candidateCount || launchdProbeFailureCount > 0)) {
+               (loadedJobCount != legacyCandidateCount || launchdProbeFailureCount > 0)) {
         result[@"outcome"] = @"failed";
         result[@"failed_stage"] = @"job_verification";
-        resultError = [SCErr errorWithCode:500 subDescription:@"Approved schedule launchd jobs did not verify"];
+        resultError = [SCErr errorWithCode:500 subDescription:@"Legacy approved schedule jobs did not verify"];
     } else if (matchedCount > 0 && matchedSchedulesVerified) {
         result[@"outcome"] = @"partial";
         result[@"failed_stage"] = @"precondition";
@@ -1324,6 +1904,9 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
           (unsigned long)updatedCount,
           (unsigned long)skippedCount);
     [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (syncError == nil && matchedCount > 0) {
+        [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
+    }
     replySafely(resultError);
 }
 
@@ -1419,6 +2002,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
     [[SCDaemon sharedDaemon] stopCheckupTimer];
     [SCDaemonBlockMethods.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
     NSLog(@"clearExpiredBlock: Successfully cleared expired block");
     reply(nil);
 }
@@ -1429,13 +2013,22 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
     BOOL validScheduleID = [scheduleId isKindOfClass:[NSString class]] &&
         [[NSUUID alloc] initWithUUIDString:scheduleId] != nil;
+    if (!validScheduleID) {
+        reply([SCErr errorWithCode:403 subDescription:@"Schedule cleanup precondition failed"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:reply]) return;
+
     SCSettings *settings = [SCSettings sharedSettings];
     if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
         return;
     }
-    NSDictionary *approvedSchedules = [settings valueForKey:@"ApprovedSchedules"];
-    NSDictionary *schedule = validScheduleID && [approvedSchedules isKindOfClass:[NSDictionary class]]
+    NSDictionary *approvedValue = [settings valueForKey:@"ApprovedSchedules"];
+    NSDictionary *approvedSchedules = [approvedValue isKindOfClass:[NSDictionary class]]
+        ? approvedValue : @{};
+    NSDictionary *schedule = [approvedSchedules[scheduleId] isKindOfClass:[NSDictionary class]]
         ? approvedSchedules[scheduleId] : nil;
     NSNumber *owner = schedule[@"controllingUID"];
     NSDate *approvedEndDate = schedule[@"approvedEndDate"];
@@ -1443,11 +2036,43 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         [approvedEndDate compare:[NSDate date]] != NSOrderedDescending;
     if (![schedule isKindOfClass:[NSDictionary class]] ||
         !SCDaemonClientOwnsSchedule(self.clientUID, owner) || !expired) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
         reply([SCErr errorWithCode:403 subDescription:@"Schedule cleanup precondition failed"]);
         return;
     }
 
-    [[SCDaemon sharedDaemon] cleanupStaleScheduleWithID:scheduleId controllingUID:self.clientUID];
+    NSMutableDictionary *updatedSchedules = [approvedSchedules mutableCopy];
+    [updatedSchedules removeObjectForKey:scheduleId];
+    NSDictionary *commitmentValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
+    NSDictionary *oldCommitments = [commitmentValue isKindOfClass:[NSDictionary class]]
+        ? commitmentValue : @{};
+    NSMutableDictionary *updatedCommitments = [oldCommitments mutableCopy];
+    NSDate *now = [NSDate date];
+    [oldCommitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+        NSDictionary *envelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+        NSNumber *envelopeOwner = envelope[@"controllingUID"];
+        NSDate *end = envelope[@"weekEndDate"];
+        if (envelope != nil && SCDaemonClientOwnsSchedule(self.clientUID, envelopeOwner) &&
+            [end isKindOfClass:[NSDate class]] && [end compare:now] != NSOrderedDescending) {
+            [updatedCommitments removeObjectForKey:key];
+        }
+    }];
+    [settings setValue:updatedSchedules forKey:@"ApprovedSchedules"];
+    [settings setValue:updatedCommitments forKey:SCDaemonApprovedScheduleCommitmentsKey];
+    NSError *syncError = [settings syncSettingsAndWait:5];
+    if (syncError != nil) {
+        [settings setValue:approvedSchedules forKey:@"ApprovedSchedules"];
+        [settings setValue:oldCommitments forKey:SCDaemonApprovedScheduleCommitmentsKey];
+        [settings syncSettingsAndWait:5];
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply(syncError);
+        return;
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+
+    [[SCDaemon sharedDaemon] cleanupLegacyScheduleArtifactsWithID:scheduleId
+                                                   controllingUID:self.clientUID];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
 
     NSLog(@"SCDaemonXPC: Stale schedule cleaned up successfully");
     reply(nil);

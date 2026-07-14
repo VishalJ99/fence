@@ -1,4 +1,4 @@
-# SelfControl Documentation Index
+# Fence Documentation Index
 
 ## Quick Lookup
 
@@ -8,9 +8,10 @@
 | Blocking | [BLOCKING_MECHANISM.md](BLOCKING_MECHANISM.md) | BlockManager.m, PacketFilter.m, HostFileBlocker.m |
 | App blocking | [BLOCKING_MECHANISM.md#app-blocking](BLOCKING_MECHANISM.md#app-blocking-implementation) | AppBlocker.m, SCBlockEntry.m |
 | Safety/Robustness | [BLOCK_SAFETY_ANALYSIS.md](BLOCK_SAFETY_ANALYSIS.md) | SCStartupSafetyCheck.m, emergency.sh |
-| Scheduling | [dictionary.md](dictionary.md) | SCScheduleManager.m, SCScheduleLaunchdBridge.m |
-| Schedule job lifecycle | [SCHEDULE_JOB_LIFECYCLE.md](SCHEDULE_JOB_LIFECYCLE.md) | SCScheduleManager.m, cli-main.m, SCDaemon.m |
-| **Daemon Lifecycle** | [DAEMON_LIFECYCLE.md](DAEMON_LIFECYCLE.md) | SCDaemon.m, org.eyebeam.selfcontrold.plist |
+| Scheduling | [dictionary.md](dictionary.md) | SCScheduleManager.m, SCDaemonScheduler.m |
+| Schedule job lifecycle | [SCHEDULE_JOB_LIFECYCLE.md](SCHEDULE_JOB_LIFECYCLE.md) | SCScheduleManager.m, SCDaemonXPC.m, SCDaemonScheduler.m |
+| **Daemon Lifecycle** | [DAEMON_LIFECYCLE.md](DAEMON_LIFECYCLE.md) | SCDaemon.m, SCDaemonScheduler.m, org.eyebeam.selfcontrold.plist |
+| **Daemon Update Lifecycle** | [DAEMON_UPDATE_LIFECYCLE.md](DAEMON_UPDATE_LIFECYCLE.md) | AppController.m, SCXPCClient.m, SCDaemonProtocol.h |
 | **Telemetry policy (Sentry)** | [TELEMETRY.md](TELEMETRY.md) | SCSentry.m, SCSettings.m, SCLogger.m |
 | **Timezone Handling** | [TIMEZONE_HANDLING.md](TIMEZONE_HANDLING.md) | SCScheduleManager.m, cli-main.m, SCDaemon.m |
 | Terminology | [dictionary.md](dictionary.md) | See dictionary/ folder for full entries |
@@ -23,11 +24,15 @@
 ```mermaid
 graph TB
     subgraph User[User Space]
-        App[SelfControl.app] --> XPC
-        CLI[selfcontrol-cli] --> XPC
+        App[Fence.app] --> XPC
+        CLI[selfcontrol-cli - V1 compatibility] --> XPC
     end
     subgraph Root[Privileged - root]
         XPC --> Daemon[selfcontrold]
+        Daemon --> Scheduler[SCDaemonScheduler]
+        Daemon --> Commitments[(Immutable V2 commitment envelopes)]
+        Daemon --> Store[(Root V1/V2 ApprovedSchedules)]
+        Store --> Scheduler
         Daemon --> HF[/etc/hosts]
         Daemon --> PF[pfctl]
     end
@@ -44,9 +49,10 @@ graph TB
 - SCSafetyCheckWindowController.m: Startup safety test UI
 
 **Daemon Layer (Daemon/):**
-- SCDaemon.m: Lifecycle, timers
-- SCDaemonXPC.m: XPC handler
-- SCDaemonBlockMethods.m: Block operations
+- SCDaemon.m: Lifecycle, XPC listener, scheduler event wiring
+- SCDaemonScheduler.m: Root V1/V2 selection, exact boundary timer, 60s backstop
+- SCDaemonXPC.m: XPC handler, authenticated atomic owner/week store
+- SCDaemonBlockMethods.m: Block operations and active provenance
 
 **Blocking Layer (Block Management/):**
 - BlockManager.m: Orchestrator
@@ -57,7 +63,7 @@ graph TB
 
 **Scheduling Layer (Block Management/):**
 - SCScheduleManager.m: Bundle/schedule orchestrator
-- SCScheduleLaunchdBridge.m: launchd job creation, segmentation
+- SCScheduleLaunchdBridge.m: segment calculation support and V1 LaunchAgent compatibility
 - SCBlockBundle.m: Bundle data model
 - SCWeeklySchedule.m: Per-bundle weekly schedule
 - SCTimeRange.m: Allowed window data model
@@ -74,11 +80,17 @@ graph TB
 
 ## Key Concepts
 
-1. **Dual-layer blocking:** /etc/hosts + PF firewall
+1. **Triple-layer blocking:** /etc/hosts + PF firewall + app-process enforcement
 2. **Privilege separation:** App (user) -> XPC -> Daemon (root)
-3. **Persistence:** Settings in /usr/local/etc/.{hash}.plist
-4. **Continuous verification:** 1-second checkup timer
-5. **Timezone-rigid design:** Blocks use UTC timestamps for anti-circumvention. See [TIMEZONE_HANDLING.md](TIMEZONE_HANDLING.md)
+3. **Root schedule authority:** New V2 commitments are atomic
+   owner/absolute-week envelopes plus records timed by `selfcontrold`; user
+   LaunchAgents and the CLI are V1 rollback/drain only
+4. **Immutable admission:** A root envelope exists even for a zero-segment
+   week; exact same-batch identity/content retries are idempotent and any different
+   unexpired absolute overlap (including V1) is rejected
+5. **Persistence:** Settings in /usr/local/etc/.{hash}.plist
+6. **Continuous verification:** 1-second checkup timer
+7. **Timezone-rigid design:** Blocks use absolute timestamps for anti-circumvention. See [TIMEZONE_HANDLING.md](TIMEZONE_HANDLING.md)
 
 ## Adding Features
 
@@ -117,4 +129,4 @@ sudo launchctl list | grep selfcontrol
 
 **System terms:** PF=Packet Filter, pfctl=PF CLI, XPC=IPC mechanism, SMJobBless=privileged helper install, Anchor=PF sub-ruleset, Checkup=periodic block verification
 
-**Scheduling terms:** See [dictionary.md](dictionary.md) for full definitions of: Editor, Allowed Window, Block Window, Segment, Merged Blocklist, Committed State, Pre-Authorized Schedule, Bundle, Entry, Week Offset
+**Scheduling terms:** See [dictionary.md](dictionary.md) for full definitions of: Editor, Allowed Window, Block Window, Segment, Merged Blocklist, Committed State, Pre-Authorized Schedule, Root-Owned Schedule, Bundle, Entry, Week Offset

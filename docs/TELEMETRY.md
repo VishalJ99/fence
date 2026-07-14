@@ -1,7 +1,7 @@
 # Fence Telemetry Policy (Sentry)
 
 > **Status:** PRODUCTION ENABLED in Fence 3.4.8 (build 648) under PER-355. Core remote diagnostics are released; §2.2 lists bounded gaps and follow-up hardening. The audit decisions in §12 are recorded in `decisions/agent/pending/PER-355-telemetry-privacy-and-transport.md` for final maintainer review.
-> **Date:** 2026-07-10
+> **Date:** 2026-07-14
 > **Purpose:** Define what diagnostic data Fence sends to Sentry (essential vs. good-to-have), what it must NEVER upload, and how the policy is enforced structurally rather than aspirationally.
 
 ---
@@ -27,10 +27,10 @@ Sentry **9.14.0** is linked only into the app. Root components never initialize 
 | Release identity | Component-specific release + build dist, production/development environment, empty/placeholder/upstream-DSN kill switch, and a release script that requires/uploads the matching dSYM when a DSN is configured; the 3.4.8/build 648 production dSYM and symbolication smoke are verified live |
 | URL/block parsing | One canonicalizer is shared by UI, block model, daemon apply, strictify, and comparisons. Schemes, paths, queries, case, IDNA, ports, CIDR, and trailing slashes are normalized before enforcement |
 | Physical enforcement | Fresh apply, strictify, integrity reapply, and teardown return typed hosts/PF/app/settings postconditions; state mutation alone is not success |
-| Strictify | One aggregated `block.strictify_result` covers active and future commitments, exact preconditions, retry-safe union handling, physical apply, settings persistence, timeout, and token-scoped overlapping retries |
-| Daemon transport | Protocol v4; root-owned `0700` per-UID spool with `0600` files, audit-token UID isolation, atomic locked rotation, 100-record/256-KB bounds, 14-day activity-driven GC, future-skew rejection, typed revalidation, stable retry IDs, consent generations, and opt-out purge |
-| State consistency | Startup sends the app's expected projection over authenticated local XPC; the daemon compares canonical active entries, root approvals, validated plists, and actually loaded launchd jobs, returning only match booleans and missing/extra counts plus physical-layer state |
-| Failure paths | Typed events cover settings-load failure, code-signature/XPC rejection, non-cancelled authorization rejection, unreachable-daemon reinstall outcomes, incompatible daemon repair, schedule commit/install/execute, block apply/teardown, strictify, and verified emergency unlock |
+| Strictify | One aggregated `block.strictify_result` covers active and future commitments, exact preconditions, retry-safe union handling, physical apply, settings persistence, timeout, and token-scoped overlapping retries. For an active scheduled candidate, the daemon holds its mutation lock across physical apply/verification and persists the stricter future record only afterward |
+| Daemon transport | Protocol v5; root-owned `0700` per-UID spool with `0600` files, audit-token UID isolation, atomic locked rotation, 100-record/256-KB bounds, 14-day activity-driven GC, future-skew rejection, typed revalidation, stable retry IDs, consent generations, and opt-out purge |
+| State consistency | Startup sends the app's expected projection over authenticated local XPC. V2 compares app projection → root segment records → active provenance/physical layers; plist and loaded-job probes apply only to draining V1 records. The root commitment envelope is an admission boundary but is not yet part of the sanitized snapshot. Replies contain match booleans and bounded missing/extra counts, never IDs, absolute bounds, or dates |
+| Failure paths | Typed events cover settings-load failure, code-signature/XPC rejection, non-cancelled authorization rejection, unreachable-daemon reinstall outcomes, incompatible daemon repair, V1 schedule execution/install, V2 root-store commit/reconciliation, block apply/teardown, strictify, and verified emergency unlock |
 | Support | Fence menu → Send Diagnostic Report Now captures a sanitized structural snapshot when globally opted in, flushes it to Sentry, and shows `FENCE-<event-id-prefix>`; no local log file or email is created |
 
 For the motivating incidents this is enough to answer, without blocklist contents: whether app calendar/default state disappeared, whether the daemon retained active/approved state, whether a newly added entry canonicalized, whether it targeted the active block and/or future jobs, whether preconditions matched, and which hosts/PF/app/persistence postcondition failed.
@@ -43,6 +43,12 @@ The production DSN is configured in 3.4.8/build 648 and the original external re
 2. Move all non-root SCSettings reads behind authenticated XPC, then migrate Fence's plist into a dedicated root-owned `0700` directory with a `0600` file (do not chmod the shared `/usr/local/etc` directory). Tightening the current file alone would make the app/CLI read defaults and can hide a live block.
 3. Add the brand-stable identity/count ledger and a real calendar-render projection if UI-only disappearance (model present, views absent) must be distinguished remotely. Current startup checks prove persisted/decoded/app/daemon/physical consistency, not AppKit rendering.
 4. Add a persistent per-event/release upload budget, a user-owned CLI spool for failures where the daemon is unreachable, a signed multi-user XPC integration test, and one-shot support consent. The spool already has hard count/byte/age bounds, but these operational controls are still missing.
+5. Add a sanitized root commitment-envelope presence/count comparison. The
+   envelope already prevents local-marker/timezone fail-open, and admission
+   conflicts emit `schedule.commit_store_failed`, but a zero-segment root
+   envelope with missing app-local markers is not distinguishable in the
+   current startup/support snapshot because there is no segment record to
+   project.
 
 Sections 3–13 are the target policy/acceptance contract. Where they are more ambitious than §2.1, §2.2 is authoritative about the current implementation.
 
@@ -67,7 +73,7 @@ Sections 3–13 are the target policy/acceptance contract. Where they are more a
 These must never appear in any Sentry event, breadcrumb, log, tag, or context — enforced by allowlists and sanitizers (§9), not by per-call-site discipline:
 
 1. **Blocklist entries in any form** — domains, hostnames, IPs, ports, `app:` bundle IDs — whether from `Blocklist`, `ActiveBlocklist`, `ApprovedSchedules`, `.selfcontrol` files, or NSError userInfo. Only local comparison results and structural counts leave the machine.
-2. **User-named bundle names** and schedule *contents* (specific days/times/windows). Only counts, enum outcomes, and local equality/delta results.
+2. **User-named bundle names** and schedule *contents* (specific days/times/windows). Schedule/commitment/generation/policy-revision UUIDs, source bundle UUIDs, exact dates, and raw controlling UIDs also stay local. Only counts, enum outcomes, and local equality/delta results leave the machine.
 3. **`FenceLicenseCode`** (embeds the user's email), anything from `SCLicenseManager` payloads, iCloud KVS values, trial dates tied to identity.
 4. **Device identity** — raw serial number, `IOPlatformUUID`, `SCDeviceIdentifier` hashes, the settings filename hash.
 5. **Usernames / home paths** — no absolute path under `/Users/`; basenames or `$HOME`-stripped templates only.
@@ -84,7 +90,7 @@ Conventions: `event(app)` = direct SDK capture in-app · `event(spool)` = writte
 
 | # | Event | Trigger (where) | Level | Key tags | Context payload |
 |---|-------|-----------------|-------|----------|-----------------|
-| E1 | `state.app_daemon_diverged` | Startup checker (§7), fired only when ≥1 invariant fails | error | `reason`, `collector_status` | App raw/decoded counts; exact active/approval/plist/loaded-job equality and missing/extra counts; daemon state counts; settings availability and physical hosts/PF/app booleans. Identity-ledger/render fields remain a §2.2 gap |
+| E1 | `state.app_daemon_diverged` | Startup checker (§7), fired only when ≥1 invariant fails | error | `reason`, `collector_status` | App raw/decoded counts; exact active/approval equality and missing/extra counts; V1-only plist/loaded-job equality; daemon state counts; settings availability and physical hosts/PF/app booleans. Root-envelope presence, identity-ledger, and render fields remain §2.2 gaps |
 | E2 | `state.app_defaults_regressed` | Legacy-domain repair restores an orphaned calendar, or raw persisted bundle/schedule rows fail to decode | error | `reason` (`legacy_domain_orphaned`\|`decode_loss`) | Current/legacy structural counts only; never raw values. `bundle_id_changed` and `unexplained_drop` remain reserved for the §2.2 identity ledger |
 | E3 | `daemon.settings_load_failed` | SCSettings initial load/reload rejects missing-after-initialization, unreadable, malformed, version-invalid, or schema-invalid state | error (spooled) | `reason` | settings version, error code, recovery attempted/succeeded. Last-known-good state is retained; initial unavailable state blocks automatic teardown and ordinary settings mutation/persistence until a valid snapshot recovers |
 | E4 | `block.teardown_failed` | Verified teardown leaves any hosts/PF/app/settings postcondition uncleared | error (spooled) | `layer` (`hosts`\|`pf`\|`apps`\|`settings`) | Per-layer removal booleans, overall verification, duration, and bounded error code. Callers retain declared state and retry instead of reporting success |
@@ -92,14 +98,16 @@ Conventions: `event(app)` = direct SDK capture in-app · `event(spool)` = writte
 | E6 | `xpc.connection_rejected` | Daemon listener cannot inspect a client or the signed-code requirement fails; clause checks distinguish identifier/team/min-version failure | error (spooled) | `stage`, `client_id` | OSStatus, `{identifier_ok, team_ok, version_ok}`, safe client version. Deduplicated once per client/daemon run |
 | E6a | `xpc.auth_rejected` | A start/update/schedule/install/permission-repair Authorization Services check fails for a reason other than ordinary user cancellation | error | `command` | Safe OSStatus code only; once per command per app run. User-cancelled prompts do not emit an incident |
 | E7 | `daemon.unreachable_reinstall` | Capability handshake cannot reach a daemon that should exist, triggering the one allowed reinstall | error | `outcome` (`recovered`\|`install_failed`\|`post_repair_unreachable`\|`post_repair_incompatible`) | Enumerated initial/final failure class, bounded error codes, bundled/installed-helper presence before/after, reinstall result, reconnect attempted, and post-repair handshake/compatibility booleans. No raw XPC or install error text |
-| E8 | `schedule.exec_failed` | CLI/XPC start rejection, daemon recovery, or block-start failure | error | `path` (`cli_launchd`\|`daemon_recovery`\|`xpc_direct`) | minutes-late bucket, approved/list counts, block-already-running, error code; no schedule ID |
-| E9 | `schedule.commit_install_failed` | Aggregated transactional commit failure; partial launchd jobs and root approvals are rolled back and commitment is not persisted | error | `stage` (`daemon_install`\|`schedule_register`\|`job_install`\|`verification`) | segments planned/installed, error code, week offset |
+| E8 | `schedule.exec_failed` | Legacy V1 CLI/XPC start rejection, daemon compatibility recovery, or direct block-start failure | error | `path` (`cli_launchd`\|`daemon_recovery`\|`xpc_direct`) | minutes-late bucket, approved/list counts, block-already-running, error code; no schedule ID |
+| E9 | `schedule.commit_install_failed` | Legacy V1 transactional commit failure | error | `stage` (`daemon_install`\|`schedule_register`\|`job_install`\|`verification`) | segments planned/installed, error code, week offset. Retained only for rollback/drain visibility |
 | E10 | `emergency.unlock_result` | Emergency script returns fixed root-side settings/hosts/PF postconditions; credit and UI state change only after verified cleanup | info (verified success) / error | `outcome` (`success`\|`script_error`\|`verify_failed`) | AppleScript error code, `{settings_cleared, hosts_clean, pf_check}`, credits remaining, duration |
 | E11 | `tamper.no_block_found` | Checkup finds Fence physical remnants while declared block state is inactive | warning/error (spooled) | `remnants` (`hosts`\|`pf`\|`apps`\|`multiple`) | per-layer remnant booleans, settings version, and teardown verification; deduplicated once per daemon run |
 | E12 | App crashes | SDK automatic after privacy containment and dSYM pipeline are verified | — | — | A sanitized structural scope is initialized after state load and refreshed after state changes; no Sentry installation user, automatic URL breadcrumbs, app-hang events, screenshots, or raw SDK contexts |
-| E13 | `support.diagnostic_snapshot` | Fence menu → Send Diagnostic Report Now while global Fence telemetry consent is enabled | info | `collector_status`, `projection_comparison_status`, `last_strictify_outcome`, UI/model/render/visibility match booleans | Persisted/decoded/model counts; created, nonzero-area, intersecting, appearance-valid, and effectively visible calendar-block counts; view/window presentation state; exact active/approval/plist/loaded-job deltas and invalid/legacy counts; daemon enforcement and physical-layer state. The returned event ID is shown as a `FENCE-` support reference. No schedule coordinates or content leave the process; one-shot consent remains a §2.2 gate. |
-| E14 | `block.strictify_result` | Once per committed bundle edit containing additions, after both active and future paths and physical postconditions complete | info for verified success; error otherwise | `outcome`, `target`, `failed_stage`, `daemon_protocol` | Per-run operation sequence; added/canonical/rejected/duplicate/app/site counts; committed/current-segment status; active expected/precondition/reapply/verified counts; future candidates plus loaded-job/probe counts; approvals requested/matched/updated/skipped-by-reason; per-layer result; settings persistence. This is the essential event for "added site not blocked" |
+| E13 | `support.diagnostic_snapshot` | Fence menu → Send Diagnostic Report Now while global Fence telemetry consent is enabled | info | `collector_status`, `projection_comparison_status`, `last_strictify_outcome`, UI/model/render/visibility match booleans | Persisted/decoded/model counts; created, nonzero-area, intersecting, appearance-valid, and effectively visible calendar-block counts; view/window presentation state; exact active/approval deltas; V1-only plist/loaded-job deltas; invalid/legacy/V2 aggregate counts; daemon enforcement and physical-layer state. Root-envelope presence remains a §2.2 gap. The returned event ID is shown as a `FENCE-` support reference. No schedule coordinates or content leave the process; one-shot consent remains a §2.2 gate. |
+| E14 | `block.strictify_result` | Once per committed bundle edit containing additions, after both active and future paths and physical postconditions complete | info for verified success; error otherwise | `outcome`, `target`, `failed_stage`, `daemon_protocol` | Per-run operation sequence; added/canonical/rejected/duplicate/app/site counts; committed/current-segment status; active expected/precondition/reapply/verified counts; future candidates; V1-only loaded-job/probe counts; approvals requested/matched/updated/skipped-by-reason; per-layer result; settings persistence. Active scheduled candidates are physically applied/verified under the daemon mutation lock before their stricter root record persists. This is the essential event for "added site not blocked" |
 | E15 | `daemon.incompatible` | Capability handshake remains incompatible after its one repair attempt | error | `reason` | Safe daemon build/marketing version, protocol, and repair attempted/succeeded booleans. Compatibility is never inferred from marketing-version ordering |
+| E16 | `schedule.commit_store_failed` | A V2 owner/absolute-week batch conflicts with an unexpired envelope or schedule record (including V1), is otherwise rejected, fails locking/persistence or the SCSettings post-sync envelope/record-content check, cannot reconcile, or cannot save its local manifest | error | `stage` (`compatibility`\|`authorize`\|`validate`\|`lock`\|`persist`\|`evaluate`\|`manifest`\|`transport`) | segments planned/stored (including zero), week offset, store-persisted/post-write-match/reconcile booleans, bounded error code. No envelope key/bounds, schedule, commitment, generation, bundle, policy IDs, or UIDs |
+| E17 | `schedule.reconcile_anomaly` | The daemon scheduler cannot load, tear down, or apply desired state | error (spooled) | `trigger`, `transition`, `stage`, `applied_source` | active-state boolean, stored-segment count, bounded minutes-late bucket and error code. Successful/deferred/no-op evaluations do not emit |
 
 ## 5. GOOD-to-have tier
 
@@ -118,9 +126,9 @@ Conventions: `event(app)` = direct SDK capture in-app · `event(spool)` = writte
 
 ## 6. Daemon/CLI transport: spool-and-forward
 
-The daemon is where enforcement failures often occur. **Implemented decision: the daemon writes pre-sanitized typed records to a spool; the app uploads them through its existing consent-gated SDK.** CLI-triggered schedule failures reach that daemon spool; a separate user-owned queue for failures that cannot reach the daemon remains a §2.2 gate.
+The daemon is where enforcement failures often occur. **Implemented decision: the daemon writes pre-sanitized typed records to a spool; the app uploads them through its existing consent-gated SDK.** V2 reconciliation failures originate in the daemon and use this path. Legacy CLI-triggered schedule failures also reach the daemon spool; a separate user-owned queue for failures that cannot reach the daemon remains a §2.2 gate.
 
-Rejected alternatives: *(a) link the pod into the daemon* — Sentry 9.x static linking already failed on this repo's toolchain for a plain app target (`Podfile:27` "incompatible with macOS 26 C++ toolchain"); an SMJobBless single-binary helper is strictly harder; and it puts a third-party network stack inside a root process. *(c) live XPC relay to the app* — requires the app running at failure time, which is exactly false for launchd-fired schedules, reboots, and recovery paths.
+Rejected alternatives: *(a) link the pod into the daemon* — Sentry 9.x static linking already failed on this repo's toolchain for a plain app target (`Podfile:27` "incompatible with macOS 26 C++ toolchain"); an SMJobBless single-binary helper is strictly harder; and it puts a third-party network stack inside a root process. *(c) live XPC relay to the app* — requires the app running at failure time, which is exactly false for root-scheduler boundaries, reboots, wake recovery, and draining V1 jobs.
 
 Spec:
 - `Common/SCSentry.{h,m}` owns the typed schema registry and outbound boundary; `Common/SCTelemetrySpool.{h,m}` is the pure-Foundation daemon queue. Every accepted event has allowlisted fields/types/ranges and a maximum serialized size. There is no arbitrary public tags/context API.
@@ -134,17 +142,17 @@ Spec:
 
 ## 7. Startup state-consistency check (catches the calendar-wipe class)
 
-The checker is split across `SCScheduleManager` (local structural snapshot and expected projection), `AppController` (capability-gated orchestration/retry/emission), and `SCDaemonXPC` (root-state, plist, launchd, and physical probes). It starts only after the capability handshake. The app sends entries/dates only across the authenticated local XPC boundary; the daemon returns counts, match booleans, status enums, and physical booleans only.
+The checker is split across `SCScheduleManager` (local structural snapshot, V2 manifest, and expected projection), `AppController` (capability-gated orchestration/retry/emission), and `SCDaemonXPC` (root-state, backend-aware legacy-job, and physical probes). It starts only after the capability handshake. The app sends entries/dates only across the authenticated local XPC boundary; the daemon returns counts, match booleans, status enums, and physical booleans only. V2 has no plist/job invariant; only V1 records enter those probes.
 
 **Planned identity/state-transition marker (not implemented):** `~/Library/Application Support/SelfControl/app-identity.plist` — `{schemaVersion, lastBundleID, lastAppVersion, lastBuild, lastLaunchAt, firstSeenAt, lastStructuralCounts, lastIntentionalResetReason}`. This remains necessary for unexplained cross-launch regressions and is tracked in §2.2.
 
 | Code | Invariant | Catches |
 |------|-----------|---------|
-| I1 | Current-user nonexpired approvals/jobs or an active scheduled block ⇒ app has decoded bundles and schedules for the relevant week | Full or partial calendar/defaults loss while enforcement survives |
+| I1 | Current-user nonexpired approvals, draining V1 jobs, or an active scheduled block ⇒ app has decoded bundles and schedules for the relevant week; envelope-only zero-segment commitments remain a §2.2 gap | Full or partial calendar/defaults loss while enforcement survives |
 | I2 | Raw persisted bundle/schedule rows == decoded rows, and decoded rows == manager/cache projection | Malformed rows silently dropped or a stale cache |
 | I3 | When the calendar is open, model allow-window count == rendered projection count; empty is allowed only when `expected_empty_calendar=true` | UI-only calendar regressions versus intentional all-week blocking |
 | I4 | Every committed enabled bundle has a current/next schedule with a valid bundle reference | Orphan schedules and missing bundle schedules |
-| I5 | App-derived nonexpired segments correspond to current-user approvals, valid plists, and loaded launchd jobs, with in-progress direct-start segments explicitly exempted | Registration/job drift without stale-state false positives |
+| I5 | App-derived nonexpired segments correspond to current-user root approvals; draining V1 segments additionally correspond to valid plists and loaded launchd jobs, while V2 manifest segments deliberately do not. A sanitized envelope invariant remains a §2.2 gap | Registration/backend drift without treating the absence of a V2 LaunchAgent as failure |
 | I6 | App-derived expected content equals each corresponding approval locally; upload only match booleans and count deltas | A correct UUID with an outdated blocklist |
 | I7 | Expected current active content equals `ActiveBlocklist` locally | Strictify skipped or state mutation lost |
 | I8 | `BlockIsRunning` agrees with required physical layers for the active entry types and mode | Settings claim success while hosts/PF/app enforcement is missing |
@@ -156,6 +164,24 @@ The checker is split across `SCScheduleManager` (local structural snapshot and e
 | I14 | Daemon snapshot, launchd queries, and physical probes each report `ok` rather than being coerced to zero/false on timeout/unreadable/unreachable | Collector failure cannot masquerade as clean state |
 
 Emission: violations → one E1 event with the full dual-sided payload; clean → single breadcrumb. Identical violation set within 7 days → breadcrumb only (a persistently broken state must not emit daily events).
+
+### 7.1 Root-scheduler telemetry boundary
+
+`schedule.commit_store_failed` is emitted by the app because it owns the V2
+transaction and local-manifest outcome. `schedule.reconcile_anomaly` is emitted
+by `selfcontrold` through the existing per-UID spool because the app may not be
+running at a boundary, after reboot, or after wake.
+
+Neither event may contain schedule IDs, commitment/generation/policy-revision
+IDs, controlling UIDs, dates, source bundle IDs, entries, or block settings.
+The daemon sanitizes before spooling and the app revalidates before upload.
+Routine timer evaluations, verified no-ops, and intentional deferrals behind a
+manual/test or already-active schedule block do not emit incidents.
+
+The root envelope is compared locally by owner and absolute bounds. Telemetry
+may report only aggregate presence/match/conflict booleans or counts; envelope
+keys, exact bounds, owner UIDs, commitment/generation IDs, and the fact pattern
+needed to correlate a specific user's travel must never leave the machine.
 
 ## 8. Cross-layer blocklist comparison
 
@@ -220,4 +246,4 @@ Fence menu → Send Diagnostic Report Now sends the app-derived expected schedul
 
 ### Explicitly NOT instrumented (anti-bloat contract)
 
-Per-checkup 1 Hz ticks and no-action integrity checks · SCErr 300 lock timeouts · ordinary authorization-prompt cancellation · routine successes other than the rare aggregated strictify result · 60s schedule-timer firings and no-op recovery exits · ordinary UI interactions · Sentry structured logs · automatic URL/app-hang/performance/session/replay signals · Sparkle checks · anything automatic when Fence telemetry consent is unknown/off. One-shot support consent is not yet implemented.
+Per-checkup 1 Hz ticks and no-action integrity checks · SCErr 300 lock timeouts · ordinary authorization-prompt cancellation · routine successes other than the rare aggregated strictify result · exact-boundary/60s scheduler firings, verified no-ops, and intentional arbitration deferrals · legacy 60s recovery exits · ordinary UI interactions · Sentry structured logs · automatic URL/app-hang/performance/session/replay signals · Sparkle checks · anything automatic when Fence telemetry consent is unknown/off. One-shot support consent is not yet implemented.

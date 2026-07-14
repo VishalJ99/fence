@@ -6,6 +6,7 @@
 //
 
 #import "SCDaemonBlockMethods.h"
+#import "SCDaemonScheduler.h"
 #import "SCDaemonProtocol.h"
 #import "SCSettings.h"
 #import "SCHelperToolUtilities.h"
@@ -222,6 +223,102 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     return comparable.array;
 }
 
++ (BOOL)activeSettingsMatchScheduledRecord:(NSDictionary<NSString *, id> *)record
+                                scheduleID:(NSString *)scheduleID {
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (![SCBlockUtilities modernBlockIsRunning] ||
+        ![[settings valueForKey:@"ActiveScheduleID"] isEqual:scheduleID]) return NO;
+
+    NSArray *requested = [self comparableExistingBlocklistEntries:record[@"blocklist"] ?: @[]];
+    NSArray *active = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
+    NSSet *requestedSet = [NSSet setWithArray:requested];
+    NSSet *activeSet = [NSSet setWithArray:active];
+    if (requestedSet.count != activeSet.count || ![requestedSet isSubsetOfSet:activeSet]) return NO;
+
+    NSString *revision = [record[SCDaemonSchedulePolicyRevisionKey] isKindOfClass:[NSString class]]
+        ? record[SCDaemonSchedulePolicyRevisionKey] : nil;
+    return revision == nil || [[settings valueForKey:@"ActiveSchedulePolicyRevision"] isEqual:revision];
+}
+
++ (void)startScheduledBlockWithID:(NSString *)scheduleID
+                           record:(NSDictionary<NSString *,id> *)record
+                            reply:(void (^)(NSError * _Nullable))reply {
+    if (![scheduleID isKindOfClass:[NSString class]] ||
+        [[NSUUID alloc] initWithUUIDString:scheduleID] == nil ||
+        ![record isKindOfClass:[NSDictionary class]]) {
+        reply([SCErr errorWithCode:403 subDescription:@"Invalid scheduled block record"]);
+        return;
+    }
+
+    if ([self activeSettingsMatchScheduledRecord:record scheduleID:scheduleID]) {
+        reply(nil);
+        return;
+    }
+
+    NSNumber *owner = [record[@"controllingUID"] isKindOfClass:[NSNumber class]] ? record[@"controllingUID"] : nil;
+    NSArray *blocklist = [record[@"blocklist"] isKindOfClass:[NSArray class]] ? record[@"blocklist"] : nil;
+    NSDictionary *blockSettings = [record[@"blockSettings"] isKindOfClass:[NSDictionary class]] ? record[@"blockSettings"] : nil;
+    NSDate *endDate = [record[@"approvedEndDate"] isKindOfClass:[NSDate class]] ? record[@"approvedEndDate"] : nil;
+    if (owner == nil || owner.unsignedIntValue == 0 || blocklist == nil || blockSettings == nil || endDate == nil) {
+        reply([SCErr errorWithCode:403 subDescription:@"Incomplete scheduled block record"]);
+        return;
+    }
+
+    [self startBlockWithControllingUID:owner.unsignedIntValue
+                              blocklist:blocklist
+                            isAllowlist:[record[@"isAllowlist"] boolValue]
+                                endDate:endDate
+                          blockSettings:blockSettings
+                          authorization:nil
+                                  reply:^(NSError *error) {
+        SCSettings *settings = [SCSettings sharedSettings];
+        NSArray *requested = [self comparableExistingBlocklistEntries:blocklist];
+        NSArray *active = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
+        NSSet *requestedSet = [NSSet setWithArray:requested];
+        NSSet *activeSet = [NSSet setWithArray:active];
+        BOOL policyBecameActive = [SCBlockUtilities modernBlockIsRunning] &&
+            requestedSet.count == activeSet.count && [requestedSet isSubsetOfSet:activeSet] &&
+            [[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue] == owner.unsignedIntValue;
+        if (policyBecameActive) {
+            BOOL isV2 = [record[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2;
+            [settings setValue:(isV2 ? SCDaemonActiveBlockSourceSchedulerV2 : SCDaemonActiveBlockSourceLegacySchedule)
+                        forKey:@"ActiveBlockSource"];
+            [settings setValue:scheduleID forKey:@"ActiveScheduleID"];
+            [settings setValue:record[SCDaemonScheduleCommitmentIDKey] forKey:@"ActiveScheduleCommitmentID"];
+            [settings setValue:record[SCDaemonScheduleGenerationKey] forKey:@"ActiveScheduleGeneration"];
+            [settings setValue:record[SCDaemonSchedulePolicyRevisionKey] forKey:@"ActiveSchedulePolicyRevision"];
+            [settings setValue:record[SCDaemonScheduleWeekKey] forKey:@"ActiveScheduleWeekKey"];
+            NSError *syncError = [settings syncSettingsAndWait:5];
+            if (error == nil && syncError != nil) error = syncError;
+        }
+        reply(error);
+    }];
+}
+
++ (void)endScheduledBlockWithReply:(void (^)(NSError * _Nullable))reply {
+    if (![self lockOrTimeout:reply]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+    NSString *source = [settings valueForKey:@"ActiveBlockSource"];
+    BOOL schedulerOwned = [source isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] ||
+        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2];
+    if (![SCBlockUtilities modernBlockIsRunning] || !schedulerOwned) {
+        reply(nil);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    BOOL removed = SCRemoveBlockWithTelemetry();
+    if (removed) [[SCDaemon sharedDaemon] stopCheckupTimer];
+    reply(removed ? nil : [SCErr errorWithCode:500 subDescription:@"Scheduled block teardown did not verify"]);
+    [[SCDaemon sharedDaemon] resetInactivityTimer];
+    [self.daemonMethodLock unlock];
+}
+
 
 + (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData * _Nullable)authData reply:(void(^)(NSError* _Nullable error))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
@@ -312,6 +409,13 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     // Track if this is a test block (can be stopped without emergency unlock)
     BOOL isTestBlock = [blockSettings[@"IsTestBlock"] boolValue];
     [settings setValue: @(isTestBlock) forKey: @"IsTestBlock"];
+    [settings setValue:(isTestBlock ? SCDaemonActiveBlockSourceTest : SCDaemonActiveBlockSourceManual)
+                forKey:@"ActiveBlockSource"];
+    [settings setValue:nil forKey:@"ActiveScheduleID"];
+    [settings setValue:nil forKey:@"ActiveScheduleCommitmentID"];
+    [settings setValue:nil forKey:@"ActiveScheduleGeneration"];
+    [settings setValue:nil forKey:@"ActiveSchedulePolicyRevision"];
+    [settings setValue:nil forKey:@"ActiveScheduleWeekKey"];
 
     NSUInteger appEntryCount = 0;
     for (NSString *entry in canonicalBlocklist) {
@@ -484,6 +588,28 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
              matchingExistingBlocklist:(NSArray<NSString*>*)existingBlocklist
                             resultReply:(void(^)(NSDictionary<NSString*, id>* result, NSError* error))reply {
     NSUInteger requestedCount = [entries isKindOfClass:[NSArray class]] ? entries.count : 0;
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *lockError) {
+        reply(@{
+            @"schema_version": @1,
+            @"outcome": @"failed",
+            @"failed_stage": @"lock",
+            @"requested_count": @(requestedCount),
+        }, lockError);
+    }]) return;
+
+    [self appendEntriesToActiveBlocklistWhileHoldingDaemonLock:entries
+                                     matchingExistingBlocklist:existingBlocklist
+                                                    resultReply:^(NSDictionary<NSString *,id> *result,
+                                                                  NSError *error) {
+        [self.daemonMethodLock unlock];
+        reply(result, error);
+    }];
+}
+
++ (void)appendEntriesToActiveBlocklistWhileHoldingDaemonLock:(NSArray<NSString *> *)entries
+                                    matchingExistingBlocklist:(NSArray<NSString *> *)existingBlocklist
+                                                   resultReply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSUInteger requestedCount = [entries isKindOfClass:[NSArray class]] ? entries.count : 0;
     __block NSMutableDictionary<NSString*, id> *result = [@{
         @"schema_version": @1,
         @"outcome": @"failed",
@@ -499,11 +625,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         @"physical_reapply_attempted": @NO
     } mutableCopy];
 
-    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *lockError) {
-        result[@"failed_stage"] = @"lock";
-        reply([result copy], lockError);
-    }]) return;
-
     [SCSentry addBreadcrumb: @"Daemon method appendEntriesToActiveBlocklist called" category: @"daemon"];
 
     if ([SCBlockUtilities legacyBlockIsRunning]) {
@@ -511,7 +632,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError* err = [SCErr errorWithCode: 303];
         [SCSentry captureError: err];
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -520,7 +640,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError* err = [SCErr errorWithCode: 304];
         [SCSentry captureError: err];
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -531,7 +650,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError* err = [SCErr errorWithCode: 305];
         [SCSentry captureError: err];
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -553,7 +671,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError *err = [SCErr errorWithCode:500 subDescription:@"Active append contained invalid entries"];
         result[@"failed_stage"] = @"canonicalize";
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -562,7 +679,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         result[@"failed_stage"] = @"none";
         result[@"settings_persisted"] = @YES;
         result[@"active_verified"] = @YES;
-        [self.daemonMethodLock unlock];
         reply([result copy], nil);
         return;
     }
@@ -572,7 +688,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError* err = [SCErr errorWithCode: 500 subDescription: @"Missing expected active blocklist"];
         [SCSentry captureError: err];
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -595,7 +710,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSError* err = [SCErr errorWithCode: 500 subDescription: @"Active blocklist did not match expected schedule"];
         [SCSentry captureError: err];
         reply([result copy], err);
-        [self.daemonMethodLock unlock];
         return;
     }
 
@@ -662,7 +776,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     }
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
-    [self.daemonMethodLock unlock];
     reply([result copy], resultError);
 }
 
@@ -773,6 +886,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     }
 
     BOOL shouldRunIntegrityCheck = NO;
+    BOOL scheduleStateChanged = NO;
     if(![SCBlockUtilities anyBlockIsRunning]) {
         // No block appears to be running at all in our settings.
         // Most likely, the user removed it trying to get around the block. Boo!
@@ -782,16 +896,19 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         NSLog(@"=== CHECKUP: NO BLOCK RUNNING ===");
         NSLog(@"CHECKUP: Clearing any remnant rules...");
 
-        [SCSentry captureMessage: @"Checkup ran and no active block found! Removing block, tampering suspected..."];
-
         BOOL pfRemnant = [PacketFilter blockFoundInPF];
         BOOL hostsRemnant = [[HostFileBlockerSet new].defaultBlocker containsSelfControlBlock];
         BOOL appMonitoring = [AppBlocker sharedBlocker].isMonitoring;
         NSUInteger settingsVersion = [[[SCSettings sharedSettings] valueForKey:@"SettingsVersionNumber"] unsignedIntegerValue];
         uid_t telemetryUID = SCTelemetryUIDForCurrentBlock();
-        BOOL teardownVerified = SCRemoveBlockWithTelemetry();
-        SCSpoolUnexpectedBlockRemnants(telemetryUID, hostsRemnant, pfRemnant,
-                                       appMonitoring, teardownVerified, settingsVersion);
+        BOOL remnantsFound = pfRemnant || hostsRemnant || appMonitoring;
+        BOOL teardownVerified = YES;
+        if (remnantsFound) {
+            [SCSentry captureMessage: @"Checkup found physical block remnants without active state; removing them"];
+            teardownVerified = SCRemoveBlockWithTelemetry();
+            SCSpoolUnexpectedBlockRemnants(telemetryUID, hostsRemnant, pfRemnant,
+                                           appMonitoring, teardownVerified, settingsVersion);
+        }
 
         [SCHelperToolUtilities sendConfigurationChangedNotification];
 
@@ -805,6 +922,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
         // once the checkups stop, the daemon will clear itself in a while due to inactivity
         if (teardownVerified) {
+            scheduleStateChanged = YES;
             NSLog(@"CHECKUP: Stopping checkup timer");
             [[SCDaemon sharedDaemon] stopCheckupTimer];
         } else {
@@ -823,9 +941,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [SCHelperToolUtilities sendConfigurationChangedNotification];
 
         if (teardownVerified) {
+            scheduleStateChanged = YES;
             [SCSentry addBreadcrumb: @"Daemon found and cleared expired block" category: @"daemon"];
             // once the checkups stop, the daemon will clear itself in a while due to inactivity
-            NSLog(@"CHECKUP: Stopping checkup timer (next segment should start via launchd job)");
+            NSLog(@"CHECKUP: Stopping checkup timer (daemon scheduler will reconcile the next segment)");
             [[SCDaemon sharedDaemon] stopCheckupTimer];
         } else {
             NSLog(@"CHECKUP: Expired teardown incomplete; retaining timer for retry");
@@ -840,6 +959,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [self.daemonMethodLock unlock];
+
+    if (scheduleStateChanged) {
+        [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
+    }
 
     // if we need to run an integrity check, we need to do it at the very end after we give up our lock
     // because checkBlockIntegrity requests its own lock, and we don't want it to deadlock
@@ -860,7 +983,9 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     HostFileBlockerSet* hostFileBlockerSet = [[HostFileBlockerSet alloc] init];
 
     // Check if network blocking is intact
-    BOOL pfIntact = [pf containsSelfControlBlock];
+    // The pf.conf marker survives reboot even when the kernel anchor is empty.
+    // Integrity must query the live PF rules, not only the on-disk text.
+    BOOL pfIntact = [PacketFilter blockFoundInPF];
     BOOL hostsIntact = [settings boolForKey: @"ActiveBlockAsWhitelist"] || [hostFileBlockerSet.defaultBlocker containsSelfControlBlock];
 
     // Check if app blocking is intact (if there are app entries in settings, AppBlocker should be monitoring)
@@ -969,6 +1094,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [self.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
 }
 
 - (void)isPFBlockActiveWithReply:(void(^)(BOOL active))reply {

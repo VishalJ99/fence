@@ -1,4 +1,4 @@
-# SelfControl Domain Dictionary
+# Fence Domain Dictionary
 
 > **Purpose:** Canonical source of truth for domain-specific terminology in the scheduling system.
 > **Usage:** Agents must reference this dictionary before implementing features involving these terms.
@@ -16,6 +16,7 @@
 | **Merged Blocklist** | Combined entries from all active bundles in a segment | [→ Full Entry](dictionary/merged-blocklist.md) |
 | **Committed State** | Schedule locked after user confirms; cannot be modified | [→ Full Entry](dictionary/committed-state.md) |
 | **Pre-Authorized Schedule** | Segment registered with daemon for password-free execution | [→ Full Entry](dictionary/pre-authorized-schedule.md) |
+| **Root-Owned Schedule** | Immutable root absolute-week envelope plus zero or more V2 segments, reconciled by `selfcontrold` without a user LaunchAgent | [→ Full Entry](dictionary/root-owned-schedule.md) |
 | **Bundle** | Named group of websites/apps with a color for identification | [→ Full Entry](dictionary/bundle.md) |
 | **Entry** | Single blocked item (domain or app bundle ID) | [→ Full Entry](dictionary/entry.md) |
 | **Week Offset** | Index for week navigation (0=current, 1=next) | [→ Full Entry](dictionary/week-offset.md) |
@@ -60,10 +61,10 @@ USER INPUT                    COMPUTATION                   EXECUTION
 │Merged Blocklist│ ◄─── Combined entries from all active bundles
 └───────┬────────┘
         │
-        │ COMMIT (registerScheduleWithID:)
+        │ COMMIT (immutable owner/absolute-week batch)
         ▼
 ┌─────────────────────┐
-│Pre-Authorized Sched.│ ◄─── Registered with daemon, password-free at runtime
+│ Root-Owned Schedule │ ◄─── Stored and reconciled by selfcontrold
 └─────────────────────┘
 ```
 
@@ -76,8 +77,8 @@ USER INPUT                    COMPUTATION                   EXECUTION
 | Bundles (groups of sites/apps) | Block Windows (inverse of allowed) |
 | Allowed Windows (when NOT blocked) | Segments (time slices across bundles) |
 | Commitment (locks schedule) | Merged Blocklists (combined entries) |
-| | Pre-Authorized Schedules (daemon registration) |
+| | Root-Owned Schedules (immutable envelope + atomic daemon registration) |
 
 ---
 
-*Last updated: December 2024*
+*Last updated: July 2026 (PER-383)*

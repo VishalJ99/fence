@@ -19,7 +19,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionTelemetrySpool = 2,
     SCDaemonProtocolVersionExactConsistency = 3,
     SCDaemonProtocolVersionScheduleExecutionSource = 4,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionScheduleExecutionSource,
+    SCDaemonProtocolVersionRootScheduler = 5,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRootScheduler,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -29,6 +30,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityStrictApplyResults @"strict-apply-results-v1"
 #define SCDaemonCapabilityScheduleOwnerBounds @"schedule-owner-bounds-v1"
 #define SCDaemonCapabilityConsistencyProjection @"consistency-projection-v1"
+#define SCDaemonCapabilityRootScheduleStore @"root-schedule-store-v2"
+#define SCDaemonCapabilityRootScheduleTimer @"root-schedule-timer-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -70,6 +73,24 @@ NS_INLINE BOOL SCDaemonFutureStrictifyPostconditionsSatisfied(BOOL settingsPersi
     return settingsPersisted && candidateCount > 0 &&
         matchedCount == candidateCount && matchedSchedulesVerified &&
         loadedJobCount == candidateCount && launchdProbeFailureCount == 0;
+}
+
+/// V2 root-scheduler records have no user LaunchAgent to probe. Persistence and
+/// exact record verification are their postcondition; only draining V1 records
+/// require a loaded legacy job.
+NS_INLINE BOOL SCDaemonFutureStrictifyPostconditionsSatisfiedV2(BOOL settingsPersisted,
+                                                                 NSUInteger candidateCount,
+                                                                 NSUInteger matchedCount,
+                                                                 BOOL matchedSchedulesVerified,
+                                                                 NSUInteger legacyCandidateCount,
+                                                                 NSUInteger loadedLegacyJobCount,
+                                                                 NSUInteger schedulerRecordCount,
+                                                                 NSUInteger launchdProbeFailureCount) {
+    return settingsPersisted && candidateCount > 0 &&
+        matchedCount == candidateCount && matchedSchedulesVerified &&
+        loadedLegacyJobCount == legacyCandidateCount &&
+        schedulerRecordCount + legacyCandidateCount == candidateCount &&
+        launchdProbeFailureCount == 0;
 }
 
 /// Exact consistency must fail closed on physical remnants even when the app
@@ -164,6 +185,21 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
 - (void)getSanitizedDaemonSnapshotForExpectedState:(NSDictionary<NSString *, id> *)expectedState
                                              reply:(void(^)(NSDictionary<NSString *, id> *snapshot,
                                                             NSError * _Nullable error))reply;
+
+/// Atomically admits one authenticated owner's immutable absolute-week
+/// commitment. A different unexpired overlap is rejected; an exact retry is
+/// idempotent. Every segment is validated before the root store is mutated.
+/// The reply contains counts/booleans/static status strings only; identifiers
+/// remain local.
+- (void)replaceScheduledCommitmentForWeekKey:(NSString *)weekKey
+                               weekStartDate:(NSDate *)weekStartDate
+                                 weekEndDate:(NSDate *)weekEndDate
+                                commitmentID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                    segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                               authorization:(NSData *)authData
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
 
 // XPC method to register a schedule (requires authorization, stores approved schedule)
 - (void)registerScheduleWithID:(NSString*)scheduleId

@@ -2,19 +2,24 @@
 
 > **Purpose:** Technical analysis of block scheduling robustness, stuck-block risks, and safety mechanisms.
 >
-> **Last Updated:** December 2024
+> **Last Updated:** July 2026 (PER-383)
 
 ---
 
 ## Executive Summary
 
-SelfControl's blocking system is designed to be **tamper-resistant** but also **safe** - users should never get permanently stuck in a block they can't escape. This document analyzes:
+Fence's blocking system is designed to be **tamper-resistant** but also **safe** - users should never get permanently stuck in a block they can't escape. This document analyzes:
 
 1. How robust is the scheduling system against various failure modes?
 2. What scenarios could cause a "stuck block"?
 3. What safety mechanisms exist to prevent/recover from stuck states?
 
-**Key Finding:** The system is robust for normal operation. The primary risk is future macOS changes restricting low-level operations (`/etc/hosts`, `pfctl`). The safety check system detects these issues before users can get stuck.
+**Key Finding:** The V2 scheduler removes user LaunchAgents, a CLI path, and
+per-commit daemon reinstall from the authority chain for future blocks. Root
+store persistence plus wall-clock recomputation now survives logout, reboot,
+wake, and Background Items changes. The primary stuck-block risk remains a
+future macOS restriction on low-level apply/teardown operations
+(`/etc/hosts`, `pfctl`, or process termination).
 
 ---
 
@@ -41,20 +46,19 @@ User clicks "Commit to Week"
 ┌──────────────────────────────────────────────────────────────┐
 │ SCScheduleManager.commitToWeekWithOffset:                    │
 │                                                              │
-│  1. Calculate segments (time slices with consistent bundles) │
-│  2. Install daemon via SMJobBless (PASSWORD PROMPT - once)   │
-│  3. For each segment:                                        │
-│     ├─ Register with daemon (ApprovedSchedules)              │
-│     └─ Create launchd job (~/Library/LaunchAgents/)          │
-│  4. Store commitmentEndDate in NSUserDefaults                │
+│  1. Calculate zero or more segments + absolute-week envelope │
+│  2. Verify daemon protocol 5 + root-scheduler capabilities   │
+│  3. Send one authenticated owner/absolute-week batch         │
+│  4. Reject unexpired overlap or persist envelope + records   │
+│  5. Store commitmentEndDate + local V2 manifest              │
 └──────────────────────────────────────────────────────────────┘
         │
         ▼ (at scheduled time)
 ┌──────────────────────────────────────────────────────────────┐
-│ launchd triggers selfcontrol-cli --schedule-id=UUID          │
+│ selfcontrold recomputes desired state at an absolute boundary│
 │        │                                                     │
 │        ▼                                                     │
-│ Daemon looks up UUID in ApprovedSchedules (NO PASSWORD)      │
+│ Daemon selects validated root record (NO PASSWORD)           │
 │        │                                                     │
 │        ▼                                                     │
 │ Block applied (hosts + PF + app blocking)                    │
@@ -66,8 +70,10 @@ User clicks "Commit to Week"
 | Data | Location | Owner | Survives Reboot |
 |------|----------|-------|-----------------|
 | Commitment state | `NSUserDefaults` (SCWeekCommitment_*) | User | Yes |
+| V2 local mapping manifest | `NSUserDefaults` (SCScheduleManifest_*) | User | Yes |
+| Immutable V2 commitment envelope | `ApprovedScheduleCommitments` in root settings | Root | Yes |
 | ApprovedSchedules | `/usr/local/etc/.{hash}.plist` | Root | Yes |
-| Scheduled jobs | `~/Library/LaunchAgents/` | User | Yes |
+| V1 scheduled jobs (drain only) | `~/Library/LaunchAgents/` | User | Yes |
 | Block rules | `/etc/hosts`, `/etc/pf.anchors/` | Root | Yes |
 
 ### Key Files
@@ -75,9 +81,10 @@ User clicks "Commit to Week"
 | File | Purpose |
 |------|---------|
 | `Block Management/SCScheduleManager.m` | Commitment logic, segment calculation |
-| `Block Management/SCScheduleLaunchdBridge.m` | launchd job creation |
-| `Daemon/SCDaemonXPC.m` | ApprovedSchedules storage |
-| `cli-main.m` | Handles `--schedule-id` for scheduled blocks |
+| `Common/SCXPCClient.m` | Root-scheduler capability gate and batch call |
+| `Daemon/SCDaemonXPC.m` | Absolute-overlap/idempotency admission and atomic envelope + record persistence |
+| `Daemon/SCDaemonScheduler.m` | Desired-state selection and recovery triggers |
+| `Block Management/SCScheduleLaunchdBridge.m` | V1 rollback/drain compatibility only |
 
 ---
 
@@ -87,11 +94,13 @@ User clicks "Commit to Week"
 
 | Aspect | Implementation | Robustness |
 |--------|----------------|------------|
-| Explicit handling | **None** - no NSWorkspaceWillSleepNotification | N/A |
-| Implicit survival | NSTimer auto-resumes after wake | Strong |
+| Explicit handling | `NSWorkspaceDidWakeNotification` triggers reconciliation | Strong |
+| Missed-boundary recovery | Root store recomputation plus 60-second backstop | Strong |
 | File persistence | Rules in /etc/hosts and PF survive | Strong |
 
-**Note:** The system relies on macOS automatically resuming timers for active processes. No explicit sleep/wake handling is implemented.
+**Note:** Wake and wall-clock/timezone changes explicitly trigger the V2
+evaluator. The exact timer improves promptness; the persisted absolute records
+provide correctness.
 
 ### Shutdown/Reboot
 
@@ -107,13 +116,13 @@ Daemon checks for existing block rules
      │
      ├── YES → Start checkup timer, resume monitoring
      │
-     └── NO → Check for MISSED scheduled blocks
+     └── NO → Root scheduler evaluates persisted records
                │
                ▼
-         startMissedBlockIfNeeded()
-         - Reads ApprovedSchedules
-         - Parses LaunchAgents for schedule times
-         - If current time is in a scheduled window → START
+         SCDaemonScheduler
+         - Reads validated V1/V2 ApprovedSchedules
+         - Selects start <= now < end for the relevant owner
+         - Starts or defers according to active provenance
 ```
 
 ### Checkup Timer (1-Second Integrity Check)
@@ -130,6 +139,42 @@ Every 15 seconds (`checkBlockIntegrity`):
 
 Plus: **FSEventStream on /etc/hosts** - instant detection (~1.5s) of tampering.
 
+### Transition Safety Boundary
+
+PER-383 deliberately does not claim gapless active-to-active replacement. If a
+store mutation selects a different V2 policy while a schedule-owned block is
+active, reconciliation defers instead of removing the current physical rules
+before applying the next set. Manual and test blocks also defer all schedule
+starts.
+
+The pre-existing one-minute inter-segment compatibility gap remains. Closing
+it safely requires a separately tested PF/hosts/AppBlocker operation that
+stages the new policy before obsolete rules are removed.
+
+### Commitment Admission Safety
+
+`ApprovedScheduleCommitments` keeps the commitment lock in root state even for
+a zero-segment week. An unexpired envelope or schedule record (including V1)
+rejects a different overlapping batch for the same authenticated owner. The
+comparison uses absolute week bounds, not only `weekKey`, so local
+defaults/manifest loss or a
+travel-induced key shift cannot reopen the interval. Repeating the exact same
+batch identity and record content is idempotent. The guard is bidirectional:
+legacy V1 registration also rejects an absolute window that overlaps an
+unexpired V2 envelope.
+
+Release builds reject bulk approved-schedule clearing even after
+authorization. DEBUG builds retain the test operation but clear
+`ApprovedSchedules` and `ApprovedScheduleCommitments` together under the
+daemon mutation lock. A live V2 record also cannot be removed through the
+legacy single-record unregister selector.
+
+Strictification preserves the same fail-closed ordering. If a matching root
+record owns the active block, hosts/PF/app additions and active settings must
+verify under the daemon mutation lock before the stricter future record is
+persisted. Scheduler no-op matching includes commitment/generation, policy,
+mode, and content, so identity alone cannot hide weaker active enforcement.
+
 ---
 
 ## 3. Tamper Resistance Analysis
@@ -144,10 +189,15 @@ Plus: **FSEventStream on /etc/hosts** - instant detection (~1.5s) of tampering.
 | Edit /etc/hosts | FSEventStream + auto-repair | **Strong** (~1.5s) |
 | Flush PF rules | 15s checkup + auto-repair | **Moderate** (15s window) |
 | `defaults write` | Settings in root-owned file | **Strong** |
-| Remove LaunchAgents | User can unload future schedules | **Weak** |
+| Remove LaunchAgents | V2 is unaffected; only draining V1 jobs are lost | **Strong for V2 / Weak for V1** |
+| Invoke bulk approved-schedule clear | Release daemon rejects it; DEBUG clears records + envelopes together | **Strong in release** |
 | Run as different user | Network blocking is system-wide | **Strong** |
 
-### Vulnerability: Scheduled Jobs in User Space
+### Legacy V1 Vulnerability: Scheduled Jobs in User Space
+
+The following weakness applies only to already-installed V1 rollback/drain
+jobs. New V2 commitments are stored and timed by root `selfcontrold` and do not
+create these files.
 
 ```
 Location: ~/Library/LaunchAgents/org.eyebeam.selfcontrol.schedule.*
@@ -156,8 +206,8 @@ User CAN:
   - launchctl unload ~/Library/LaunchAgents/...
   - rm ~/Library/LaunchAgents/org.eyebeam.selfcontrol.*
 
-Result: Future scheduled blocks WON'T trigger
-        (Current active block unaffected)
+Result: Those V1 scheduled blocks may not trigger
+        (V2 commitments and current active blocks are unaffected)
 ```
 
 ---
@@ -358,7 +408,7 @@ If both daemon and emergency.sh fail, users with root access can still:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  CURRENT ACTIVE BLOCK                                            │
-│  ├── Sleep/Wake.............. STRONG (implicit timer resume)    │
+│  ├── Sleep/Wake.............. STRONG (wake reconciliation)      │
 │  ├── Reboot.................. STRONG (RunAtLoad + recovery)     │
 │  ├── App quit/delete......... STRONG (daemon independent)       │
 │  ├── Daemon killed........... STRONG (KeepAlive restarts)       │
@@ -367,9 +417,9 @@ If both daemon and emergency.sh fail, users with root access can still:
 │  └── Root access............. WEAK (can disable everything)     │
 │                                                                  │
 │  SCHEDULED FUTURE BLOCKS                                         │
-│  ├── Reboot.................. STRONG (launchd persists jobs)    │
-│  ├── LaunchAgent removal..... WEAK (user can unload)            │
-│  ├── App deletion............ WEAK (CLI path breaks)            │
+│  ├── Reboot.................. STRONG (root records + RunAtLoad)  │
+│  ├── LaunchAgent removal..... STRONG V2 / WEAK draining V1      │
+│  ├── App deletion............ STRONG V2 (daemon owns timing)    │
 │  └── Clock manipulation...... STRONG (absolute dates)           │
 │                                                                  │
 │  STUCK BLOCK PREVENTION                                          │
@@ -386,7 +436,7 @@ If both daemon and emergency.sh fail, users with root access can still:
 ## Key Takeaways
 
 1. **Active blocks are highly robust** - survive sleep, reboot, tampering, app deletion
-2. **Scheduled future blocks have vulnerabilities** - user can remove LaunchAgents
+2. **V2 future blocks no longer depend on user LaunchAgents** - V1 retains that weakness only during rollback/drain
 3. **Stuck blocks are unlikely** - safety check catches issues before commitment
 4. **emergency.sh is tested** - Phase 2 of safety check verifies it works
 5. **Biggest risk is macOS changes** - but safety check would detect this
@@ -402,4 +452,4 @@ If both daemon and emergency.sh fail, users with root access can still:
 
 ---
 
-*Last updated: December 2024*
+*Last updated: July 2026 (PER-383)*

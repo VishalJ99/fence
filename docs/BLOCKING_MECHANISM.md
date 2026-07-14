@@ -1,10 +1,45 @@
-# SelfControl Blocking Mechanism Deep Dive
+# Fence Blocking Mechanism Deep Dive
 
 > **Purpose:** Technical documentation of how blocking works and how to extend it for app blocking
 
 ---
 
 ## Current Blocking Architecture
+
+### Schedule Activation Authority (PER-383)
+
+The blocking mechanisms below are unchanged: `BlockManager` still owns the
+physical hosts, PF, and AppBlocker apply/teardown operations. What changed is
+who decides *when* a committed schedule should call them.
+
+For new V2 commitments, `SCDaemonScheduler` in the root daemon selects the
+desired absolute segment from root-owned `ApprovedSchedules` and calls
+`SCDaemonBlockMethods`. It evaluates at the next exact boundary and at
+startup/wake/clock/timezone/mutation/completion triggers, with a 60-second
+backstop. New commitments do not create per-segment LaunchAgents or run the
+CLI at the boundary.
+
+Active provenance distinguishes manual, safety-test, legacy-schedule, and V2
+scheduler blocks. Manual/test enforcement is never replaced automatically.
+Likewise, if a V2 mutation selects a different policy while another
+schedule-owned block is active, the scheduler defers: this cutover does not
+remove current rules and then add replacements. A verified match includes
+schedule/owner provenance, mode and content, and for V2 also commitment,
+generation, and policy revision.
+
+The existing one-minute inter-segment compatibility gap remains. Removing it
+requires a separate physical replacement primitive that stages the new
+PF/hosts/AppBlocker policy before dropping obsolete rules.
+
+Existing V1 LaunchAgents, CLI selectors, and approvals remain only as a
+bounded current/next-week rollback/drain path. They are not removed by V2
+commit: an unexpired V1 record rejects an overlapping V2 absolute-week
+envelope. The inverse is also guarded: legacy registration rejects an
+unexpired overlapping V2 envelope. V2 envelopes are immutable, include
+zero-segment commitments, and make exact same-batch identity/content retries
+idempotent. Release builds reject bulk approved-schedule clearing; DEBUG tests
+clear the envelope and record maps together. See
+[SCHEDULE_JOB_LIFECYCLE.md](SCHEDULE_JOB_LIFECYCLE.md).
 
 ### The Two Walls
 
@@ -175,7 +210,7 @@ Every 1 second (SCDaemonBlockMethods.m:~200):
 ├──────────────────────────────────────────────────────┤
 │                                                       │
 │  1. Check if BlockEndDate has passed                 │
-│     └── If yes: Remove block, kill daemon            │
+│     └── If yes: Remove block, notify root scheduler  │
 │                                                       │
 │  2. Verify /etc/hosts contains SelfControl section   │
 │     └── If missing: Restore from .bak                │
@@ -531,3 +566,4 @@ SMAppService (new):     App deleted → Daemon GONE ❌
 |------|--------|
 | 2025-01 | Initial risk assessment based on 15-year codebase analysis |
 | 2025-01 | Updated SMJobBless risk to MEDIUM — already deprecated in macOS 13. Added workarounds (.pkg installer, self-extract) |
+| 2026-07 | PER-383 moved V2 schedule timing into `selfcontrold`; physical blocking layers and the one-minute compatibility gap remain unchanged |

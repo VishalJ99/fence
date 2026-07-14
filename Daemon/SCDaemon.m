@@ -9,14 +9,15 @@
 #import "SCDaemonProtocol.h"
 #import "SCDaemonXPC.h"
 #import "SCDaemonBlockMethods.h"
+#import "SCDaemonScheduler.h"
 #import "SCFileWatcher.h"
 #import "SCScheduleManager.h"
 #import "SCSettings.h"
 #import "SCMiscUtilities.h"
 #import "SCTelemetrySpool.h"
+#import <AppKit/AppKit.h>
 #import <bsm/libbsm.h>
 #include <pwd.h>
-#include <math.h>
 
 static NSString* serviceName = @"org.eyebeam.selfcontrold";
 float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
@@ -108,28 +109,6 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
     }
 }
 
-static NSUInteger SCDaemonScheduleMinutesLateBucket(NSDate *approvedStartDate) {
-    if (![approvedStartDate isKindOfClass:[NSDate class]]) return 0;
-    NSUInteger minutes = (NSUInteger)floor(MAX(0, -[approvedStartDate timeIntervalSinceNow]) / 60.0);
-    if (minutes == 0) return 0;
-    if (minutes < 5) return 1;
-    if (minutes < 15) return 5;
-    if (minutes < 60) return 15;
-    if (minutes < 360) return 60;
-    if (minutes < 1440) return 360;
-    return 1440;
-}
-
-static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, uid_t uid) {
-    NSUInteger count = 0;
-    for (id candidate in approvedSchedules.allValues) {
-        NSDictionary *schedule = [candidate isKindOfClass:[NSDictionary class]] ? candidate : nil;
-        NSNumber *owner = schedule[@"controllingUID"];
-        if ([owner isKindOfClass:[NSNumber class]] && owner.unsignedIntValue == uid) count += 1;
-    }
-    return count;
-}
-
 @interface NSXPCConnection(PrivateAuditToken)
 
 // This property exists, but it's private. Make it available:
@@ -142,8 +121,12 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
 @property (nonatomic, strong, readwrite) NSXPCListener* listener;
 @property (strong, readwrite) NSTimer* checkupTimer;
 @property (strong, readwrite) NSTimer* inactivityTimer;
-@property (strong, readwrite) NSTimer* scheduleCheckTimer;
 @property (nonatomic, strong, readwrite) NSDate* lastActivityDate;
+@property (nonatomic, strong) SCDaemonScheduler *scheduler;
+@property (nonatomic, strong) id wakeObserver;
+@property (nonatomic, strong) id sessionObserver;
+@property (nonatomic, strong) id clockObserver;
+@property (nonatomic, strong) id timezoneObserver;
 
 @property (nonatomic, strong) SCFileWatcher* hostsFileWatcher;
 @property (nonatomic, strong) id settingsLoadFailureObserver;
@@ -166,6 +149,54 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
 - (id) init {
     _listener = [[NSXPCListener alloc] initWithMachServiceName: serviceName];
     _listener.delegate = self;
+
+    __weak typeof(self) weakSelf = self;
+    _scheduler = [[SCDaemonScheduler alloc]
+        initWithStateProvider:^NSDictionary<NSString *,id> *{
+            SCSettings *settings = [SCSettings sharedSettings];
+            id approved = [settings valueForKey:@"ApprovedSchedules"];
+            return @{
+                @"settings_available": @(settings.settingsStateAvailableForEnforcement),
+                @"approved_schedules": [approved isKindOfClass:[NSDictionary class]] ? approved : @{},
+                @"block_running": @([SCBlockUtilities modernBlockIsRunning]),
+                @"block_end_date": [settings valueForKey:@"BlockEndDate"] ?: [NSNull null],
+                @"active_block_source": [settings valueForKey:@"ActiveBlockSource"] ?: @"unknown",
+                @"active_schedule_id": [settings valueForKey:@"ActiveScheduleID"] ?: @"",
+                @"active_commitment_id": [settings valueForKey:@"ActiveScheduleCommitmentID"] ?: @"",
+                @"active_generation": [settings valueForKey:@"ActiveScheduleGeneration"] ?: @"",
+                @"active_policy_revision": [settings valueForKey:@"ActiveSchedulePolicyRevision"] ?: @"",
+                @"active_blocklist": [settings valueForKey:@"ActiveBlocklist"] ?: @[],
+                @"active_is_allowlist": @([settings boolForKey:@"ActiveBlockAsWhitelist"]),
+                @"active_owner_uid": [settings valueForKey:@"ActiveBlockControllingUID"] ?: @0,
+                @"console_uid": @([SCMiscUtilities consoleUserUID]),
+                @"now": [NSDate date],
+            };
+        }
+        reconcileHandler:^(NSString *scheduleID, NSDictionary<NSString *,id> *record, void (^completion)(NSError *)) {
+            [SCDaemonBlockMethods startScheduledBlockWithID:scheduleID record:record reply:completion];
+        }
+        endHandler:^(void (^completion)(NSError *)) {
+            [SCDaemonBlockMethods endScheduledBlockWithReply:completion];
+        }
+        anomalyHandler:^(NSDictionary<NSString *,id> *fields) {
+            typeof(self) strongSelf = weakSelf;
+            if (strongSelf == nil) return;
+            NSDictionary *safeFields = [SCSentry sanitizedTelemetryFields:fields
+                                                              forEventName:@"schedule.reconcile_anomaly"];
+            if (safeFields == nil) return;
+            NSNumber *owner = [[SCSettings sharedSettings] valueForKey:@"ActiveBlockControllingUID"];
+            uid_t uid = [owner isKindOfClass:[NSNumber class]] ? owner.unsignedIntValue : 0;
+            if (uid == 0) uid = [SCMiscUtilities consoleUserUID];
+            if (uid == 0) return;
+            NSError *spoolError = nil;
+            [[[SCTelemetrySpool alloc] init] appendEventName:@"schedule.reconcile_anomaly"
+                                                       level:SCTelemetryEventLevelError
+                                                      fields:safeFields
+                                                      origin:SCTelemetryOriginDaemon
+                                                      forUID:uid
+                                                       error:&spoolError];
+            if (spoolError != nil) SCDaemonLogError(@"Could not spool scheduler anomaly", spoolError);
+        }];
     
     return self;
 }
@@ -194,20 +225,30 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
         [self startCheckupTimer];
     }
 
-    // Check for missed scheduled blocks (e.g., after reboot during scheduled window)
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self startMissedBlockIfNeeded];
-    });
-
-    // Periodic check for scheduled blocks (handles launchd permission bypass, sleep/wake)
-    NSLog(@"SCDaemon: Starting schedule check timer (every 1 minute)");
-    self.scheduleCheckTimer = [NSTimer scheduledTimerWithTimeInterval: 60 // 1 minute
-                                                              repeats: YES
-                                                                block:^(NSTimer * _Nonnull timer) {
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            [self startMissedBlockIfNeeded];
+    if ([SCBlockUtilities modernBlockIsRunning] && ![SCBlockUtilities currentBlockIsExpired]) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [SCDaemonBlockMethods checkBlockIntegrity];
         });
-    }];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    self.wakeObserver = [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+            [weakSelf scheduleStateDidChangeWithTrigger:@"wake"];
+        }];
+    self.sessionObserver = [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceSessionDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+            [weakSelf scheduleStateDidChangeWithTrigger:@"session_change"];
+        }];
+    self.clockObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSSystemClockDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+            [weakSelf scheduleStateDidChangeWithTrigger:@"clock_change"];
+        }];
+    self.timezoneObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSSystemTimeZoneDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+            [weakSelf scheduleStateDidChangeWithTrigger:@"clock_change"];
+        }];
+    [self.scheduler start];
 
     [self startInactivityTimer];
     [self resetInactivityTimer];
@@ -241,6 +282,12 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
     [SCDaemonBlockMethods checkupBlock];
 }
 - (void)stopCheckupTimer {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self stopCheckupTimer];
+        });
+        return;
+    }
     if (self.checkupTimer == nil) {
         return;
     }
@@ -266,6 +313,23 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
         [[NSNotificationCenter defaultCenter] removeObserver:self.settingsLoadFailureObserver];
         self.settingsLoadFailureObserver = nil;
     }
+    if (self.wakeObserver != nil) {
+        [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self.wakeObserver];
+        self.wakeObserver = nil;
+    }
+    if (self.sessionObserver != nil) {
+        [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self.sessionObserver];
+        self.sessionObserver = nil;
+    }
+    if (self.clockObserver != nil) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.clockObserver];
+        self.clockObserver = nil;
+    }
+    if (self.timezoneObserver != nil) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.timezoneObserver];
+        self.timezoneObserver = nil;
+    }
+    [self.scheduler stop];
     if (self.checkupTimer) {
         [self.checkupTimer invalidate];
         self.checkupTimer = nil;
@@ -278,6 +342,15 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
         [self.hostsFileWatcher stopWatching];
         self.hostsFileWatcher = nil;
     }
+}
+
+- (void)scheduleStateDidChangeWithTrigger:(NSString *)trigger {
+    [self.scheduler evaluateForTrigger:trigger];
+}
+
+- (void)scheduleStateDidChangeWithTrigger:(NSString *)trigger
+                                completion:(void (^)(NSDictionary<NSString *,id> *))completion {
+    [self.scheduler evaluateForTrigger:trigger completion:completion];
 }
 
 - (void)recordSettingsLoadFailure:(NSDictionary<NSString *, id> *)fields {
@@ -302,189 +375,12 @@ static NSUInteger SCDaemonOwnedApprovalCount(NSDictionary *approvedSchedules, ui
     }
 }
 
-#pragma mark - Missed Block Recovery
-
-/// Checks if we're inside a scheduled block window but no block is running.
-/// If so, starts the block immediately. Called on daemon startup to recover
-/// from missed launchd triggers (e.g., after reboot during scheduled block).
-- (void)startMissedBlockIfNeeded {
-    NSLog(@"SCDaemon: Checking for missed scheduled blocks...");
-
-    // Don't check if a block is already running
-    BOOL blockRunning = [SCBlockUtilities anyBlockIsRunning];
-    if (blockRunning) {
-        NSLog(@"SCDaemon: Block already running, skipping missed block check");
-        return;
-    }
-
-    // ApprovedSchedules is root-owned and is the only authority for timing.
-    // LaunchAgent plists live in the user's home directory and may be removed
-    // or edited, so recovery must not use their dates to extend, shorten, or
-    // suppress a committed block.
-
-    SCSettings *settings = [SCSettings sharedSettings];
-    NSDictionary *approvedSchedules = [settings valueForKey:@"ApprovedSchedules"];
-
-    if (![approvedSchedules isKindOfClass:[NSDictionary class]] || approvedSchedules.count == 0) {
-        NSLog(@"SCDaemon: No approved schedules found");
-        return;
-    }
-
-    // Get console user's home directory to find launchd jobs
-    uid_t consoleUID = [SCMiscUtilities consoleUserUID];
-
-    // If no console user, try to get controllingUID from any approved schedule
-    if (consoleUID == 0) {
-        for (NSString *schedId in approvedSchedules) {
-            NSDictionary *sched = approvedSchedules[schedId];
-            NSNumber *ctrlUID = sched[@"controllingUID"];
-            if (ctrlUID && [ctrlUID unsignedIntValue] != 0) {
-                consoleUID = [ctrlUID unsignedIntValue];
-                break;
-            }
-        }
-    }
-
-    if (consoleUID == 0) {
-        NSLog(@"SCDaemon: No console user found and no controllingUID in ApprovedSchedules");
-        return;
-    }
-
-    NSDate *now = [NSDate date];
-    NSString *activeSegmentID = nil;
-    NSDate *activeEndDate = nil;
-    NSDate *activeStartDate = nil;
-    NSUInteger inspectedScheduleCount = 0;
-    NSUInteger expiredScheduleCount = 0;
-
-    for (id candidateID in approvedSchedules) {
-        if (![candidateID isKindOfClass:[NSString class]] ||
-            [[NSUUID alloc] initWithUUIDString:candidateID] == nil) {
-            continue;
-        }
-        NSDictionary *schedule = [approvedSchedules[candidateID] isKindOfClass:[NSDictionary class]]
-            ? approvedSchedules[candidateID] : nil;
-        if (schedule == nil) continue;
-        inspectedScheduleCount += 1;
-
-        NSNumber *owner = schedule[@"controllingUID"];
-        NSDate *approvedStartDate = schedule[@"approvedStartDate"];
-        NSDate *approvedEndDate = schedule[@"approvedEndDate"];
-        NSArray *blocklist = schedule[@"blocklist"];
-        NSDictionary *blockSettings = schedule[@"blockSettings"];
-        if (!SCDaemonClientOwnsSchedule(consoleUID, owner) ||
-            ![approvedStartDate isKindOfClass:[NSDate class]] ||
-            ![approvedEndDate isKindOfClass:[NSDate class]] ||
-            ![blocklist isKindOfClass:[NSArray class]] ||
-            ![blockSettings isKindOfClass:[NSDictionary class]] ||
-            [approvedEndDate compare:approvedStartDate] != NSOrderedDescending) {
-            continue;
-        }
-
-        if ([approvedEndDate compare:now] != NSOrderedDescending) {
-            expiredScheduleCount += 1;
-            [self cleanupStaleScheduleWithID:candidateID controllingUID:consoleUID];
-            continue;
-        }
-        if ([approvedStartDate compare:now] == NSOrderedDescending) continue;
-
-        // If windows overlap, recover the segment that began most recently.
-        if (activeStartDate == nil ||
-            [approvedStartDate compare:activeStartDate] == NSOrderedDescending) {
-            activeSegmentID = candidateID;
-            activeStartDate = approvedStartDate;
-            activeEndDate = approvedEndDate;
-        }
-    }
-
-    if (!activeSegmentID) {
-        NSLog(@"SCDaemon: No approved segment active (inspected=%lu expired=%lu)",
-              (unsigned long)inspectedScheduleCount,
-              (unsigned long)expiredScheduleCount);
-        return;
-    }
-
-    NSLog(@"SCDaemon: Found missed block; starting approved segment");
-
-    // Start the block using the approved schedule
-    NSDictionary *schedule = approvedSchedules[activeSegmentID];
-    NSArray *blocklist = schedule[@"blocklist"];
-    BOOL isAllowlist = [schedule[@"isAllowlist"] boolValue];
-    NSDictionary *blockSettings = schedule[@"blockSettings"];
-    uid_t controllingUID = [schedule[@"controllingUID"] unsignedIntValue];
-
-    NSLog(@"SCDaemon: Starting approved segment (entryCount=%lu)",
-          (unsigned long)blocklist.count);
-
-    [SCDaemonBlockMethods startBlockWithControllingUID:controllingUID
-                                             blocklist:blocklist
-                                           isAllowlist:isAllowlist
-                                               endDate:activeEndDate
-                                         blockSettings:blockSettings
-                                         authorization:nil
-                                                 reply:^(NSError *error) {
-        if (error) {
-            SCDaemonLogError(@"Failed to start approved segment", error);
-            NSDictionary *fields = @{
-                @"path": @"daemon_recovery",
-                @"block_already_running": @([SCBlockUtilities anyBlockIsRunning]),
-                @"minutes_late_bucket": @(SCDaemonScheduleMinutesLateBucket(activeStartDate)),
-                @"approved_count": @(SCDaemonOwnedApprovalCount(approvedSchedules, controllingUID)),
-                @"list_count": @(blocklist.count),
-                @"error_code": @(error.code),
-            };
-            NSError *spoolError = nil;
-            [[[SCTelemetrySpool alloc] init] appendEventName:@"schedule.exec_failed"
-                                                       level:SCTelemetryEventLevelError
-                                                      fields:fields
-                                                      origin:SCTelemetryOriginDaemon
-                                                      forUID:controllingUID
-                                                       error:&spoolError];
-            if (spoolError != nil) {
-                SCDaemonLogError(@"Could not spool missed-schedule execution failure", spoolError);
-            }
-        } else {
-            NSLog(@"SCDaemon: Successfully started approved segment");
-        }
-    }];
-}
-
 #pragma mark - Schedule Cleanup
 
-/// Cleans up a stale schedule by removing it from ApprovedSchedules and deleting the launchd job.
-/// Called when a job fires with an expired endDate.
-- (void)cleanupStaleScheduleWithID:(NSString *)scheduleId {
-    SCSettings *settings = [SCSettings sharedSettings];
-    NSDictionary *approved = [settings valueForKey:@"ApprovedSchedules"];
-    NSDictionary *schedule = [approved[scheduleId] isKindOfClass:[NSDictionary class]]
-        ? approved[scheduleId] : nil;
-    NSNumber *owner = schedule[@"controllingUID"];
-    uid_t controllingUID = [owner isKindOfClass:[NSNumber class]] ? owner.unsignedIntValue : 0;
-    if (controllingUID == 0) controllingUID = [SCMiscUtilities consoleUserUID];
-    [self cleanupStaleScheduleWithID:scheduleId controllingUID:controllingUID];
-}
-
-- (void)cleanupStaleScheduleWithID:(NSString *)scheduleId controllingUID:(uid_t)controllingUID {
-    NSLog(@"SCDaemon: Cleaning up stale schedule");
-
-    // 1. Remove from ApprovedSchedules
-    SCSettings *settings = [SCSettings sharedSettings];
-    NSMutableDictionary *approved = [[settings valueForKey:@"ApprovedSchedules"] mutableCopy];
-    NSDictionary *schedule = [approved[scheduleId] isKindOfClass:[NSDictionary class]]
-        ? approved[scheduleId] : nil;
-    NSNumber *storedOwner = schedule[@"controllingUID"];
-    if ([storedOwner isKindOfClass:[NSNumber class]] && storedOwner.unsignedIntValue != controllingUID) {
-        NSLog(@"SCDaemon: Refusing stale cleanup with an owner mismatch");
-        return;
-    }
-    if (approved && approved[scheduleId]) {
-        [approved removeObjectForKey:scheduleId];
-        [settings setValue:approved forKey:@"ApprovedSchedules"];
-        [settings synchronizeSettings];
-        NSLog(@"SCDaemon: Removed stale schedule from approved schedules");
-    }
-
-    // 2. Find and remove launchd job plist
+- (void)cleanupLegacyScheduleArtifactsWithID:(NSString *)scheduleId
+                               controllingUID:(uid_t)controllingUID {
+    // Find and remove only the draining V1 LaunchAgent. Keeping this separate
+    // prevents post-commit artifact cleanup from racing a newer root record.
     if (controllingUID == 0) {
         NSLog(@"SCDaemon: No controlling user, skipping launchd cleanup");
         return;
