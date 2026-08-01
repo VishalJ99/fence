@@ -43,4 +43,5 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - GUI smoke tests can be automated locally with `peekaboo` once the app is built and launchable.
 
 ## Decisions of record
-- No human decision records are checked in yet. Use `decisions/human/` for durable decisions and treat `SYSTEM_ARCHITECTURE.md`, `SETUP.md`, and `BUILD_MACOS26.md` as current technical context until that record exists.
+- `decisions/human/2026-08-01-tab-binary-and-permission-boundary.md` — approved boundary keeping Tab as a standalone companion identity, with the three-tier eyes UI frozen after PER-414.
+- Use `decisions/human/` for durable decisions and treat `SYSTEM_ARCHITECTURE.md`, `SETUP.md`, and `BUILD_MACOS26.md` as current technical context where no specific decision record exists.
