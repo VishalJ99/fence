@@ -1,0 +1,16 @@
+Artifact: Tab.app
+Ticket: PER-414
+Source commit: d43b0a20c8c73766a860a69359d4e1fafac43830
+
+From the repository root:
+
+  xcodebuild -project Tab/Tab.xcodeproj -scheme Tab \
+    -configuration Debug CODE_SIGNING_ALLOWED=NO \
+    -destination 'platform=macOS' test
+
+  Tab/scripts/build-app.sh
+
+The build script uses an ad-hoc signature by default and writes Tab.app beside
+this file. To use an installed signing identity, set TAB_CODE_SIGN_IDENTITY to
+its label before running the script. No protected permission is requested by
+this milestone.
