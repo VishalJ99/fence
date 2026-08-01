@@ -4,7 +4,7 @@ import XCTest
 final class TabExpressionTests: XCTestCase {
     func testMildConcernUsesBrowsWithoutAlarmColor() {
         let visuals = ExpressionVisuals(expression: .mildConcern)
-        XCTAssertGreaterThan(visuals.browOpacity, 0)
+        XCTAssertGreaterThanOrEqual(visuals.browOpacity, 0.9)
         XCTAssertGreaterThan(visuals.browLift, 0)
         XCTAssertEqual(visuals.stressOpacity, 0)
     }

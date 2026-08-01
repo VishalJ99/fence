@@ -154,9 +154,12 @@ final class EyesView: NSView {
         let leftOuter = CGPoint(x: 6 + faceWiggleOffset, y: outerY)
         let leftInner = CGPoint(x: 19 + faceWiggleOffset, y: innerY)
         let rightInner = CGPoint(x: 25 + faceWiggleOffset, y: innerY)
-        let rightOuter = CGPoint(x: 38 + faceWiggleOffset, y: outerY)
+        let rightOuter = CGPoint(
+            x: 38 - 4 * visuals.stressOpacity + faceWiggleOffset,
+            y: outerY - 2 * visuals.stressOpacity
+        )
 
-        NSColor(calibratedWhite: 0.9, alpha: visuals.browOpacity).setStroke()
+        NSColor(calibratedWhite: 0.97, alpha: visuals.browOpacity).setStroke()
 
         let leftBrow = NSBezierPath()
         leftBrow.move(to: leftOuter)
@@ -172,7 +175,10 @@ final class EyesView: NSView {
         rightBrow.curve(
             to: rightOuter,
             controlPoint1: CGPoint(x: 28 + faceWiggleOffset, y: innerY - 0.2),
-            controlPoint2: CGPoint(x: 34 + faceWiggleOffset, y: outerY + 0.2)
+            controlPoint2: CGPoint(
+                x: 34 + faceWiggleOffset,
+                y: outerY - 2 * visuals.stressOpacity + 0.2
+            )
         )
         styleAndStrokeBrow(rightBrow)
     }
@@ -186,35 +192,41 @@ final class EyesView: NSView {
     private func drawStressHatch() {
         guard visuals.stressOpacity > 0.001 else { return }
 
-        NSColor(
-            calibratedRed: 1,
-            green: 0.38,
-            blue: 0.32,
-            alpha: visuals.stressOpacity
-        ).setStroke()
-
         let mark = NSBezierPath()
-        let offset = faceWiggleOffset
+        // At notch scale a tiny outline disappears. Let this classic chibi
+        // "popped vein" overlap the right eye slightly, as it would on a
+        // character's forehead, while keeping all four elbows inside the panel.
+        // The symbol stays fixed while the eyes wiggle so it cannot clip.
+        mark.move(to: CGPoint(x: 34.2, y: 17))
+        mark.line(to: CGPoint(x: 36.8, y: 16.1))
+        mark.line(to: CGPoint(x: 37.3, y: 18))
 
-        mark.move(to: CGPoint(x: 38.8 + offset, y: 17.7))
-        mark.line(to: CGPoint(x: 39.9 + offset, y: 18.5))
-        mark.line(to: CGPoint(x: 40 + offset, y: 19.6))
+        mark.move(to: CGPoint(x: 39.2, y: 18))
+        mark.line(to: CGPoint(x: 39.7, y: 16.1))
+        mark.line(to: CGPoint(x: 42.2, y: 17))
 
-        mark.move(to: CGPoint(x: 41 + offset, y: 19.6))
-        mark.line(to: CGPoint(x: 41.1 + offset, y: 18.5))
-        mark.line(to: CGPoint(x: 42.2 + offset, y: 17.7))
+        mark.move(to: CGPoint(x: 42.2, y: 12.5))
+        mark.line(to: CGPoint(x: 39.7, y: 13.4))
+        mark.line(to: CGPoint(x: 39.2, y: 11))
 
-        mark.move(to: CGPoint(x: 42.2 + offset, y: 16.7))
-        mark.line(to: CGPoint(x: 41.1 + offset, y: 15.9))
-        mark.line(to: CGPoint(x: 41 + offset, y: 14.8))
+        mark.move(to: CGPoint(x: 37.3, y: 11))
+        mark.line(to: CGPoint(x: 36.8, y: 13.4))
+        mark.line(to: CGPoint(x: 34.2, y: 12.5))
 
-        mark.move(to: CGPoint(x: 40 + offset, y: 14.8))
-        mark.line(to: CGPoint(x: 39.9 + offset, y: 15.9))
-        mark.line(to: CGPoint(x: 38.8 + offset, y: 16.7))
-
-        mark.lineWidth = 1.05
         mark.lineCapStyle = .round
         mark.lineJoinStyle = .round
+
+        NSColor(calibratedWhite: 0, alpha: visuals.stressOpacity * 0.95).setStroke()
+        mark.lineWidth = 4.2
+        mark.stroke()
+
+        NSColor(
+            srgbRed: 1,
+            green: 0.16,
+            blue: 0.22,
+            alpha: visuals.stressOpacity
+        ).setStroke()
+        mark.lineWidth = 2.4
         mark.stroke()
     }
 

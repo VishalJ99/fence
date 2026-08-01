@@ -58,7 +58,7 @@ struct ExpressionVisuals: Equatable {
     )
 
     static let mildConcern = ExpressionVisuals(
-        browOpacity: 0.62,
+        browOpacity: 0.92,
         browOuterInset: 4.8,
         browLift: 2.4,
         pupilScale: 0.94,
