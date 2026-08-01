@@ -187,12 +187,12 @@ final class EyesView: NSView {
         guard visuals.stressOpacity > 0.001 else { return }
 
         let mark = NSBezierPath()
-        let centerX = metrics.panelSize.width + 1
-        let centerY = bounds.midY
+        let centerX = metrics.panelSize.width - 2
+        let centerY = bounds.midY + 4
 
         // The familiar chibi anger hatch is four separate arcs bowing toward
-        // an empty center. It lives in the very-concerned right-side gutter,
-        // outside the 14-point eye and its eyebrow.
+        // an empty center. It sits at the top-right temple, with a small part
+        // grazing the eye/brow region and the remainder in the state gutter.
         mark.move(to: CGPoint(x: centerX - 2.3, y: centerY + 4))
         mark.curve(
             to: CGPoint(x: centerX + 2.3, y: centerY + 4),

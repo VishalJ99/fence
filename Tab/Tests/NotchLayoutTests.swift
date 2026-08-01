@@ -57,7 +57,7 @@ final class NotchLayoutTests: XCTestCase {
         )
         XCTAssertEqual(
             ExpressionPanelLayout.frame(baseFrame: baseFrame, expression: .veryConcerned),
-            CGRect(x: 1006, y: 1271, width: 52, height: 20)
+            CGRect(x: 1006, y: 1271, width: 50, height: 20)
         )
     }
 }

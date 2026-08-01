@@ -82,7 +82,7 @@ enum NotchLayout {
 }
 
 enum ExpressionPanelLayout {
-    static let veryConcernedGutterWidth: CGFloat = 8
+    static let veryConcernedGutterWidth: CGFloat = 6
 
     static func frame(
         baseFrame: CGRect,
