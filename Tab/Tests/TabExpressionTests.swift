@@ -26,6 +26,7 @@ final class TabExpressionTests: XCTestCase {
         )
         XCTAssertEqual(configuration.initialExpression, .veryConcerned)
         XCTAssertTrue(configuration.cyclesExpressions)
+        XCTAssertFalse(configuration.showsScreenContextLog)
     }
 
     func testEnvironmentCanSelectMildConcern() {
@@ -35,6 +36,21 @@ final class TabExpressionTests: XCTestCase {
         )
         XCTAssertEqual(configuration.initialExpression, .mildConcern)
         XCTAssertFalse(configuration.cyclesExpressions)
+        XCTAssertFalse(configuration.showsScreenContextLog)
+    }
+
+    func testScreenContextLogRequiresExplicitOptIn() {
+        let argumentConfiguration = TabLaunchConfiguration(
+            arguments: ["Tab", "--screen-context-log"],
+            environment: [:]
+        )
+        XCTAssertTrue(argumentConfiguration.showsScreenContextLog)
+
+        let environmentConfiguration = TabLaunchConfiguration(
+            arguments: ["Tab"],
+            environment: ["TAB_SCREEN_CONTEXT_LOG": "1"]
+        )
+        XCTAssertTrue(environmentConfiguration.showsScreenContextLog)
     }
 
     func testClickCycleVisitsEveryExpression() {

@@ -9,14 +9,29 @@ derived_data_path=${TAB_DERIVED_DATA_PATH:-${repo_root}/build/TabDerivedData}
 output_dir=${tab_root}/dist
 output_app=${output_dir}/Tab.app
 signing_identity=${TAB_CODE_SIGN_IDENTITY:--}
+signing_mode=${TAB_SIGNING_MODE:-adhoc}
+development_team=${TAB_DEVELOPMENT_TEAM:-L5YX8CH3F5}
 
-/usr/bin/xcodebuild \
-  -project "${tab_root}/Tab.xcodeproj" \
-  -scheme Tab \
-  -configuration "${configuration}" \
-  -derivedDataPath "${derived_data_path}" \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+if [[ ${signing_mode} == development ]]; then
+  /usr/bin/xcodebuild \
+    -project "${tab_root}/Tab.xcodeproj" \
+    -scheme Tab \
+    -configuration "${configuration}" \
+    -derivedDataPath "${derived_data_path}" \
+    -allowProvisioningUpdates \
+    DEVELOPMENT_TEAM="${development_team}" \
+    CODE_SIGN_STYLE=Automatic \
+    CODE_SIGNING_ALLOWED=YES \
+    build
+else
+  /usr/bin/xcodebuild \
+    -project "${tab_root}/Tab.xcodeproj" \
+    -scheme Tab \
+    -configuration "${configuration}" \
+    -derivedDataPath "${derived_data_path}" \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+fi
 
 source_app=${derived_data_path}/Build/Products/${configuration}/Tab.app
 if [[ ! -d ${source_app} ]]; then
@@ -30,11 +45,13 @@ if [[ -e ${output_app} ]]; then
 fi
 /usr/bin/ditto "${source_app}" "${output_app}"
 
-codesign_args=(--force --sign "${signing_identity}" --entitlements "${tab_root}/Resources/Tab.entitlements")
-if [[ ${signing_identity} != - ]]; then
-  codesign_args+=(--options runtime --timestamp)
+if [[ ${signing_mode} != development ]]; then
+  codesign_args=(--force --sign "${signing_identity}" --entitlements "${tab_root}/Resources/Tab.entitlements")
+  if [[ ${signing_identity} != - ]]; then
+    codesign_args+=(--options runtime --timestamp)
+  fi
+  /usr/bin/codesign "${codesign_args[@]}" "${output_app}"
 fi
-/usr/bin/codesign "${codesign_args[@]}" "${output_app}"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "${output_app}"
 
 print "Built ${output_app}"

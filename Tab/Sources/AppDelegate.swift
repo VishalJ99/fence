@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: NotchPanelController?
     private var currentExpression: TabExpression = .neutral
     private var expressionDemoTimer: Timer?
+    private var screenContextLogController: ScreenContextLogWindowController?
+    private var screenContextCoordinator: ScreenContextCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -28,11 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if launchConfiguration.cyclesExpressions {
             startExpressionDemo()
         }
+        if launchConfiguration.showsScreenContextLog {
+            showScreenContextLog()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         panelController?.hide()
         expressionDemoTimer?.invalidate()
+        screenContextCoordinator?.stop()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
@@ -65,5 +71,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
         expressionDemoTimer = timer
+    }
+
+    private func showScreenContextLog() {
+        let logController = ScreenContextLogWindowController()
+        let coordinator = ScreenContextCoordinator(logWindow: logController)
+        logController.onCaptureToggle = { [weak coordinator] shouldCapture in
+            if shouldCapture {
+                coordinator?.start()
+            } else {
+                coordinator?.stop()
+            }
+        }
+        logController.onLunaConfigurationChange = { [weak coordinator] apiKey in
+            coordinator?.configureLuna(apiKey: apiKey)
+        }
+        logController.onFocusGoalChange = { [weak coordinator] goal in
+            coordinator?.configureFocusGoal(goal)
+        }
+        logController.onClose = { [weak coordinator] in
+            coordinator?.stop()
+        }
+        screenContextLogController = logController
+        screenContextCoordinator = coordinator
+        logController.showBesideMainScreen()
     }
 }

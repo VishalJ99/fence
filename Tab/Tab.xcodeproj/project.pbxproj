@@ -8,6 +8,19 @@
 
 /* Begin PBXBuildFile section */
 		01BF75316C3C43370E5731A5 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07C2323BEFBBBC85892EFA98 /* Cocoa.framework */; };
+		9F0000010000000000000001 /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F0000020000000000000001 /* ScreenCaptureKit.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+		9F0000010000000000000002 /* Vision.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F0000020000000000000002 /* Vision.framework */; };
+		9F0000040000000000000001 /* ScreenContextModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000001 /* ScreenContextModels.swift */; };
+		9F0000040000000000000002 /* OpenRouterContextClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000002 /* OpenRouterContextClient.swift */; };
+		9F0000040000000000000003 /* ScreenCaptureKitContextSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000003 /* ScreenCaptureKitContextSource.swift */; };
+		9F0000040000000000000004 /* ScreenContextLogWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000004 /* ScreenContextLogWindowController.swift */; };
+		9F0000040000000000000005 /* ScreenImageProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000005 /* ScreenImageProcessor.swift */; };
+		9F0000040000000000000006 /* ScreenContextCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000006 /* ScreenContextCoordinator.swift */; };
+		9F0000040000000000000007 /* ProcessResourceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000030000000000000007 /* ProcessResourceMonitor.swift */; };
+		9F0000060000000000000001 /* ScreenContextModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000050000000000000001 /* ScreenContextModelsTests.swift */; };
+		9F0000060000000000000002 /* OpenRouterContextClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000050000000000000002 /* OpenRouterContextClientTests.swift */; };
+		9F0000060000000000000003 /* ScreenCaptureKitContextSourceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000050000000000000003 /* ScreenCaptureKitContextSourceTests.swift */; };
+		9F0000060000000000000004 /* ScreenContextCoordinatorStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000050000000000000004 /* ScreenContextCoordinatorStateTests.swift */; };
 		2ED240546133964486B5B12B /* TabExpressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1861E9EE1C2FB86A1C39307 /* TabExpressionTests.swift */; };
 		411C5C05A86FFD0635F35A65 /* NotchLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43127EE891DE2441E26DF313 /* NotchLayoutTests.swift */; };
 		6021F59579D714248B5A72BB /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C60388859E1D60D4BBB5C7 /* AppDelegate.swift */; };
@@ -35,6 +48,19 @@
 /* Begin PBXFileReference section */
 		070563AB7B6C9A0044840D7F /* main.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		07C2323BEFBBBC85892EFA98 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
+		9F0000020000000000000001 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
+		9F0000020000000000000002 /* Vision.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Vision.framework; path = System/Library/Frameworks/Vision.framework; sourceTree = SDKROOT; };
+		9F0000030000000000000001 /* ScreenContextModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenContextModels.swift; sourceTree = "<group>"; };
+		9F0000030000000000000002 /* OpenRouterContextClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenRouterContextClient.swift; sourceTree = "<group>"; };
+		9F0000030000000000000003 /* ScreenCaptureKitContextSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenCaptureKitContextSource.swift; sourceTree = "<group>"; };
+		9F0000030000000000000004 /* ScreenContextLogWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenContextLogWindowController.swift; sourceTree = "<group>"; };
+		9F0000030000000000000005 /* ScreenImageProcessor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenImageProcessor.swift; sourceTree = "<group>"; };
+		9F0000030000000000000006 /* ScreenContextCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenContextCoordinator.swift; sourceTree = "<group>"; };
+		9F0000030000000000000007 /* ProcessResourceMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessResourceMonitor.swift; sourceTree = "<group>"; };
+		9F0000050000000000000001 /* ScreenContextModelsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenContextModelsTests.swift; sourceTree = "<group>"; };
+		9F0000050000000000000002 /* OpenRouterContextClientTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenRouterContextClientTests.swift; sourceTree = "<group>"; };
+		9F0000050000000000000003 /* ScreenCaptureKitContextSourceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenCaptureKitContextSourceTests.swift; sourceTree = "<group>"; };
+		9F0000050000000000000004 /* ScreenContextCoordinatorStateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenContextCoordinatorStateTests.swift; sourceTree = "<group>"; };
 		116656172EC816E2F6D7D454 /* EyesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EyesView.swift; sourceTree = "<group>"; };
 		19EF962C8307531C5F63196A /* EyeTrackingGeometryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EyeTrackingGeometryTests.swift; sourceTree = "<group>"; };
 		207CC3BAEF594D903B578070 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -57,6 +83,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				01BF75316C3C43370E5731A5 /* Cocoa.framework in Frameworks */,
+				9F0000010000000000000001 /* ScreenCaptureKit.framework in Frameworks */,
+				9F0000010000000000000002 /* Vision.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,6 +116,13 @@
 				E859DA99D656B139E22B7F2A /* EyeTrackingGeometry.swift */,
 				116656172EC816E2F6D7D454 /* EyesView.swift */,
 				AF3677B1C1A5800B3EACA0D5 /* NotchLayout.swift */,
+				9F0000030000000000000002 /* OpenRouterContextClient.swift */,
+				9F0000030000000000000007 /* ProcessResourceMonitor.swift */,
+				9F0000030000000000000003 /* ScreenCaptureKitContextSource.swift */,
+				9F0000030000000000000006 /* ScreenContextCoordinator.swift */,
+				9F0000030000000000000004 /* ScreenContextLogWindowController.swift */,
+				9F0000030000000000000001 /* ScreenContextModels.swift */,
+				9F0000030000000000000005 /* ScreenImageProcessor.swift */,
 				DFCE4CFAD9B3C4C985E32A13 /* NotchPanelController.swift */,
 				5705E82C5CD1CC54369F87C5 /* TabExpression.swift */,
 				070563AB7B6C9A0044840D7F /* main.swift */,
@@ -120,6 +155,10 @@
 			children = (
 				19EF962C8307531C5F63196A /* EyeTrackingGeometryTests.swift */,
 				43127EE891DE2441E26DF313 /* NotchLayoutTests.swift */,
+				9F0000050000000000000002 /* OpenRouterContextClientTests.swift */,
+				9F0000050000000000000003 /* ScreenCaptureKitContextSourceTests.swift */,
+				9F0000050000000000000004 /* ScreenContextCoordinatorStateTests.swift */,
+				9F0000050000000000000001 /* ScreenContextModelsTests.swift */,
 				B1861E9EE1C2FB86A1C39307 /* TabExpressionTests.swift */,
 			);
 			name = Tests;
@@ -140,6 +179,8 @@
 			isa = PBXGroup;
 			children = (
 				07C2323BEFBBBC85892EFA98 /* Cocoa.framework */,
+				9F0000020000000000000001 /* ScreenCaptureKit.framework */,
+				9F0000020000000000000002 /* Vision.framework */,
 			);
 			name = "OS X";
 			sourceTree = "<group>";
@@ -236,6 +277,10 @@
 			files = (
 				62100345CDE34C60DD897D43 /* EyeTrackingGeometryTests.swift in Sources */,
 				411C5C05A86FFD0635F35A65 /* NotchLayoutTests.swift in Sources */,
+				9F0000060000000000000002 /* OpenRouterContextClientTests.swift in Sources */,
+				9F0000060000000000000003 /* ScreenCaptureKitContextSourceTests.swift in Sources */,
+				9F0000060000000000000004 /* ScreenContextCoordinatorStateTests.swift in Sources */,
+				9F0000060000000000000001 /* ScreenContextModelsTests.swift in Sources */,
 				2ED240546133964486B5B12B /* TabExpressionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -249,6 +294,13 @@
 				7E3812CB598A1774EEB7DE0B /* EyeTrackingGeometry.swift in Sources */,
 				C986734030C606E1E4181CB4 /* EyesView.swift in Sources */,
 				747604C7445CBA223376E557 /* NotchLayout.swift in Sources */,
+				9F0000040000000000000002 /* OpenRouterContextClient.swift in Sources */,
+				9F0000040000000000000007 /* ProcessResourceMonitor.swift in Sources */,
+				9F0000040000000000000003 /* ScreenCaptureKitContextSource.swift in Sources */,
+				9F0000040000000000000006 /* ScreenContextCoordinator.swift in Sources */,
+				9F0000040000000000000004 /* ScreenContextLogWindowController.swift in Sources */,
+				9F0000040000000000000001 /* ScreenContextModels.swift in Sources */,
+				9F0000040000000000000005 /* ScreenImageProcessor.swift in Sources */,
 				EE80BA466ADDDD0C12AC858E /* NotchPanelController.swift in Sources */,
 				F4EBC93878A27367ECE6C123 /* TabExpression.swift in Sources */,
 				BAFF3218AC04A688C659E2EB /* main.swift in Sources */,

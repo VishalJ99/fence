@@ -129,6 +129,32 @@ This will create a distributable DMG in the `build/` directory.
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
 
+## Tab screen-context prototype
+
+`Tab` is a separate experimental macOS binary so its Screen Recording and network permissions do not change Fence's permission surface. Its approved notch eyes remain unchanged; an optional sidecar can prove local screen sensing and model latency.
+
+Build and test it from the repository root:
+
+```bash
+xcodebuild -project Tab/Tab.xcodeproj -scheme Tab \
+  -configuration Debug CODE_SIGNING_ALLOWED=NO \
+  -destination 'platform=macOS' test
+
+TAB_SIGNING_MODE=development Tab/scripts/build-app.sh
+```
+
+Launch the packaged app with `--screen-context-log` or set `TAB_SCREEN_CONTEXT_LOG=1`. The sidecar is opt-in and behaves as follows:
+
+- ScreenCaptureKit captures locally at no more than one frame per second.
+- A 32 x 18 grayscale signature suppresses unchanged frames; Apple Vision OCR runs locally on accepted changes.
+- The log displays capture/OCR latency, local CPU, macOS physical footprint, and observed frame rate.
+- Remote analysis is off until the user enters an OpenRouter key and enables Luna. The key is kept in process memory only.
+- Tab sends bounded app/window metadata and a local OCR excerpt first. It waits one second for context to settle, sends changed text context at most every five seconds, and uses a 30-second unchanged-context heartbeat.
+- A low-detail JPEG is encoded and sent only when the metadata response explicitly requests visual context. At most one image is attempted per context fingerprint, with a 30-second global image cooldown.
+- OpenRouter requests require structured-output support, prefer the lowest-latency route, deny data-collecting providers, and require zero-data-retention routing. Provider-reported token usage and billed credits are shown in the sidecar; credit-purchase fees are separate.
+
+Screen Recording access is required for local capture. Accessibility, Automation, microphone, and audio permissions are intentionally out of scope for this proof.
+
 ## Support This Project
 
 If Fence helps you stay focused, consider [purchasing a license](https://usefence.app) or contributing any amount via [Buy Me a Coffee](https://buymeacoffee.com/vishalja1n) - either one helps keep development going.

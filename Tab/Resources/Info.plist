@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Tab captures your screen to show a live context log. OCR processing runs locally; bounded recognized text and occasional low-detail images are sent only when you enable remote analysis.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

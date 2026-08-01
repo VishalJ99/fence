@@ -113,12 +113,15 @@ struct ExpressionVisuals: Equatable {
 struct TabLaunchConfiguration: Equatable {
     let initialExpression: TabExpression
     let cyclesExpressions: Bool
+    let showsScreenContextLog: Bool
 
     init(
         arguments: [String],
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         cyclesExpressions = arguments.contains("--demo-expressions")
+        showsScreenContextLog = arguments.contains("--screen-context-log")
+            || environment["TAB_SCREEN_CONTEXT_LOG"] == "1"
 
         var expressionValue = environment["TAB_EXPRESSION"]
         for (index, argument) in arguments.enumerated() {
