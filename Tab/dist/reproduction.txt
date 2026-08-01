@@ -1,16 +1,39 @@
-Artifact: Tab.app
-Ticket: PER-414
-Source commit: 57efc1950fa0f4dc1fe955cd36f4b8a2f20f3ad9
+Artifact: Tab.app live screen-context proof
+Ticket: PER-416
+Source commit: 5776b82bb7b334bac366e0bdc27b9c72eccc4afc
 
-From the repository root:
+From the repository root, verify the deterministic suite:
 
-  xcodebuild -project Tab/Tab.xcodeproj -scheme Tab \
+  /usr/bin/xcodebuild -project Tab/Tab.xcodeproj -scheme Tab \
     -configuration Debug CODE_SIGNING_ALLOWED=NO \
     -destination 'platform=macOS' test
 
-  Tab/scripts/build-app.sh
+Build the package with the stable development-signed identity used for macOS
+Screen Recording permission:
 
-The build script uses an ad-hoc signature by default and writes Tab.app beside
-this file. To use an installed signing identity, set TAB_CODE_SIGN_IDENTITY to
-its label before running the script. No protected permission is requested by
-this milestone.
+  TAB_SIGNING_MODE=development Tab/scripts/build-app.sh
+
+The script writes Tab.app beside this file. It defaults to development team
+L5YX8CH3F5; set TAB_DEVELOPMENT_TEAM to another team identifier if reproducing
+under a different Apple developer account. Deep signature verification runs as
+part of the script.
+
+Launch the opt-in context sidecar using the exact packaged app:
+
+  /usr/bin/open -na "$(pwd)/Tab/dist/Tab.app" \
+    --args --screen-context-log
+
+On first use, grant Screen Recording to Tab in System Settings and relaunch the
+same packaged identity if macOS requests it. Capture, visual change detection,
+and Vision OCR run locally without an API key. Remote analysis remains off
+until the operator manually enters an OpenRouter key and enables Luna in the
+sidecar. The prototype keeps that key in process memory only; do not add a key
+to this recipe, the environment, source control, or logs.
+
+Expected verification for this source commit:
+
+- 37 tests pass with zero failures.
+- Tab.app identifies as app.usefence.tab and passes deep codesign verification.
+- The development build has sandbox, network-client, and get-task-allow
+  entitlements; it does not request Accessibility, Automation, microphone, or
+  audio permissions.
