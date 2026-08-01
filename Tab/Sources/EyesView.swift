@@ -160,20 +160,12 @@ final class EyesView: NSView {
 
         let leftBrow = NSBezierPath()
         leftBrow.move(to: leftOuter)
-        leftBrow.curve(
-            to: leftInner,
-            controlPoint1: CGPoint(x: 10 + faceWiggleOffset, y: outerY + 0.2),
-            controlPoint2: CGPoint(x: 16 + faceWiggleOffset, y: innerY - 0.2)
-        )
+        leftBrow.line(to: leftInner)
         styleAndStrokeBrow(leftBrow)
 
         let rightBrow = NSBezierPath()
         rightBrow.move(to: rightInner)
-        rightBrow.curve(
-            to: rightOuter,
-            controlPoint1: CGPoint(x: 28 + faceWiggleOffset, y: innerY - 0.2),
-            controlPoint2: CGPoint(x: 34 + faceWiggleOffset, y: outerY + 0.2)
-        )
+        rightBrow.line(to: rightOuter)
         styleAndStrokeBrow(rightBrow)
     }
 
