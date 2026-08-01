@@ -32,7 +32,7 @@ open -n Tab/dist/Tab.app --args --expression very
 open -n Tab/dist/Tab.app --args --demo-expressions
 ```
 
-Mild concern uses high-contrast raised-inner grey brows without an alarm color. Very concerned rotates the same grey brows to inner-down, then adds slightly smaller pupils, a one-shot wiggle, and a bold saturated-red chibi stress-vein mark with a crisp black separation stroke. The mark overlaps the right eye slightly, like an anime forehead symbol, so its four-pronged silhouette remains readable at normal laptop distance. Keeping red out of the brows preserves a caring rather than angry character. The expression layer does not add permissions or increase the panel footprint.
+Mild concern uses high-contrast raised-inner grey brows without an alarm color. Very concerned rotates the same full-length grey brows to inner-down, then adds slightly smaller pupils, a one-shot wiggle, and the familiar coral chibi anger hatch: four separate curves bowing toward an empty center. The neutral and mild face remains 44 x 20 points; only very concerned adds an 8-point right-side gutter, producing a 52 x 20-point panel so the hatch stays visibly separate from the moving eye and eyebrow. Keeping red out of the brows preserves a caring rather than punitive character. The expression layer does not add permissions.
 
 For the current PER-414 test build, clicking the 44 x 20-point face cycles `neutral -> mild -> very -> neutral`. The panel remains non-activating, but that tiny face area is intentionally not click-through while the expressions are being tuned.
 

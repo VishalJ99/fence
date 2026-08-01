@@ -43,4 +43,21 @@ final class NotchLayoutTests: XCTestCase {
     func testCompactMetricsProduceMinimalPanelSize() {
         XCTAssertEqual(EyeMetrics.compact.panelSize, CGSize(width: 44, height: 20))
     }
+
+    func testVeryConcernedAddsOnlyMinimalRightSideGutter() {
+        let baseFrame = CGRect(x: 1006, y: 1271, width: 44, height: 20)
+
+        XCTAssertEqual(
+            ExpressionPanelLayout.frame(baseFrame: baseFrame, expression: .neutral),
+            baseFrame
+        )
+        XCTAssertEqual(
+            ExpressionPanelLayout.frame(baseFrame: baseFrame, expression: .mildConcern),
+            baseFrame
+        )
+        XCTAssertEqual(
+            ExpressionPanelLayout.frame(baseFrame: baseFrame, expression: .veryConcerned),
+            CGRect(x: 1006, y: 1271, width: 52, height: 20)
+        )
+    }
 }

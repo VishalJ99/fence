@@ -10,12 +10,14 @@ final class NotchPanelController {
     private let panel: PassivePanel
     private let eyesView: EyesView
     private let cursorTracker: CursorTracker
+    private var baseFrame: CGRect
     private var currentExpression: TabExpression = .neutral
 
     var onExpressionChange: ((TabExpression) -> Void)?
 
     init(frame: CGRect, metrics: EyeMetrics = .compact) {
         self.metrics = metrics
+        baseFrame = frame
         panel = PassivePanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -49,7 +51,8 @@ final class NotchPanelController {
     }
 
     func show(at frame: CGRect) {
-        panel.setFrame(frame, display: true)
+        baseFrame = frame
+        updatePanelFrame(for: currentExpression)
         panel.orderFrontRegardless()
         cursorTracker.start()
     }
@@ -62,13 +65,23 @@ final class NotchPanelController {
     func setExpression(_ expression: TabExpression, animated: Bool) {
         currentExpression = expression
         panel.title = "Tab - \(expression.accessibilityName)"
+        updatePanelFrame(for: expression)
         eyesView.setExpression(expression, animated: animated)
     }
 
     private func cycleExpression() {
         currentExpression = currentExpression.next
-        panel.title = "Tab - \(currentExpression.accessibilityName)"
-        eyesView.setExpression(currentExpression, animated: true)
+        setExpression(currentExpression, animated: true)
         onExpressionChange?(currentExpression)
+    }
+
+    private func updatePanelFrame(for expression: TabExpression) {
+        panel.setFrame(
+            ExpressionPanelLayout.frame(
+                baseFrame: baseFrame,
+                expression: expression
+            ),
+            display: true
+        )
     }
 }

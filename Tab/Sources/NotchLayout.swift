@@ -81,6 +81,24 @@ enum NotchLayout {
     }
 }
 
+enum ExpressionPanelLayout {
+    static let veryConcernedGutterWidth: CGFloat = 8
+
+    static func frame(
+        baseFrame: CGRect,
+        expression: TabExpression
+    ) -> CGRect {
+        guard expression == .veryConcerned else { return baseFrame }
+
+        return CGRect(
+            x: baseFrame.minX,
+            y: baseFrame.minY,
+            width: baseFrame.width + veryConcernedGutterWidth,
+            height: baseFrame.height
+        )
+    }
+}
+
 private extension NSScreen {
     var tabDisplayID: CGDirectDisplayID? {
         let key = NSDeviceDescriptionKey("NSScreenNumber")

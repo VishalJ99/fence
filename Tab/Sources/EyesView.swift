@@ -154,10 +154,7 @@ final class EyesView: NSView {
         let leftOuter = CGPoint(x: 6 + faceWiggleOffset, y: outerY)
         let leftInner = CGPoint(x: 19 + faceWiggleOffset, y: innerY)
         let rightInner = CGPoint(x: 25 + faceWiggleOffset, y: innerY)
-        let rightOuter = CGPoint(
-            x: 38 - 4 * visuals.stressOpacity + faceWiggleOffset,
-            y: outerY - 2 * visuals.stressOpacity
-        )
+        let rightOuter = CGPoint(x: 38 + faceWiggleOffset, y: outerY)
 
         NSColor(calibratedWhite: 0.97, alpha: visuals.browOpacity).setStroke()
 
@@ -175,10 +172,7 @@ final class EyesView: NSView {
         rightBrow.curve(
             to: rightOuter,
             controlPoint1: CGPoint(x: 28 + faceWiggleOffset, y: innerY - 0.2),
-            controlPoint2: CGPoint(
-                x: 34 + faceWiggleOffset,
-                y: outerY - 2 * visuals.stressOpacity + 0.2
-            )
+            controlPoint2: CGPoint(x: 34 + faceWiggleOffset, y: outerY + 0.2)
         )
         styleAndStrokeBrow(rightBrow)
     }
@@ -193,40 +187,50 @@ final class EyesView: NSView {
         guard visuals.stressOpacity > 0.001 else { return }
 
         let mark = NSBezierPath()
-        // At notch scale a tiny outline disappears. Let this classic chibi
-        // "popped vein" overlap the right eye slightly, as it would on a
-        // character's forehead, while keeping all four elbows inside the panel.
-        // The symbol stays fixed while the eyes wiggle so it cannot clip.
-        mark.move(to: CGPoint(x: 34.2, y: 17))
-        mark.line(to: CGPoint(x: 36.8, y: 16.1))
-        mark.line(to: CGPoint(x: 37.3, y: 18))
+        let centerX = metrics.panelSize.width + 1
+        let centerY = bounds.midY
 
-        mark.move(to: CGPoint(x: 39.2, y: 18))
-        mark.line(to: CGPoint(x: 39.7, y: 16.1))
-        mark.line(to: CGPoint(x: 42.2, y: 17))
+        // The familiar chibi anger hatch is four separate arcs bowing toward
+        // an empty center. It lives in the very-concerned right-side gutter,
+        // outside the 14-point eye and its eyebrow.
+        mark.move(to: CGPoint(x: centerX - 2.3, y: centerY + 4))
+        mark.curve(
+            to: CGPoint(x: centerX + 2.3, y: centerY + 4),
+            controlPoint1: CGPoint(x: centerX - 2.3, y: centerY + 1.5),
+            controlPoint2: CGPoint(x: centerX + 2.3, y: centerY + 1.5)
+        )
 
-        mark.move(to: CGPoint(x: 42.2, y: 12.5))
-        mark.line(to: CGPoint(x: 39.7, y: 13.4))
-        mark.line(to: CGPoint(x: 39.2, y: 11))
+        mark.move(to: CGPoint(x: centerX + 2.3, y: centerY - 4))
+        mark.curve(
+            to: CGPoint(x: centerX - 2.3, y: centerY - 4),
+            controlPoint1: CGPoint(x: centerX + 2.3, y: centerY - 1.5),
+            controlPoint2: CGPoint(x: centerX - 2.3, y: centerY - 1.5)
+        )
 
-        mark.move(to: CGPoint(x: 37.3, y: 11))
-        mark.line(to: CGPoint(x: 36.8, y: 13.4))
-        mark.line(to: CGPoint(x: 34.2, y: 12.5))
+        mark.move(to: CGPoint(x: centerX - 4.5, y: centerY - 2.3))
+        mark.curve(
+            to: CGPoint(x: centerX - 4.5, y: centerY + 2.3),
+            controlPoint1: CGPoint(x: centerX - 1.9, y: centerY - 2.3),
+            controlPoint2: CGPoint(x: centerX - 1.9, y: centerY + 2.3)
+        )
+
+        mark.move(to: CGPoint(x: centerX + 4.5, y: centerY + 2.3))
+        mark.curve(
+            to: CGPoint(x: centerX + 4.5, y: centerY - 2.3),
+            controlPoint1: CGPoint(x: centerX + 1.9, y: centerY + 2.3),
+            controlPoint2: CGPoint(x: centerX + 1.9, y: centerY - 2.3)
+        )
 
         mark.lineCapStyle = .round
         mark.lineJoinStyle = .round
 
-        NSColor(calibratedWhite: 0, alpha: visuals.stressOpacity * 0.95).setStroke()
-        mark.lineWidth = 4.2
-        mark.stroke()
-
         NSColor(
             srgbRed: 1,
-            green: 0.16,
-            blue: 0.22,
+            green: 0.32,
+            blue: 0.39,
             alpha: visuals.stressOpacity
         ).setStroke()
-        mark.lineWidth = 2.4
+        mark.lineWidth = 1.8
         mark.stroke()
     }
 
