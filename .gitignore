@@ -47,6 +47,9 @@ Build *.txt
 
 # Release artifacts
 dist/
+!Tab/dist/
+Tab/dist/*
+!Tab/dist/reproduction.txt
 Sparkle.framework/
 logs.txt
 logs.txt

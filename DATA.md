@@ -10,3 +10,5 @@
 - `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
 - `dist/` — ignored local ZIP/DMG release artifacts produced by `scripts/build-release.sh`; the retained current release set includes a `reproduction.txt` recipe.
 - `docs/TELEMETRY.md` — PER-355 privacy contract, event schema, cross-process transport design, consistency invariants, and verification plan for Fence diagnostics.
+- `Tab/` — PER-414 standalone macOS notch-companion app, with an independent bundle identity, tests, build script, and permission surface separate from Fence.
+- `Tab/dist/` — ignored local `Tab.app` build output; `reproduction.txt` is retained beside the artifact as its regeneration recipe.
