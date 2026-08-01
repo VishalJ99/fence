@@ -188,37 +188,52 @@ final class EyesView: NSView {
 
         let mark = NSBezierPath()
         let centerX = metrics.panelSize.width - 2
-        let centerY = bounds.midY + 4
+        let centerY = bounds.midY + 3.8
+        let radialSpacingIncrease: CGFloat = 0.1
+        let topBottomOffset = 4 * radialSpacingIncrease
+        let sideOffset = 4.5 * radialSpacingIncrease
+        let rotationCosine: CGFloat = 0.939_692_620_785_908_4
+        let rotationSine: CGFloat = 0.342_020_143_325_668_7
+
+        // Apply a 20-degree clockwise rotation around the temple anchor after
+        // moving each complete C outward. The C shapes and stroke stay the
+        // same size; only the negative space between them grows.
+        let rotatedPoint: (CGFloat, CGFloat) -> CGPoint = { x, y in
+            CGPoint(
+                x: centerX + x * rotationCosine + y * rotationSine,
+                y: centerY + y * rotationCosine - x * rotationSine
+            )
+        }
 
         // The familiar chibi anger hatch is four separate arcs bowing toward
         // an empty center. It sits at the top-right temple, with a small part
         // grazing the eye/brow region and the remainder in the state gutter.
-        mark.move(to: CGPoint(x: centerX - 2.3, y: centerY + 4))
+        mark.move(to: rotatedPoint(-2.3, 4 + topBottomOffset))
         mark.curve(
-            to: CGPoint(x: centerX + 2.3, y: centerY + 4),
-            controlPoint1: CGPoint(x: centerX - 2.3, y: centerY + 1.5),
-            controlPoint2: CGPoint(x: centerX + 2.3, y: centerY + 1.5)
+            to: rotatedPoint(2.3, 4 + topBottomOffset),
+            controlPoint1: rotatedPoint(-2.3, 1.5 + topBottomOffset),
+            controlPoint2: rotatedPoint(2.3, 1.5 + topBottomOffset)
         )
 
-        mark.move(to: CGPoint(x: centerX + 2.3, y: centerY - 4))
+        mark.move(to: rotatedPoint(2.3, -4 - topBottomOffset))
         mark.curve(
-            to: CGPoint(x: centerX - 2.3, y: centerY - 4),
-            controlPoint1: CGPoint(x: centerX + 2.3, y: centerY - 1.5),
-            controlPoint2: CGPoint(x: centerX - 2.3, y: centerY - 1.5)
+            to: rotatedPoint(-2.3, -4 - topBottomOffset),
+            controlPoint1: rotatedPoint(2.3, -1.5 - topBottomOffset),
+            controlPoint2: rotatedPoint(-2.3, -1.5 - topBottomOffset)
         )
 
-        mark.move(to: CGPoint(x: centerX - 4.5, y: centerY - 2.3))
+        mark.move(to: rotatedPoint(-4.5 - sideOffset, -2.3))
         mark.curve(
-            to: CGPoint(x: centerX - 4.5, y: centerY + 2.3),
-            controlPoint1: CGPoint(x: centerX - 1.9, y: centerY - 2.3),
-            controlPoint2: CGPoint(x: centerX - 1.9, y: centerY + 2.3)
+            to: rotatedPoint(-4.5 - sideOffset, 2.3),
+            controlPoint1: rotatedPoint(-1.9 - sideOffset, -2.3),
+            controlPoint2: rotatedPoint(-1.9 - sideOffset, 2.3)
         )
 
-        mark.move(to: CGPoint(x: centerX + 4.5, y: centerY + 2.3))
+        mark.move(to: rotatedPoint(4.5 + sideOffset, 2.3))
         mark.curve(
-            to: CGPoint(x: centerX + 4.5, y: centerY - 2.3),
-            controlPoint1: CGPoint(x: centerX + 1.9, y: centerY + 2.3),
-            controlPoint2: CGPoint(x: centerX + 1.9, y: centerY - 2.3)
+            to: rotatedPoint(4.5 + sideOffset, -2.3),
+            controlPoint1: rotatedPoint(1.9 + sideOffset, 2.3),
+            controlPoint2: rotatedPoint(1.9 + sideOffset, -2.3)
         )
 
         mark.lineCapStyle = .round
