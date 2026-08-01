@@ -1,6 +1,6 @@
 Artifact: Tab.app
 Ticket: PER-414
-Source commit: d43b0a20c8c73766a860a69359d4e1fafac43830
+Source commit: e4961904fca2a0b48d32f1001fb38a2e22f4e20f
 
 From the repository root:
 
