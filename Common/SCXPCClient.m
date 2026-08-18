@@ -627,9 +627,39 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
         return NO;
     }
 
+    if (![self isDaemonProtocolVersion:protocolVersion
+                           capabilities:capabilities
+          supportsRecurringSchedulesWithReason:reason]) {
+        return NO;
+    }
+
     if (reason != NULL) {
         *reason = @"compatible";
     }
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>*)capabilities
+supportsRecurringSchedulesWithReason:(NSString**)reason {
+    if (protocolVersion < SCDaemonProtocolVersionRecurringScheduler) {
+        if (reason != NULL) *reason = @"recurring-scheduler-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityRecurringScheduleStore]) {
+        if (reason != NULL) *reason = @"recurring-schedule-store-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringScheduleTimer]) {
+        if (reason != NULL) *reason = @"recurring-schedule-timer-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringScheduleBreaks]) {
+        if (reason != NULL) *reason = @"recurring-schedule-breaks-missing";
+        return NO;
+    }
+    if (reason != NULL) *reason = @"compatible";
     return YES;
 }
 
@@ -894,6 +924,112 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                 reply([result isKindOfClass:[NSDictionary class]] ? result : @{}, error);
             }];
         }];
+    }];
+}
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
+                                 NSString *marketingVersion, NSArray<NSString *> *capabilities,
+                                 NSError *handshakeError) {
+        #pragma unused(buildVersion)
+        #pragma unused(marketingVersion)
+        if (handshakeError != nil) { reply(@{}, handshakeError); return; }
+        NSString *reason = nil;
+        if (![SCXPCClient isDaemonProtocolVersion:protocolVersion capabilities:capabilities
+             supportsRecurringSchedulesWithReason:&reason]) {
+            reply(@{}, [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                                            code:SCXPCDaemonCompatibilityErrorHandshake
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: @"The installed Fence helper does not support recurring schedules.",
+                @"reason": reason ?: @"recurring-scheduler-incompatible",
+            }]);
+            return;
+        }
+        [self connectAndExecuteCommandBlock:^(NSError *connectError) {
+            if (connectError != nil) { reply(@{}, connectError); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] installRecurringCommitmentWithID:commitmentID
+                                     generation:generation
+                                       startedAt:startedAt
+                                      lockEndsAt:lockEndsAt
+                                  protectedHours:protectedHours
+                                   blockSettings:blockSettings
+                                        segments:segments
+                                   authorization:self.authorization
+                                           reply:^(NSDictionary *result, NSError *error) {
+                [SCXPCClient recordAuthorizationRejectionForCommand:@"replace_schedule" error:error];
+                reply([result isKindOfClass:[NSDictionary class]] ? result : @{}, error);
+            }];
+        }];
+    }];
+}
+
+- (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] endExpiredRecurringCommitmentWithID:commitmentID generation:generation reply:reply];
+    }];
+}
+
+- (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
+                                           generation:(NSString *)generation
+                                       protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                                                reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] updateProtectedHoursForRecurringCommitmentID:commitmentID
+                                              generation:generation
+                                          protectedHours:protectedHours
+                                                   reply:reply];
+    }];
+}
+
+- (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                 durationMinutes:(NSInteger)durationMinutes
+                                           reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] beginRecurringTimedBreakForCommitmentID:commitmentID
+                                         generation:generation
+                                    durationMinutes:durationMinutes
+                                              reply:reply];
+    }];
+}
+
+- (void)endRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                    generation:(NSString *)generation
+                                         reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] endRecurringTimedBreakForCommitmentID:commitmentID generation:generation reply:reply];
+    }];
+}
+
+- (void)getRecurringScheduleRuntimeState:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] getRecurringScheduleRuntimeStateWithReply:reply];
     }];
 }
 

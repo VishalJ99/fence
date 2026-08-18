@@ -531,6 +531,9 @@
         SCDaemonCapabilityConsistencyProjection,
         SCDaemonCapabilityRootScheduleStore,
         SCDaemonCapabilityRootScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleStore,
+        SCDaemonCapabilityRecurringScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleBreaks,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent

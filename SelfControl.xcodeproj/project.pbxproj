@@ -7,6 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A44400000000000000000003 /* PreferencesProtectionViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A44400000000000000000002 /* PreferencesProtectionViewController.m */; };
+		F44400000000000000000010 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000011 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000012 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000013 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000014 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000015 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
+		F44400000000000000000020 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000021 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000022 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000023 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000024 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000025 /* SCRecurringScheduleCompiler.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000004 /* SCRecurringScheduleCompiler.m */; };
+		F44400000000000000000030 /* SCProtectionPolicyTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000005 /* SCProtectionPolicyTests.m */; };
+		F44400000000000000000031 /* SCRecurringScheduleCompilerTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000006 /* SCRecurringScheduleCompilerTests.m */; };
+		F44400000000000000000040 /* NSString+IPAddress.m in Sources */ = {isa = PBXBuildFile; fileRef = CB25806516C237F10059C99A /* NSString+IPAddress.m */; };
+		E44400000000000000000006 /* SCEmergencyExitAttempt.m in Sources */ = {isa = PBXBuildFile; fileRef = E44400000000000000000002 /* SCEmergencyExitAttempt.m */; };
+		E44400000000000000000007 /* SCEmergencyExitWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = E44400000000000000000004 /* SCEmergencyExitWindowController.m */; };
+		E44400000000000000000008 /* SCEmergencyExitAttempt.m in Sources */ = {isa = PBXBuildFile; fileRef = E44400000000000000000002 /* SCEmergencyExitAttempt.m */; };
+		E44400000000000000000009 /* SCEmergencyExitAttemptTests.m in Sources */ = {isa = PBXBuildFile; fileRef = E44400000000000000000005 /* SCEmergencyExitAttemptTests.m */; };
 		A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
 		A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000002 /* SCTelemetrySpool.m */; };
 		A17E1E110000000000000003 /* SCTelemetrySpoolTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */; };
@@ -602,6 +622,19 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A44400000000000000000001 /* PreferencesProtectionViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PreferencesProtectionViewController.h; sourceTree = "<group>"; };
+		A44400000000000000000002 /* PreferencesProtectionViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PreferencesProtectionViewController.m; sourceTree = "<group>"; };
+		F44400000000000000000001 /* SCProtectionPolicy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCProtectionPolicy.h; sourceTree = "<group>"; };
+		F44400000000000000000002 /* SCProtectionPolicy.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCProtectionPolicy.m; sourceTree = "<group>"; };
+		F44400000000000000000003 /* SCRecurringScheduleCompiler.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCRecurringScheduleCompiler.h; sourceTree = "<group>"; };
+		F44400000000000000000004 /* SCRecurringScheduleCompiler.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCRecurringScheduleCompiler.m; sourceTree = "<group>"; };
+		F44400000000000000000005 /* SCProtectionPolicyTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCProtectionPolicyTests.m; sourceTree = "<group>"; };
+		F44400000000000000000006 /* SCRecurringScheduleCompilerTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCRecurringScheduleCompilerTests.m; sourceTree = "<group>"; };
+		E44400000000000000000001 /* SCEmergencyExitAttempt.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCEmergencyExitAttempt.h; sourceTree = "<group>"; };
+		E44400000000000000000002 /* SCEmergencyExitAttempt.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCEmergencyExitAttempt.m; sourceTree = "<group>"; };
+		E44400000000000000000003 /* SCEmergencyExitWindowController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCEmergencyExitWindowController.h; sourceTree = "<group>"; };
+		E44400000000000000000004 /* SCEmergencyExitWindowController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCEmergencyExitWindowController.m; sourceTree = "<group>"; };
+		E44400000000000000000005 /* SCEmergencyExitAttemptTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCEmergencyExitAttemptTests.m; sourceTree = "<group>"; };
 		A17E1E120000000000000001 /* SCTelemetrySpool.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCTelemetrySpool.h; sourceTree = "<group>"; };
 		A17E1E120000000000000002 /* SCTelemetrySpool.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpool.m; sourceTree = "<group>"; };
 		A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTelemetrySpoolTests.m; sourceTree = "<group>"; };
@@ -1813,6 +1846,9 @@
 		CB0EEF5E20FD8CE00024D27B /* SelfControlTests */ = {
 			isa = PBXGroup;
 			children = (
+				F44400000000000000000005 /* SCProtectionPolicyTests.m */,
+				F44400000000000000000006 /* SCRecurringScheduleCompilerTests.m */,
+				E44400000000000000000005 /* SCEmergencyExitAttemptTests.m */,
 				D38300000000000000000003 /* SCDaemonSchedulerTests.m */,
 				A17E1E120000000000000003 /* SCTelemetrySpoolTests.m */,
 				CB0EEF7720FE49020024D27B /* SCUtilityTests.m */,
@@ -1857,6 +1893,12 @@
 		CB4294DF0F53D865008E10CA /* App Classes */ = {
 			isa = PBXGroup;
 			children = (
+				A44400000000000000000001 /* PreferencesProtectionViewController.h */,
+				A44400000000000000000002 /* PreferencesProtectionViewController.m */,
+				E44400000000000000000001 /* SCEmergencyExitAttempt.h */,
+				E44400000000000000000002 /* SCEmergencyExitAttempt.m */,
+				E44400000000000000000003 /* SCEmergencyExitWindowController.h */,
+				E44400000000000000000004 /* SCEmergencyExitWindowController.m */,
 				228355202EFB7C8100E77469 /* SCBundleEditorController.h */,
 				228355212EFB7C8100E77469 /* SCBundleEditorController.m */,
 				228355222EFB7C8100E77469 /* SCDayScheduleEditorController.h */,
@@ -1947,6 +1989,10 @@
 		CB81AB8725B8E67D006956F7 /* Block Management */ = {
 			isa = PBXGroup;
 			children = (
+				F44400000000000000000001 /* SCProtectionPolicy.h */,
+				F44400000000000000000002 /* SCProtectionPolicy.m */,
+				F44400000000000000000003 /* SCRecurringScheduleCompiler.h */,
+				F44400000000000000000004 /* SCRecurringScheduleCompiler.m */,
 				228355112EFB7C1900E77469 /* SCScheduleManager.h */,
 				228355122EFB7C1900E77469 /* SCScheduleManager.m */,
 				228355082EFB7C1000E77469 /* SCWeeklySchedule.h */,
@@ -3981,6 +4027,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A44400000000000000000003 /* PreferencesProtectionViewController.m in Sources */,
+				F44400000000000000000010 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000020 /* SCRecurringScheduleCompiler.m in Sources */,
+				E44400000000000000000006 /* SCEmergencyExitAttempt.m in Sources */,
+				E44400000000000000000007 /* SCEmergencyExitWindowController.m in Sources */,
 				CBC1F4B526070358008E3FA8 /* SCFileWatcher.m in Sources */,
 				224DFCF72F0417F700D97A1C /* SCLicenseManager.m in Sources */,
 				CBADC27E25B22BC7000EE5BB /* SCSentry.m in Sources */,
@@ -4039,6 +4090,13 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F44400000000000000000040 /* NSString+IPAddress.m in Sources */,
+				F44400000000000000000011 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000021 /* SCRecurringScheduleCompiler.m in Sources */,
+				F44400000000000000000030 /* SCProtectionPolicyTests.m in Sources */,
+				F44400000000000000000031 /* SCRecurringScheduleCompilerTests.m in Sources */,
+				E44400000000000000000008 /* SCEmergencyExitAttempt.m in Sources */,
+				E44400000000000000000009 /* SCEmergencyExitAttemptTests.m in Sources */,
 				D38300000000000000000006 /* SCDaemonSchedulerTests.m in Sources */,
 				D38300000000000000000005 /* SCDaemonScheduler.m in Sources */,
 				A17E1E110000000000000002 /* SCTelemetrySpool.m in Sources */,
@@ -4079,6 +4137,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F44400000000000000000012 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000022 /* SCRecurringScheduleCompiler.m in Sources */,
 				D38300000000000000000004 /* SCDaemonScheduler.m in Sources */,
 				A17E1E110000000000000001 /* SCTelemetrySpool.m in Sources */,
 				CB74D11F2480E55D002B2079 /* DaemonMain.m in Sources */,
@@ -4122,6 +4182,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F44400000000000000000013 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000023 /* SCRecurringScheduleCompiler.m in Sources */,
 				CB81A9D225B7C269006956F7 /* SCBlockUtilities.m in Sources */,
 				2283550B2EFB7C1000E77469 /* SCWeeklySchedule.m in Sources */,
 				CB9C80FF19CFB79700CDCAE1 /* AppDelegate.m in Sources */,
@@ -4152,6 +4214,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F44400000000000000000014 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000024 /* SCRecurringScheduleCompiler.m in Sources */,
 				CBADC28125B22BC7000EE5BB /* SCSentry.m in Sources */,
 				CB81AB8D25B8E6BE006956F7 /* SCBlockEntry.m in Sources */,
 				228354FA2EFB7BCB00E77469 /* SCTimeRange.m in Sources */,
@@ -4188,6 +4252,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F44400000000000000000015 /* SCProtectionPolicy.m in Sources */,
+				F44400000000000000000025 /* SCRecurringScheduleCompiler.m in Sources */,
 				CBB67D5125D6165B006E4BC9 /* XPMValuedArgument.m in Sources */,
 				228355102EFB7C1000E77469 /* SCWeeklySchedule.m in Sources */,
 				CBB67D5A25D6165B006E4BC9 /* XPMArgumentParser.m in Sources */,

@@ -23,6 +23,7 @@
 #import "AppController.h"
 #import "MASPreferencesWindowController.h"
 #import "PreferencesGeneralViewController.h"
+#import "PreferencesProtectionViewController.h"
 #import "PreferencesAdvancedViewController.h"
 #import "SCTimeIntervalFormatter.h"
 #import <LetsMove/PFMoveApplication.h>
@@ -528,10 +529,11 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [SCSentry addBreadcrumb: @"Opening preferences window" category: @"app"];
 	if (preferencesWindowController_ == nil) {
 		NSViewController* generalViewController = [[PreferencesGeneralViewController alloc] init];
+		NSViewController* protectionViewController = [[PreferencesProtectionViewController alloc] init];
 		NSViewController* advancedViewController = [[PreferencesAdvancedViewController alloc] init];
 		NSString* title = NSLocalizedString(@"Preferences", @"Common title for Preferences window");
 
-		preferencesWindowController_ = [[MASPreferencesWindowController alloc] initWithViewControllers: @[generalViewController, advancedViewController] title: title];
+		preferencesWindowController_ = [[MASPreferencesWindowController alloc] initWithViewControllers: @[generalViewController, protectionViewController, advancedViewController] title: title];
 
         // Apply frosted glass styling to preferences window
         [self applyFrostedGlassToPreferencesWindow];
@@ -826,7 +828,14 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                 self->daemonCompatibilityRepairInFlight_ = NO;
                 self->lastCompatibleDaemonProtocol_ = protocolVersion;
                 [self synchronizeTelemetryConsentAndDrain];
-                [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
+                [[SCScheduleManager sharedManager]
+                    refreshRecurringRuntimeStateWithCompletion:^(BOOL refreshed, NSError *refreshError) {
+                    if (!refreshed) {
+                        NSLog(@"AppController: Recurring runtime refresh unavailable (domain=%@ code=%ld)",
+                              refreshError.domain, (long)refreshError.code);
+                    }
+                    [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
+                }];
                 return;
             }
 

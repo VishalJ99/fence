@@ -12,13 +12,17 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - **commit** — the app action that locks in a weekly blocking schedule; not a git commit.
 - **selfcontrold** — the privileged LaunchDaemon installed via `SMJobBless` that enforces blocks and persists state across reboots.
 - **Root-Owned Schedule / V2 schedule** — an authenticated immutable owner/absolute-week envelope in `ApprovedScheduleCommitments` plus zero or more segment records in root `ApprovedSchedules`, reconciled directly by `selfcontrold`; it has no per-segment user LaunchAgent.
+- **Recurring schedule / V3 recurring commitment** — one Monday-based seven-day template stored as an owner-scoped root commitment in `ApprovedRecurringScheduleCommitments`; `selfcontrold` materializes occurrences indefinitely until explicit End, while the commitment deadline controls only when End becomes available.
 - **V1 schedule** — the legacy approval + user LaunchAgent + CLI path, retained only for bounded current/next-week rollback and drain; an unexpired V1 record is not replaced and blocks overlapping V2 admission, while legacy registration is likewise rejected across an unexpired V2 envelope.
+- **Break credits** — app-owned daily credits spent to request a daemon-owned 5, 15, or 30 minute pause of recurring schedule enforcement; ending early does not refund the credit.
+- **Protected Hours** — a recurring local-wall-time interval that prevents new breaks, overrides an active break, and prevents ordinary commitment ending.
 - **Block Management** — the subsystem that applies website and app blocking through `/etc/hosts`, PF rules, and blocked-process termination.
 - **SelfControl Killer / SCKillerHelper** — helper targets used for app termination and recovery/testing flows around blocking.
 
 ## Active threads
 - Linear project: `Fence` in team `PER` (`https://linear.app/usefence/project/fence-4dbdbd3a1e95`).
 - Current scheduler-consolidation ticket: `PER-383` (`https://linear.app/usefence/issue/PER-383/consolidate-schedule-timing-into-selfcontrold`).
+- Current recurring-parity implementation ticket: `PER-444` (`https://linear.app/usefence/issue/PER-444/implement-recurring-schedules-break-credits-and-protected-hours-on`).
 - Source design plan (MacBook, historical input re-baselined against this checkout): `/Users/vishaljain/.claude/plans/can-you-help-me-unified-dove.md`.
 - Setup/readiness reference ticket: `PER-219` (`https://linear.app/usefence/issue/PER-219/prepare-macos-fence-checkout-for-feature-work`).
 - For new non-trivial feature work, attach to an existing `PER` ticket under the Fence project or create one before implementation.
@@ -43,8 +47,9 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - Main app compile check: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO build`
 - Tests: `xcodebuild -workspace SelfControl.xcworkspace -scheme SelfControl -configuration Debug CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' test`
 - Bulk approved-schedule clearing is a DEBUG-only test operation. Release
-  helpers reject it; DEBUG clearing removes both `ApprovedSchedules` and
-  `ApprovedScheduleCommitments`.
+  helpers reject it; DEBUG clearing removes `ApprovedSchedules`,
+  `ApprovedScheduleCommitments`, `ApprovedRecurringScheduleCommitments`, and
+  `ActiveScheduleBreaks`.
 - License server dev loop: `cd server && npm install && npm start`
 - Local macOS builds may require code-signing updates and `Secrets.xcconfig`; see `SETUP.md` and `BUILD_MACOS26.md`.
 - GUI smoke tests can be automated locally with `peekaboo` once the app is built and launchable.

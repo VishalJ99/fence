@@ -86,7 +86,70 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// Creates an empty schedule for a bundle at a specific week offset
 - (SCWeeklySchedule *)createScheduleForBundle:(SCBlockBundle *)bundle weekOffset:(NSInteger)weekOffset;
 
+#pragma mark - Recurring Schedule
+
+/// The single editable seven-day schedule used by recurring commitments.
+@property (nonatomic, readonly) NSArray<SCWeeklySchedule *> *recurringSchedules;
+
+/// A legacy current/next draft conflict must be resolved before editing.
+@property (nonatomic, readonly) BOOL recurringScheduleMigrationNeedsChoice;
+
+/// Resolves a pinned legacy migration conflict without deleting either source.
+- (void)resolveRecurringScheduleMigrationUsingNextWeek:(BOOL)useNextWeek;
+
+- (nullable SCWeeklySchedule *)recurringScheduleForBundleID:(NSString *)bundleID;
+- (void)updateRecurringSchedule:(SCWeeklySchedule *)schedule;
+- (SCWeeklySchedule *)createRecurringScheduleForBundle:(SCBlockBundle *)bundle;
+
 #pragma mark - Commitment
+
+/// Record existence, rather than lock deadline, defines an active recurring
+/// enforcement session.
+@property (nonatomic, readonly) BOOL hasRecurringCommitment;
+@property (nonatomic, readonly) BOOL isRecurringCommitmentLockActive;
+@property (nonatomic, readonly, nullable) NSDate *recurringCommitmentLockEndDate;
+
+/// Legacy V1/V2 absolute commitment data still within its finite window.
+@property (nonatomic, readonly) BOOL hasUnexpiredLegacyCommitment;
+
+/// Commits the recurring template. End remains unavailable for 1...7 calendar
+/// days; editing stays locked until the commitment is explicitly ended.
+- (void)commitRecurringScheduleForDays:(NSInteger)days
+                            completion:(void(^)(BOOL verified, NSError * _Nullable error))completion;
+
+/// Ends an expired recurring commitment. The daemon enforces deadline and
+/// Protected Hours eligibility before removing the root record.
+- (void)endExpiredRecurringCommitmentWithCompletion:
+    (void(^)(BOOL ended, NSError * _Nullable error))completion;
+
+/// Reconciles the app-owned runtime index with the root-owned recurring state.
+/// The callback is delivered on the main queue. A successful daemon response
+/// is applied once; this method does not retry transport failures.
+- (void)refreshRecurringRuntimeStateWithCompletion:
+    (void(^)(BOOL refreshed, NSError * _Nullable error))completion;
+
+#pragma mark - Break Credits and Protected Hours
+
+@property (nonatomic, readonly) NSInteger breakCreditsPerDay;
+@property (nonatomic, readonly) NSInteger breakCreditsRemainingToday;
+- (void)setBreakCreditsPerDay:(NSInteger)allowance;
+- (void)reconcileBreakCreditsForDate:(NSDate *)date forceReset:(BOOL)forceReset;
+
+@property (nonatomic, readonly) BOOL protectedHoursEnabled;
+@property (nonatomic, readonly) NSInteger protectedHoursStartMinute;
+@property (nonatomic, readonly) NSInteger protectedHoursEndMinute;
+@property (nonatomic, readonly) BOOL protectedHoursActiveNow;
+@property (nonatomic, readonly) BOOL canEditProtectedHours;
+- (void)updateProtectedHoursEnabled:(BOOL)enabled
+                        startMinute:(NSInteger)startMinute
+                          endMinute:(NSInteger)endMinute
+                         completion:(void(^)(BOOL updated, NSError * _Nullable error))completion;
+
+@property (nonatomic, readonly) BOOL hasActiveTimedBreak;
+@property (nonatomic, readonly, nullable) NSDate *activeTimedBreakEndDate;
+- (void)beginTimedBreakForMinutes:(NSInteger)minutes
+                       completion:(void(^)(BOOL started, NSError * _Nullable error))completion;
+- (void)endTimedBreakWithCompletion:(void(^)(BOOL ended, NSError * _Nullable error))completion;
 
 /// Whether the current week has an active commitment
 @property (nonatomic, readonly) BOOL isCommitted;

@@ -77,6 +77,8 @@ static NSString * const SCDaemonConsistencyErrorDomain = @"org.eyebeam.Fence.Dae
 static const NSUInteger SCDaemonConsistencyMaximumSchedules = 512;
 static const NSUInteger SCDaemonConsistencyMaximumEntries = 4096;
 static NSString * const SCDaemonApprovedScheduleCommitmentsKey = @"ApprovedScheduleCommitments";
+static NSString * const SCDaemonApprovedRecurringCommitmentsKey = @"ApprovedRecurringScheduleCommitments";
+static NSString * const SCDaemonActiveScheduleBreaksKey = @"ActiveScheduleBreaks";
 
 static NSObject *SCDaemonScheduleStoreLock(void) {
     static NSObject *lock;
@@ -88,6 +90,97 @@ static NSObject *SCDaemonScheduleStoreLock(void) {
 static BOOL SCDaemonUUIDString(id value) {
     return [value isKindOfClass:[NSString class]] &&
         [[NSUUID alloc] initWithUUIDString:(NSString *)value] != nil;
+}
+
+static BOOL SCDaemonIntegerInRange(id value, NSInteger minimum, NSInteger maximum) {
+    if (![value isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
+    double number = [value doubleValue];
+    return isfinite(number) && floor(number) == number && number >= minimum && number <= maximum;
+}
+
+static BOOL SCDaemonBoolean(id value) {
+    return [value isKindOfClass:[NSNumber class]] &&
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+}
+
+static NSDictionary<NSString *, id> *SCDaemonValidatedProtectedHours(id value) {
+    if (![value isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *hours = value;
+    if (!SCDaemonBoolean(hours[@"enabled"]) ||
+        !SCDaemonIntegerInRange(hours[@"startMinute"], 0, 1439) ||
+        !SCDaemonIntegerInRange(hours[@"endMinute"], 0, 1439) ||
+        [hours[@"startMinute"] integerValue] == [hours[@"endMinute"] integerValue]) return nil;
+    return @{
+        @"enabled": @([hours[@"enabled"] boolValue]),
+        @"startMinute": @([hours[@"startMinute"] integerValue]),
+        @"endMinute": @([hours[@"endMinute"] integerValue]),
+    };
+}
+
+static NSDictionary<NSString *, id> *SCDaemonValidatedRecurringSegment(id value) {
+    if (![value isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *segment = value;
+    NSString *segmentID = segment[@"segmentID"];
+    NSNumber *start = segment[@"startMinuteOfWeek"];
+    NSNumber *end = segment[@"endMinuteOfWeek"];
+    NSArray *rawBlocklist = segment[@"blocklist"];
+    NSArray *sourceBundleIDs = segment[SCDaemonScheduleSourceBundleIDsKey];
+    NSString *revision = segment[SCDaemonSchedulePolicyRevisionKey];
+    if (!SCDaemonUUIDString(segmentID) ||
+        !SCDaemonIntegerInRange(start, 0, 10079) ||
+        !SCDaemonIntegerInRange(end, 1, 10080) || end.integerValue <= start.integerValue ||
+        ![rawBlocklist isKindOfClass:[NSArray class]] || rawBlocklist.count == 0 ||
+        rawBlocklist.count > SCDaemonConsistencyMaximumEntries ||
+        ![sourceBundleIDs isKindOfClass:[NSArray class]] || sourceBundleIDs.count == 0 ||
+        !SCDaemonUUIDString(revision) || !SCDaemonBoolean(segment[@"isAllowlist"]) ||
+        [segment[@"isAllowlist"] boolValue]) return nil;
+    for (id bundleID in sourceBundleIDs) if (!SCDaemonUUIDString(bundleID)) return nil;
+    NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+    for (id rawEntry in rawBlocklist) {
+        NSString *canonical = [rawEntry isKindOfClass:[NSString class]]
+            ? [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] : nil;
+        if (canonical == nil) return nil;
+        [entries addObject:canonical];
+    }
+    if (entries.count == 0) return nil;
+    return @{
+        @"segmentID": segmentID,
+        @"startMinuteOfWeek": @(start.integerValue),
+        @"endMinuteOfWeek": @(end.integerValue),
+        @"blocklist": entries.array,
+        @"isAllowlist": @NO,
+        SCDaemonScheduleSourceBundleIDsKey: [sourceBundleIDs copy],
+        SCDaemonSchedulePolicyRevisionKey: revision,
+    };
+}
+
+static NSCalendar *SCDaemonRecurringLocalCalendar(void) {
+    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    calendar.timeZone = [NSTimeZone localTimeZone];
+    calendar.firstWeekday = 2;
+    return calendar;
+}
+
+static BOOL SCDaemonProtectedHoursEditIsLocked(NSDictionary<NSString *, id> *commitment,
+                                                NSDate *date,
+                                                NSCalendar *calendar) {
+    return [SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:date
+                                                         commitment:commitment
+                                                            calendar:calendar];
+}
+
+static NSDictionary<NSString *, id> *SCDaemonOwnedRecurringCommitment(id value,
+                                                                       uid_t ownerUID,
+                                                                       NSString *commitmentID,
+                                                                       NSString *generation) {
+    NSArray *owned = [SCDaemonScheduler validRecurringCommitmentsFromValue:value ownerUID:ownerUID];
+    for (NSDictionary *commitment in owned) {
+        if ([commitment[@"commitmentID"] isEqual:commitmentID] &&
+            (generation == nil || [commitment[@"generation"] isEqual:generation])) return commitment;
+    }
+    return nil;
 }
 
 static BOOL SCDaemonWeekKeyIsValid(id value) {
@@ -438,6 +531,23 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         NSLog(@"SCDaemonXPC: startBlock authorization accepted");
     }
 
+    // Recurring scheduler segments use the same low-level start primitive, so
+    // keep this admission check at the manual/test XPC boundary.
+    id recurringCommitments = [[SCSettings sharedSettings]
+        valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+    BOOL clientHasRecurringCommitment =
+        SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(
+            recurringCommitments, self.clientUID);
+    BOOL targetHasRecurringCommitment = controllingUID != self.clientUID &&
+        SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(
+            recurringCommitments, controllingUID);
+    if (clientHasRecurringCommitment || targetHasRecurringCommitment) {
+        NSLog(@"ERROR: Refusing manual/test block start during a recurring commitment");
+        reply([SCErr errorWithCode:403
+                    subDescription:@"Manual and test blocks are unavailable during a recurring commitment"]);
+        return;
+    }
+
     [SCDaemonBlockMethods startBlockWithControllingUID: controllingUID blocklist: blocklist isAllowlist:isAllowlist endDate: endDate blockSettings:blockSettings authorization: authData reply: reply];
 }
 
@@ -586,6 +696,9 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityConsistencyProjection,
               SCDaemonCapabilityRootScheduleStore,
               SCDaemonCapabilityRootScheduleTimer,
+              SCDaemonCapabilityRecurringScheduleStore,
+              SCDaemonCapabilityRecurringScheduleTimer,
+              SCDaemonCapabilityRecurringScheduleBreaks,
           ]);
 }
 
@@ -943,6 +1056,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     NSSet<NSString *> *knownSources = [NSSet setWithArray:@[
         @"none", SCDaemonActiveBlockSourceManual, SCDaemonActiveBlockSourceTest,
         SCDaemonActiveBlockSourceLegacySchedule, SCDaemonActiveBlockSourceSchedulerV2,
+        SCDaemonActiveBlockSourceSchedulerRecurring,
     ]];
     if (![activeSource isKindOfClass:[NSString class]] || ![knownSources containsObject:activeSource]) {
         activeSource = @"unknown";
@@ -1111,9 +1225,16 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         NSDictionary *oldCommitmentValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
         NSDictionary *oldCommitments = [oldCommitmentValue isKindOfClass:[NSDictionary class]]
             ? oldCommitmentValue : @{};
+        NSDictionary *oldRecurringValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldRecurringValue isKindOfClass:[NSDictionary class]]
+            ? oldRecurringValue : @{};
         NSDate *now = [NSDate date];
         __block BOOL matchingEnvelopeFound = NO;
         __block BOOL foreignCommitmentIDCollision = NO;
+
+        if (SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(oldRecurring, self.clientUID)) {
+            immutableConflict = YES;
+        }
 
         [oldCommitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
             NSDictionary *storedEnvelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
@@ -1284,6 +1405,516 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     }];
 }
 
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                             authorization:(NSData *)authData
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary<NSString *, id> *result = [@{
+        @"schema_version": @1,
+        @"outcome": @"failed",
+        @"failed_stage": @"validate",
+        @"segments_planned": @([segments isKindOfClass:[NSArray class]] ? segments.count : 0),
+        @"segments_stored": @0,
+        @"store_persisted": @NO,
+        @"post_write_match": @NO,
+        @"reconcile_succeeded": @NO,
+    } mutableCopy];
+    // Reuse the established schedule-install Authorization Services right.
+    NSError *authorizationError = [SCXPCAuthorization checkAuthorization:authData
+        command:@selector(replaceScheduledCommitmentForWeekKey:weekStartDate:weekEndDate:commitmentID:generation:segments:authorization:reply:)];
+    if (authorizationError != nil) {
+        result[@"failed_stage"] = @"authorize";
+        reply([result copy], authorizationError);
+        return;
+    }
+
+    NSDictionary *validatedHours = SCDaemonValidatedProtectedHours(protectedHours);
+    BOOL envelopeValid = self.clientUID != 0 && SCDaemonUUIDString(commitmentID) &&
+        SCDaemonUUIDString(generation) && [startedAt isKindOfClass:[NSDate class]] &&
+        [lockEndsAt isKindOfClass:[NSDate class]] && [lockEndsAt compare:startedAt] == NSOrderedDescending &&
+        validatedHours != nil && [blockSettings isKindOfClass:[NSDictionary class]] &&
+        [segments isKindOfClass:[NSArray class]] && segments.count > 0 &&
+        segments.count <= SCDaemonConsistencyMaximumSchedules;
+    if (!envelopeValid) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid recurring commitment envelope"]);
+        return;
+    }
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *validatedSegments = [NSMutableArray array];
+    NSMutableSet<NSString *> *segmentIDs = [NSMutableSet set];
+    NSUInteger aggregateEntries = 0;
+    for (id rawSegment in segments) {
+        NSDictionary *segment = SCDaemonValidatedRecurringSegment(rawSegment);
+        NSUInteger entryCount = [segment[@"blocklist"] count];
+        if (segment == nil || [segmentIDs containsObject:segment[@"segmentID"]] ||
+            !SCDaemonScheduleEntryCountCanAdd(aggregateEntries, entryCount,
+                                               SCDaemonConsistencyMaximumEntries)) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid recurring commitment segment"]);
+            return;
+        }
+        aggregateEntries += entryCount;
+        [segmentIDs addObject:segment[@"segmentID"]];
+        [validatedSegments addObject:segment];
+    }
+    [validatedSegments sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        return [left[@"startMinuteOfWeek"] compare:right[@"startMinuteOfWeek"]];
+    }];
+    NSInteger previousEnd = 0;
+    BOOL first = YES;
+    for (NSDictionary *segment in validatedSegments) {
+        NSInteger start = [segment[@"startMinuteOfWeek"] integerValue];
+        if (!first && start < previousEnd) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Recurring commitment segments overlap"]);
+            return;
+        }
+        first = NO;
+        previousEnd = [segment[@"endMinuteOfWeek"] integerValue];
+    }
+
+    NSDictionary<NSString *, id> *proposed = @{
+        @"schemaVersion": @1,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"controllingUID": @(self.clientUID),
+        @"startedAt": startedAt,
+        @"lockEndsAt": lockEndsAt,
+        @"protectedHours": validatedHours,
+        @"blockSettings": [blockSettings copy],
+        @"segments": [validatedSegments copy],
+    };
+
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) {
+        result[@"failed_stage"] = @"lock";
+        reply([result copy], error);
+    }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    __block BOOL conflict = NO;
+    __block BOOL exactRetry = NO;
+    __block BOOL postWriteMatch = NO;
+    __block NSError *persistenceError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldRecurringValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldRecurringValue isKindOfClass:[NSDictionary class]] ? oldRecurringValue : @{};
+        NSDictionary *oldSchedulesValue = [settings valueForKey:@"ApprovedSchedules"];
+        NSDictionary *oldSchedules = [oldSchedulesValue isKindOfClass:[NSDictionary class]] ? oldSchedulesValue : @{};
+        NSDictionary *oldCommitmentsValue = [settings valueForKey:SCDaemonApprovedScheduleCommitmentsKey];
+        NSDictionary *oldCommitments = [oldCommitmentsValue isKindOfClass:[NSDictionary class]] ? oldCommitmentsValue : @{};
+        NSDate *now = [NSDate date];
+        NSDictionary *sameID = [oldRecurring[commitmentID] isKindOfClass:[NSDictionary class]]
+            ? oldRecurring[commitmentID] : nil;
+        if (sameID != nil && !SCDaemonClientOwnsSchedule(self.clientUID, sameID[@"controllingUID"])) conflict = YES;
+        for (NSDictionary *stored in oldRecurring.allValues) {
+            if (![stored isKindOfClass:[NSDictionary class]] ||
+                !SCDaemonClientOwnsSchedule(self.clientUID, stored[@"controllingUID"])) continue;
+            if ([stored[@"commitmentID"] isEqual:commitmentID] && [stored isEqual:proposed]) {
+                exactRetry = YES;
+            } else {
+                conflict = YES;
+            }
+        }
+        [oldSchedules enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+            NSDictionary *record = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+            NSDate *end = record[@"approvedEndDate"];
+            if (SCDaemonClientOwnsSchedule(self.clientUID, record[@"controllingUID"]) &&
+                [end isKindOfClass:[NSDate class]] && [end compare:now] == NSOrderedDescending) conflict = YES;
+        }];
+        [oldCommitments enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+            NSDictionary *envelope = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+            NSDate *end = envelope[@"weekEndDate"];
+            if (SCDaemonClientOwnsSchedule(self.clientUID, envelope[@"controllingUID"]) &&
+                [end isKindOfClass:[NSDate class]] && [end compare:now] == NSOrderedDescending) conflict = YES;
+        }];
+        if (!conflict && exactRetry) {
+            postWriteMatch = YES;
+        } else if (!conflict) {
+            NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+            replacement[commitmentID] = proposed;
+            [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+            persistenceError = [settings syncSettingsAndWait:5];
+            if (persistenceError == nil) {
+                NSDictionary *persistedValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+                NSDictionary *persisted = [persistedValue isKindOfClass:[NSDictionary class]] ? persistedValue : @{};
+                postWriteMatch = [persisted[commitmentID] isEqual:proposed];
+                if (!postWriteMatch) persistenceError = [SCErr errorWithCode:500
+                    subDescription:@"Recurring commitment did not verify after persistence"];
+            }
+            if (persistenceError != nil) {
+                [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                [settings syncSettingsAndWait:5];
+            }
+        }
+    }
+
+    if (conflict) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:403
+            subDescription:@"A live schedule commitment already exists for this user"]);
+        return;
+    }
+    if (persistenceError != nil) {
+        result[@"failed_stage"] = @"persist";
+        result[@"post_write_match"] = @(postWriteMatch);
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], persistenceError);
+        return;
+    }
+    result[@"segments_stored"] = @(validatedSegments.count);
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @(postWriteMatch);
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        result[@"failed_stage"] = reconciled ? @"none" : @"evaluate";
+        reply([result copy], nil);
+    }];
+}
+
+- (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO,
+                                      @"reconcile_succeeded": @NO} mutableCopy];
+    if (!SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation) || self.clientUID == 0) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid recurring commitment identity"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+    __block NSError *resultError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(oldRecurring, self.clientUID,
+                                                                     commitmentID, generation);
+        NSDate *now = [NSDate date];
+        if (commitment == nil) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment was not found"];
+        } else if ([commitment[@"lockEndsAt"] compare:now] == NSOrderedDescending) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment is still locked"];
+        } else if ([SCDaemonScheduler protectedHoursAreActiveAtDate:now
+                                                         commitment:commitment
+                                                            calendar:SCDaemonRecurringLocalCalendar()]) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Protected Hours are active"];
+        } else {
+            NSDictionary *oldBreaksValue = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
+            NSDictionary *oldBreaks = [oldBreaksValue isKindOfClass:[NSDictionary class]] ? oldBreaksValue : @{};
+            NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+            NSMutableDictionary *replacementBreaks = [oldBreaks mutableCopy];
+            [replacement removeObjectForKey:commitmentID];
+            [replacementBreaks removeObjectForKey:commitmentID];
+            [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+            [settings setValue:replacementBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+            resultError = [settings syncSettingsAndWait:5];
+            if (resultError != nil) {
+                [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                [settings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                [settings syncSettingsAndWait:5];
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+    result[@"store_persisted"] = @YES;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+            subDescription:@"Recurring commitment ended but enforcement reconciliation did not verify"]);
+    }];
+}
+
+- (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
+                                           generation:(NSString *)generation
+                                       protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                                                reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO,
+                                      @"reconcile_succeeded": @NO} mutableCopy];
+    NSDictionary *validatedHours = SCDaemonValidatedProtectedHours(protectedHours);
+    if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) ||
+        !SCDaemonUUIDString(generation) || validatedHours == nil) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid Protected Hours update"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+    __block NSError *resultError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(oldRecurring, self.clientUID,
+                                                                     commitmentID, generation);
+        if (commitment == nil) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment was not found"];
+        } else if (SCDaemonProtectedHoursEditIsLocked(commitment, [NSDate date],
+                                                       SCDaemonRecurringLocalCalendar())) {
+            resultError = [SCErr errorWithCode:403
+                                 subDescription:@"Protected Hours cannot be edited during the lock window"];
+        } else {
+            NSMutableDictionary *updatedCommitment = [commitment mutableCopy];
+            updatedCommitment[@"protectedHours"] = validatedHours;
+            NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+            replacement[commitmentID] = [updatedCommitment copy];
+            [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+            resultError = [settings syncSettingsAndWait:5];
+            if (resultError != nil) {
+                [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                [settings syncSettingsAndWait:5];
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+    result[@"store_persisted"] = @YES;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+            subDescription:@"Protected Hours saved but reconciliation did not verify"]);
+    }];
+}
+
+- (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                 durationMinutes:(NSInteger)durationMinutes
+                                           reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO,
+                                      @"reconcile_succeeded": @NO} mutableCopy];
+    if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation) ||
+        !(durationMinutes == 5 || durationMinutes == 15 || durationMinutes == 30)) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid timed break request"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    __block NSDictionary *oldBreaks = @{};
+    __block NSDictionary *proposedBreak = nil;
+    __block NSError *resultError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *recurringValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(recurringValue, self.clientUID,
+                                                                     commitmentID, generation);
+        NSDate *now = [NSDate date];
+        NSString *activeSource = [settings valueForKey:@"ActiveBlockSource"];
+        BOOL activeMatches = [SCBlockUtilities modernBlockIsRunning] &&
+            [activeSource isEqual:SCDaemonActiveBlockSourceSchedulerRecurring] &&
+            [[settings valueForKey:@"ActiveScheduleCommitmentID"] isEqual:commitmentID] &&
+            [[settings valueForKey:@"ActiveScheduleGeneration"] isEqual:generation] &&
+            [[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue] == self.clientUID;
+        NSDictionary *oldBreaksValue = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
+        oldBreaks = [oldBreaksValue isKindOfClass:[NSDictionary class]] ? oldBreaksValue : @{};
+        NSDictionary *existingBreak = [SCDaemonScheduler activeBreakAtDate:now
+                                                                      value:oldBreaks
+                                                                   ownerUID:self.clientUID
+                                                                 commitment:commitment];
+        if (commitment == nil || !activeMatches) {
+            resultError = [SCErr errorWithCode:403
+                                 subDescription:@"A matching recurring block must be active to begin a break"];
+        } else if (existingBreak != nil) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"A timed break is already active"];
+        } else if ([SCDaemonScheduler protectedHoursAreActiveAtDate:now
+                                                         commitment:commitment
+                                                            calendar:SCDaemonRecurringLocalCalendar()]) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Protected Hours are active"];
+        } else {
+            NSDate *endsAt = [now dateByAddingTimeInterval:durationMinutes * 60.0];
+            proposedBreak = @{
+                @"schemaVersion": @1,
+                @"commitmentID": commitmentID,
+                @"generation": generation,
+                @"controllingUID": @(self.clientUID),
+                @"startedAt": now,
+                @"endsAt": endsAt,
+            };
+            NSMutableDictionary *replacement = [oldBreaks mutableCopy];
+            replacement[commitmentID] = proposedBreak;
+            [settings setValue:replacement forKey:SCDaemonActiveScheduleBreaksKey];
+            resultError = [settings syncSettingsAndWait:5];
+            if (resultError != nil) {
+                [settings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                [settings syncSettingsAndWait:5];
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+
+    result[@"store_persisted"] = @YES;
+    result[@"break_started_at"] = proposedBreak[@"startedAt"];
+    result[@"break_ends_at"] = proposedBreak[@"endsAt"];
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
+        if ([schedulerResult[@"status"] isEqual:@"verified"]) {
+            result[@"outcome"] = @"verified";
+            result[@"reconcile_succeeded"] = @YES;
+            reply([result copy], nil);
+            return;
+        }
+
+        // A break is not consumed unless the scheduler actually tore down the
+        // matching recurring-owned block. Restore the prior root value.
+        if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+        SCSettings *rollbackSettings = [SCSettings sharedSettings];
+        @synchronized (SCDaemonScheduleStoreLock()) {
+            NSDictionary *currentValue = [rollbackSettings valueForKey:SCDaemonActiveScheduleBreaksKey];
+            NSDictionary *current = [currentValue isKindOfClass:[NSDictionary class]] ? currentValue : @{};
+            if ([current[commitmentID] isEqual:proposedBreak]) {
+                [rollbackSettings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                [rollbackSettings syncSettingsAndWait:5];
+            }
+        }
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
+        result[@"store_persisted"] = @NO;
+        reply([result copy], [SCErr errorWithCode:500
+            subDescription:@"Timed break did not verify and was rolled back"]);
+    }];
+}
+
+- (void)endRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                    generation:(NSString *)generation
+                                         reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO,
+                                      @"reconcile_succeeded": @NO} mutableCopy];
+    if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation)) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid timed break identity"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+    __block NSError *resultError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *recurringValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(recurringValue, self.clientUID,
+                                                                     commitmentID, generation);
+        NSDictionary *oldBreaksValue = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
+        NSDictionary *oldBreaks = [oldBreaksValue isKindOfClass:[NSDictionary class]] ? oldBreaksValue : @{};
+        NSDictionary *storedBreak = [oldBreaks[commitmentID] isKindOfClass:[NSDictionary class]]
+            ? oldBreaks[commitmentID] : nil;
+        if (commitment == nil || storedBreak == nil ||
+            ![storedBreak[@"generation"] isEqual:generation] ||
+            [storedBreak[@"controllingUID"] unsignedIntValue] != self.clientUID) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Timed break was not found"];
+        } else {
+            NSMutableDictionary *replacement = [oldBreaks mutableCopy];
+            [replacement removeObjectForKey:commitmentID];
+            [settings setValue:replacement forKey:SCDaemonActiveScheduleBreaksKey];
+            resultError = [settings syncSettingsAndWait:5];
+            if (resultError != nil) {
+                [settings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                [settings syncSettingsAndWait:5];
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+    result[@"store_persisted"] = @YES;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+            subDescription:@"Timed break ended but enforcement reconciliation did not verify"]);
+    }];
+}
+
+- (void)getRecurringScheduleRuntimeStateWithReply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    if (self.clientUID == 0) {
+        reply(@{}, [SCErr errorWithCode:403 subDescription:@"Invalid recurring schedule owner"]);
+        return;
+    }
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        reply(@{}, [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+    NSDate *now = [NSDate date];
+    NSDictionary *recurringValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+    NSDictionary *commitment = [[SCDaemonScheduler validRecurringCommitmentsFromValue:recurringValue
+                                                                               ownerUID:self.clientUID] firstObject];
+    if (commitment == nil) {
+        reply(@{
+            @"has_commitment": @NO,
+            @"lock_active": @NO,
+            @"protected_hours_active": @NO,
+            @"break_active": @NO,
+            @"can_end_expired": @NO,
+        }, nil);
+        return;
+    }
+    BOOL protectedActive = [SCDaemonScheduler protectedHoursAreActiveAtDate:now
+                                                                 commitment:commitment
+                                                                    calendar:SCDaemonRecurringLocalCalendar()];
+    NSDictionary *breaks = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
+    NSDictionary *activeBreak = [SCDaemonScheduler activeBreakAtDate:now value:breaks
+                                                             ownerUID:self.clientUID commitment:commitment];
+    BOOL lockActive = [commitment[@"lockEndsAt"] compare:now] == NSOrderedDescending;
+    NSMutableDictionary *state = [@{
+        @"has_commitment": @YES,
+        @"commitment_id": commitment[@"commitmentID"],
+        @"generation": commitment[@"generation"],
+        @"started_at": commitment[@"startedAt"],
+        @"lock_ends_at": commitment[@"lockEndsAt"],
+        @"lock_active": @(lockActive),
+        @"protected_hours": commitment[@"protectedHours"],
+        @"protected_hours_active": @(protectedActive),
+        @"break_active": @(activeBreak != nil),
+        @"can_end_expired": @(!lockActive && !protectedActive),
+    } mutableCopy];
+    if (activeBreak != nil) state[@"break_ends_at"] = activeBreak[@"endsAt"];
+    reply([state copy], nil);
+}
+
 // Register a schedule - stores approved schedule in secure settings
 // Legacy V1 registration remains available during the rollback/drain window.
 - (void)registerScheduleWithID:(NSString*)scheduleId
@@ -1326,6 +1957,14 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     NSMutableDictionary* approvedSchedules = [[settings valueForKey: @"ApprovedSchedules"] mutableCopy];
     if (approvedSchedules == nil) {
         approvedSchedules = [NSMutableDictionary new];
+    }
+    NSDictionary *recurringCommitments = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+    if (SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(recurringCommitments,
+                                                                   self.clientUID)) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([SCErr errorWithCode:403
+                    subDescription:@"Legacy registration is unavailable while a recurring commitment exists"]);
+        return;
     }
     NSDictionary *existingSchedule = [approvedSchedules[scheduleId] isKindOfClass:[NSDictionary class]]
         ? approvedSchedules[scheduleId] : nil;
@@ -1593,6 +2232,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     }
     [settings setValue:nil forKey:@"ApprovedSchedules"];
     [settings setValue:nil forKey:SCDaemonApprovedScheduleCommitmentsKey];
+    [settings setValue:nil forKey:SCDaemonApprovedRecurringCommitmentsKey];
+    [settings setValue:nil forKey:SCDaemonActiveScheduleBreaksKey];
     NSError *syncError = [settings syncSettingsAndWait:5];
     if (syncError != nil) {
         SCDaemonXPCLogError(@"Approved schedule clear persistence failed", syncError);

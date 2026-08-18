@@ -51,6 +51,8 @@ echo "Clearing user defaults..."
 CONSOLE_USER=$(stat -f "%Su" /dev/console)
 sudo -u "$CONSOLE_USER" defaults delete org.eyebeam.Fence SCIsCommitted 2>/dev/null || true
 sudo -u "$CONSOLE_USER" defaults delete org.eyebeam.Fence SCWeeklySchedules 2>/dev/null || true
+sudo -u "$CONSOLE_USER" defaults delete org.eyebeam.Fence SCRecurringCommitment 2>/dev/null || true
+sudo -u "$CONSOLE_USER" defaults delete org.eyebeam.Fence SCActiveTimedBreak 2>/dev/null || true
 
 # Clear week-specific keys (check for any SCWeekSchedules_* or SCWeekCommitment_*)
 for key in $(sudo -u "$CONSOLE_USER" defaults read org.eyebeam.Fence 2>/dev/null | grep -oE "SCWeek(Schedules|Commitment)_[0-9-]+" | sort -u); do

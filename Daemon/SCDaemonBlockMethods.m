@@ -280,8 +280,11 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
             requestedSet.count == activeSet.count && [requestedSet isSubsetOfSet:activeSet] &&
             [[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue] == owner.unsignedIntValue;
         if (policyBecameActive) {
-            BOOL isV2 = [record[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2;
-            [settings setValue:(isV2 ? SCDaemonActiveBlockSourceSchedulerV2 : SCDaemonActiveBlockSourceLegacySchedule)
+            NSInteger schemaVersion = [record[SCDaemonScheduleSchemaVersionKey] integerValue];
+            NSString *source = schemaVersion >= 3 ? SCDaemonActiveBlockSourceSchedulerRecurring
+                : (schemaVersion >= 2 ? SCDaemonActiveBlockSourceSchedulerV2
+                                      : SCDaemonActiveBlockSourceLegacySchedule);
+            [settings setValue:source
                         forKey:@"ActiveBlockSource"];
             [settings setValue:scheduleID forKey:@"ActiveScheduleID"];
             [settings setValue:record[SCDaemonScheduleCommitmentIDKey] forKey:@"ActiveScheduleCommitmentID"];
@@ -303,9 +306,11 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [self.daemonMethodLock unlock];
         return;
     }
+
     NSString *source = [settings valueForKey:@"ActiveBlockSource"];
     BOOL schedulerOwned = [source isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] ||
-        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2];
+        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2] ||
+        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring];
     if (![SCBlockUtilities modernBlockIsRunning] || !schedulerOwned) {
         reply(nil);
         [self.daemonMethodLock unlock];
@@ -336,7 +341,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [self.daemonMethodLock unlock];
         return;
     }
-    
+
     // we reset at the _end_ of every method, but we'll also reset at the _start_ here
     // because startBlock can sometimes take a while, and it'd be a shame if the daemon killed itself
     // before we were done
@@ -804,6 +809,18 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     }
     
     SCSettings* settings = [SCSettings sharedSettings];
+
+    NSString *activeSource = [settings valueForKey:@"ActiveBlockSource"];
+    BOOL schedulerOwned = [activeSource isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] ||
+        [activeSource isEqualToString:SCDaemonActiveBlockSourceSchedulerV2] ||
+        [activeSource isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring];
+    if (schedulerOwned) {
+        NSLog(@"ERROR: Refusing end-date extension for a scheduler-owned block");
+        reply([SCErr errorWithCode:403
+                    subDescription:@"Scheduled block end dates cannot be extended"]);
+        [self.daemonMethodLock unlock];
+        return;
+    }
     
     // this can only be used to *extend* the block end date - not shorten it!
     // and we also won't let them extend by more than 24 hours at a time, for safety...

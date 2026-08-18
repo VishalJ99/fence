@@ -42,6 +42,10 @@ compatibleWithCurrentAppWithReason:(NSString* _Nullable * _Nullable)reason;
                    capabilities:(NSArray<NSString*>* _Nullable)capabilities
 supportsRootScheduleCommitWithReason:(NSString* _Nullable * _Nullable)reason;
 
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>* _Nullable)capabilities
+supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
+
 // Builds the complete privacy-safe E7 payload used by AppController after an
 // initially unreachable daemon goes through its one allowed repair attempt.
 // Returning nil means the supplied state is internally inconsistent.
@@ -95,6 +99,36 @@ supportsRootScheduleCommitWithReason:(NSString* _Nullable * _Nullable)reason;
                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
                                        reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                       NSError * _Nullable error))reply;
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                            protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *, id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                     reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                    NSError * _Nullable error))reply;
+- (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
+- (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
+                                           generation:(NSString *)generation
+                                       protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                                                reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                               NSError * _Nullable error))reply;
+- (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                 durationMinutes:(NSInteger)durationMinutes
+                                           reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                          NSError * _Nullable error))reply;
+- (void)endRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                    generation:(NSString *)generation
+                                         reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                        NSError * _Nullable error))reply;
+- (void)getRecurringScheduleRuntimeState:(void(^)(NSDictionary<NSString *, id> *state,
+                                                   NSError * _Nullable error))reply;
 
 // Legacy V1 methods retained while already-installed LaunchAgents drain.
 - (void)registerScheduleWithID:(NSString*)scheduleId

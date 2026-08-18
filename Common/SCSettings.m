@@ -55,6 +55,28 @@ static BOOL SCSettingsWeekKeyIsValid(id candidate) {
     return YES;
 }
 
+static BOOL SCSettingsUUIDString(id candidate) {
+    return [candidate isKindOfClass:[NSString class]] &&
+        [[NSUUID alloc] initWithUUIDString:candidate] != nil;
+}
+
+static BOOL SCSettingsStringArrayIsValid(id candidate, BOOL requireUUIDs, BOOL requireNonempty) {
+    if (![candidate isKindOfClass:[NSArray class]] || (requireNonempty && [candidate count] == 0)) return NO;
+    for (id value in candidate) {
+        if (![value isKindOfClass:[NSString class]] || (requireUUIDs && !SCSettingsUUIDString(value))) return NO;
+    }
+    return YES;
+}
+
+static BOOL SCSettingsProtectedHoursAreValid(id candidate) {
+    if (![candidate isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *hours = candidate;
+    return SCSettingsNumberIsBoolean(hours[@"enabled"]) &&
+        SCSettingsIntegerNumberInRange(hours[@"startMinute"], 1439) &&
+        SCSettingsIntegerNumberInRange(hours[@"endMinute"], 1439) &&
+        [hours[@"startMinute"] integerValue] != [hours[@"endMinute"] integerValue];
+}
+
 @interface SCSettings ()
 
 // Private vars
@@ -171,6 +193,11 @@ static BOOL SCSettingsWeekKeyIsValid(id candidate) {
         // even an intentionally empty week remains immutable at the root
         // authority until its absolute window expires.
         @"ApprovedScheduleCommitments": @{},
+        // One indefinite recurring envelope per owner. The edit-lock deadline
+        // is metadata; record existence remains enforcement authority.
+        @"ApprovedRecurringScheduleCommitments": @{},
+        // Temporary scheduler pauses keyed by recurring commitment ID.
+        @"ActiveScheduleBreaks": @{},
 
         // block settings
         // the user sets these in defaults, then when a block is started they're copied over to settings
@@ -410,6 +437,82 @@ static BOOL SCSettingsWeekKeyIsValid(id candidate) {
         }
     }
 
+    id recurringValue = settings[@"ApprovedRecurringScheduleCommitments"];
+    NSMutableDictionary<NSString *, NSDictionary *> *recurringByID = [NSMutableDictionary dictionary];
+    if (recurringValue != nil) {
+        if (![recurringValue isKindOfClass:[NSDictionary class]] || [recurringValue count] > 512) return NO;
+        NSMutableSet<NSNumber *> *owners = [NSMutableSet set];
+        for (id commitmentKey in recurringValue) {
+            NSDictionary *commitment = [recurringValue[commitmentKey] isKindOfClass:[NSDictionary class]]
+                ? recurringValue[commitmentKey] : nil;
+            NSNumber *owner = commitment[@"controllingUID"];
+            NSDate *startedAt = commitment[@"startedAt"];
+            NSDate *lockEndsAt = commitment[@"lockEndsAt"];
+            NSArray *segments = commitment[@"segments"];
+            if (!SCSettingsUUIDString(commitmentKey) || commitment == nil ||
+                !SCSettingsIntegerNumberInRange(commitment[@"schemaVersion"], 1) ||
+                [commitment[@"schemaVersion"] integerValue] != 1 ||
+                ![commitment[@"commitmentID"] isEqual:commitmentKey] ||
+                !SCSettingsUUIDString(commitment[@"generation"]) ||
+                !SCSettingsIntegerNumberInRange(owner, UINT_MAX) || owner.unsignedIntValue == 0 ||
+                [owners containsObject:owner] ||
+                ![startedAt isKindOfClass:[NSDate class]] || ![lockEndsAt isKindOfClass:[NSDate class]] ||
+                [lockEndsAt compare:startedAt] != NSOrderedDescending ||
+                !SCSettingsProtectedHoursAreValid(commitment[@"protectedHours"]) ||
+                ![commitment[@"blockSettings"] isKindOfClass:[NSDictionary class]] ||
+                ![segments isKindOfClass:[NSArray class]] || segments.count == 0 || segments.count > 512) return NO;
+            [owners addObject:owner];
+            NSMutableSet<NSString *> *segmentIDs = [NSMutableSet set];
+            NSInteger previousEnd = 0;
+            BOOL first = YES;
+            NSUInteger aggregateEntries = 0;
+            for (id rawSegment in segments) {
+                NSDictionary *segment = [rawSegment isKindOfClass:[NSDictionary class]] ? rawSegment : nil;
+                NSNumber *start = segment[@"startMinuteOfWeek"];
+                NSNumber *end = segment[@"endMinuteOfWeek"];
+                NSArray *blocklist = segment[@"blocklist"];
+                NSArray *bundleIDs = segment[@"sourceBundleIDs"];
+                id isAllowlist = segment[@"isAllowlist"];
+                if (segment == nil || !SCSettingsUUIDString(segment[@"segmentID"]) ||
+                    [segmentIDs containsObject:segment[@"segmentID"]] ||
+                    !SCSettingsIntegerNumberInRange(start, 10079) ||
+                    !SCSettingsIntegerNumberInRange(end, 10080) ||
+                    end.integerValue <= start.integerValue ||
+                    (!first && start.integerValue < previousEnd) ||
+                    !SCSettingsStringArrayIsValid(blocklist, NO, YES) ||
+                    !SCSettingsStringArrayIsValid(bundleIDs, YES, YES) ||
+                    !SCSettingsUUIDString(segment[@"policyRevision"]) ||
+                    !SCSettingsNumberIsBoolean(isAllowlist) || [isAllowlist boolValue] ||
+                    blocklist.count > 4096 || aggregateEntries > 4096 - blocklist.count) return NO;
+                aggregateEntries += blocklist.count;
+                first = NO;
+                previousEnd = end.integerValue;
+                [segmentIDs addObject:segment[@"segmentID"]];
+            }
+            recurringByID[commitmentKey] = commitment;
+        }
+    }
+
+    id breaksValue = settings[@"ActiveScheduleBreaks"];
+    if (breaksValue != nil) {
+        if (![breaksValue isKindOfClass:[NSDictionary class]] || [breaksValue count] > 512) return NO;
+        for (id breakKey in breaksValue) {
+            NSDictionary *activeBreak = [breaksValue[breakKey] isKindOfClass:[NSDictionary class]]
+                ? breaksValue[breakKey] : nil;
+            NSDictionary *commitment = recurringByID[breakKey];
+            NSDate *startedAt = activeBreak[@"startedAt"];
+            NSDate *endsAt = activeBreak[@"endsAt"];
+            if (!SCSettingsUUIDString(breakKey) || activeBreak == nil || commitment == nil ||
+                !SCSettingsIntegerNumberInRange(activeBreak[@"schemaVersion"], 1) ||
+                [activeBreak[@"schemaVersion"] integerValue] != 1 ||
+                ![activeBreak[@"commitmentID"] isEqual:breakKey] ||
+                ![activeBreak[@"generation"] isEqual:commitment[@"generation"]] ||
+                ![activeBreak[@"controllingUID"] isEqual:commitment[@"controllingUID"]] ||
+                ![startedAt isKindOfClass:[NSDate class]] || ![endsAt isKindOfClass:[NSDate class]] ||
+                [endsAt compare:startedAt] != NSOrderedDescending) return NO;
+        }
+    }
+
     if ([settings[@"BlockIsRunning"] boolValue]) {
         if (![settings[@"BlockEndDate"] isKindOfClass:[NSDate class]] ||
             ![settings[@"ActiveBlocklist"] isKindOfClass:[NSArray class]] ||
@@ -426,13 +529,14 @@ static BOOL SCSettingsWeekKeyIsValid(id candidate) {
         }
         NSString *source = settings[@"ActiveBlockSource"];
         NSSet *validSources = [NSSet setWithArray:@[
-            @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"unknown"
+            @"manual", @"test", @"legacy_schedule", @"scheduler_v2", @"scheduler_recurring", @"unknown"
         ]];
         // Source/provenance was added after the original active-block schema.
         // An absent value remains valid and is treated as unknown so an upgrade
         // never discards the only declared record of an already-running block.
         if (source != nil && (![source isKindOfClass:[NSString class]] || ![validSources containsObject:source])) return NO;
-        if ([source isEqualToString:@"legacy_schedule"] || [source isEqualToString:@"scheduler_v2"]) {
+        if ([source isEqualToString:@"legacy_schedule"] || [source isEqualToString:@"scheduler_v2"] ||
+            [source isEqualToString:@"scheduler_recurring"]) {
             if ([[NSUUID alloc] initWithUUIDString:settings[@"ActiveScheduleID"]] == nil) return NO;
         }
     }

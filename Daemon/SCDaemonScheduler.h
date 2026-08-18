@@ -21,6 +21,7 @@ FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceManual;
 FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceTest;
 FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceLegacySchedule;
 FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceSchedulerV2;
+FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceSchedulerRecurring;
 
 /// Overflow-safe aggregate cap used while validating one commitment batch.
 FOUNDATION_EXPORT BOOL SCDaemonScheduleEntryCountCanAdd(NSUInteger currentCount,
@@ -32,6 +33,11 @@ FOUNDATION_EXPORT BOOL SCDaemonScheduleIntervalsOverlap(NSDate *leftStart,
                                                         NSDate *leftEnd,
                                                         NSDate *rightStart,
                                                         NSDate *rightEnd);
+/// Recurring commitments have no automatic expiry; while one remains in the
+/// root store, the same owner cannot admit a finite V1/V2 commitment.
+FOUNDATION_EXPORT BOOL SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(
+    id recurringCommitments,
+    uid_t ownerUID);
 
 typedef NSDictionary<NSString *, id> * _Nonnull (^SCDaemonSchedulerStateProvider)(void);
 typedef void (^SCDaemonSchedulerReconcileHandler)(NSString *scheduleID,
@@ -57,6 +63,34 @@ typedef void (^SCDaemonSchedulerAnomalyHandler)(NSDictionary<NSString *, id> *fi
 /// Earliest future start/end boundary, or nil when there is no future work.
 + (nullable NSDate *)nextBoundaryAfterDate:(NSDate *)now
                                     records:(NSArray<NSDictionary<NSString *, id> *> *)records;
+
+/// Validates owner-scoped recurring commitment envelopes from the root store.
++ (NSArray<NSDictionary<NSString *, id> *> *)validRecurringCommitmentsFromValue:(id)value
+                                                                        ownerUID:(uid_t)ownerUID;
+
+/// Materializes the previous/current/next local-week occurrences used by the
+/// absolute-record selector. Supplying a calendar makes DST behavior directly
+/// testable; production passes an explicit local Gregorian calendar.
++ (NSArray<NSDictionary<NSString *, id> *> *)recurringOccurrenceRecordsAtDate:(NSDate *)now
+                                                                    commitments:(NSArray<NSDictionary<NSString *, id> *> *)commitments
+                                                                        calendar:(NSCalendar *)calendar;
+
++ (BOOL)protectedHoursAreActiveAtDate:(NSDate *)date
+                            commitment:(NSDictionary<NSString *, id> *)commitment
+                               calendar:(NSCalendar *)calendar;
+
++ (BOOL)protectedHoursEditLockIsActiveAtDate:(NSDate *)date
+                                     commitment:(NSDictionary<NSString *, id> *)commitment
+                                        calendar:(NSCalendar *)calendar;
+
++ (nullable NSDate *)nextProtectedHoursBoundaryAfterDate:(NSDate *)date
+                                               commitment:(NSDictionary<NSString *, id> *)commitment
+                                                  calendar:(NSCalendar *)calendar;
+
++ (nullable NSDictionary<NSString *, id> *)activeBreakAtDate:(NSDate *)date
+                                                        value:(id)value
+                                                     ownerUID:(uid_t)ownerUID
+                                                   commitment:(nullable NSDictionary<NSString *, id> *)commitment;
 
 + (BOOL)activeState:(NSDictionary<NSString *, id> *)state
        matchesRecord:(NSDictionary<NSString *, id> *)record;

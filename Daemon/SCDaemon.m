@@ -155,9 +155,13 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
         initWithStateProvider:^NSDictionary<NSString *,id> *{
             SCSettings *settings = [SCSettings sharedSettings];
             id approved = [settings valueForKey:@"ApprovedSchedules"];
+            id recurring = [settings valueForKey:@"ApprovedRecurringScheduleCommitments"];
+            id activeBreaks = [settings valueForKey:@"ActiveScheduleBreaks"];
             return @{
                 @"settings_available": @(settings.settingsStateAvailableForEnforcement),
                 @"approved_schedules": [approved isKindOfClass:[NSDictionary class]] ? approved : @{},
+                @"approved_recurring_commitments": [recurring isKindOfClass:[NSDictionary class]] ? recurring : @{},
+                @"active_schedule_breaks": [activeBreaks isKindOfClass:[NSDictionary class]] ? activeBreaks : @{},
                 @"block_running": @([SCBlockUtilities modernBlockIsRunning]),
                 @"block_end_date": [settings valueForKey:@"BlockEndDate"] ?: [NSNull null],
                 @"active_block_source": [settings valueForKey:@"ActiveBlockSource"] ?: @"unknown",

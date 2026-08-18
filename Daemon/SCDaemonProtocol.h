@@ -20,7 +20,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionExactConsistency = 3,
     SCDaemonProtocolVersionScheduleExecutionSource = 4,
     SCDaemonProtocolVersionRootScheduler = 5,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRootScheduler,
+    SCDaemonProtocolVersionRecurringScheduler = 6,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringScheduler,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -32,6 +33,9 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityConsistencyProjection @"consistency-projection-v1"
 #define SCDaemonCapabilityRootScheduleStore @"root-schedule-store-v2"
 #define SCDaemonCapabilityRootScheduleTimer @"root-schedule-timer-v1"
+#define SCDaemonCapabilityRecurringScheduleStore @"recurring-schedule-store-v1"
+#define SCDaemonCapabilityRecurringScheduleTimer @"recurring-schedule-timer-v1"
+#define SCDaemonCapabilityRecurringScheduleBreaks @"recurring-schedule-breaks-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -200,6 +204,50 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
                                authorization:(NSData *)authData
                                        reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                       NSError * _Nullable error))reply;
+
+/// Atomically installs one indefinite recurring commitment for the signed
+/// caller. `lockEndsAt` controls only when the ordinary End action becomes
+/// available; the root record remains scheduler authority until explicitly
+/// ended. Segment minute offsets are half-open and Monday-based (0...10080).
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                            protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *, id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             authorization:(NSData *)authData
+                                     reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                    NSError * _Nullable error))reply;
+
+/// Ends only the caller's exact recurring commitment, and only after its edit
+/// lock has expired while Protected Hours is inactive.
+- (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
+                                  generation:(NSString *)generation
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
+
+- (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
+                                           generation:(NSString *)generation
+                                       protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                                                reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                               NSError * _Nullable error))reply;
+
+- (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                 durationMinutes:(NSInteger)durationMinutes
+                                           reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                          NSError * _Nullable error))reply;
+
+- (void)endRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
+                                    generation:(NSString *)generation
+                                         reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                        NSError * _Nullable error))reply;
+
+/// Returns the signed caller's local recurring runtime state. No blocklist,
+/// bundle identifier, or data belonging to another UID is returned.
+- (void)getRecurringScheduleRuntimeStateWithReply:(void(^)(NSDictionary<NSString *, id> *state,
+                                                            NSError * _Nullable error))reply;
 
 // XPC method to register a schedule (requires authorization, stores approved schedule)
 - (void)registerScheduleWithID:(NSString*)scheduleId

@@ -50,6 +50,31 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecordWithID(NSString *sched
     return [record copy];
 }
 
+static NSDictionary<NSString *, id> *SCSchedulerTestRecurringCommitment(uid_t ownerUID,
+                                                                         NSDate *startedAt,
+                                                                         NSDate *lockEndsAt,
+                                                                         NSDictionary *protectedHours) {
+    return @{
+        @"schemaVersion": @1,
+        @"commitmentID": SCSchedulerTestCommitmentID,
+        @"generation": SCSchedulerTestGenerationID,
+        @"controllingUID": @(ownerUID),
+        @"startedAt": startedAt,
+        @"lockEndsAt": lockEndsAt,
+        @"protectedHours": protectedHours,
+        @"blockSettings": @{},
+        @"segments": @[@{
+            @"segmentID": SCSchedulerTestScheduleID1,
+            @"startMinuteOfWeek": @(9 * 60),
+            @"endMinuteOfWeek": @(10 * 60),
+            @"blocklist": @[@"example.com"],
+            @"isAllowlist": @NO,
+            SCDaemonScheduleSourceBundleIDsKey: @[SCSchedulerTestBundleID],
+            SCDaemonSchedulePolicyRevisionKey: SCSchedulerTestPolicyRevisionID,
+        }],
+    };
+}
+
 @interface SCDaemonSchedulerTests : XCTestCase
 @end
 
@@ -74,6 +99,21 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecordWithID(NSString *sched
     XCTAssertFalse(SCDaemonScheduleIntervalsOverlap(start, start, start, end));
 }
 
+- (void)testFiniteScheduleAdmissionRejectsOnlyTheOwnersRecurringCommitment {
+    NSDate *now = [NSDate dateWithTimeIntervalSince1970:1700000000];
+    NSDictionary *expiredLockCommitment = SCSchedulerTestRecurringCommitment(
+        501,
+        [now dateByAddingTimeInterval:-7200],
+        [now dateByAddingTimeInterval:-3600],
+        @{@"enabled": @NO, @"startMinute": @1380, @"endMinute": @300});
+    NSDictionary *store = @{SCSchedulerTestCommitmentID: expiredLockCommitment};
+
+    XCTAssertTrue(SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(store, 501),
+        @"The edit-lock deadline does not expire recurring enforcement");
+    XCTAssertFalse(SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(store, 502));
+    XCTAssertFalse(SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(@[], 501));
+}
+
 - (NSMutableDictionary<NSString *, id> *)idleStateAtDate:(NSDate *)now
                                        approvedSchedules:(NSDictionary<NSString *, id> *)approvedSchedules {
     return [@{
@@ -81,6 +121,8 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecordWithID(NSString *sched
         @"console_uid": @501,
         @"active_owner_uid": @0,
         @"approved_schedules": approvedSchedules,
+        @"approved_recurring_commitments": @{},
+        @"active_schedule_breaks": @{},
         @"now": now,
         @"block_running": @NO,
         @"active_block_source": @"none",
@@ -89,7 +131,26 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecordWithID(NSString *sched
         @"active_policy_revision": SCSchedulerTestPolicyRevisionID,
         @"active_blocklist": @[@"example.com"],
         @"active_is_allowlist": @NO,
+        @"block_end_date": [NSDate distantFuture],
     } mutableCopy];
+}
+
+- (NSCalendar *)utcGregorianCalendar {
+    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    calendar.firstWeekday = 2;
+    return calendar;
+}
+
+- (NSDate *)dateWithYear:(NSInteger)year month:(NSInteger)month day:(NSInteger)day
+                    hour:(NSInteger)hour minute:(NSInteger)minute {
+    NSDateComponents *components = [NSDateComponents new];
+    components.year = year;
+    components.month = month;
+    components.day = day;
+    components.hour = hour;
+    components.minute = minute;
+    return [[self utcGregorianCalendar] dateFromComponents:components];
 }
 
 - (NSDictionary<NSString *, id> *)evaluateScheduler:(SCDaemonScheduler *)scheduler
@@ -165,6 +226,121 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecordWithID(NSString *sched
     };
     XCTAssertEqual([SCDaemonScheduler validScheduleRecordsFromApprovedSchedules:approvedSchedules
                                                                         ownerUID:501].count, 0U);
+}
+
+- (void)testRecurringCommitmentMaterializesAcrossLocalWeeksAfterLockExpiry {
+    NSDate *now = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30]; // Monday
+    NSDate *startedAt = [self dateWithYear:2026 month:7 day:1 hour:9 minute:0];
+    NSDate *lockEndsAt = [self dateWithYear:2026 month:7 day:2 hour:9 minute:0];
+    NSDictionary *commitment = SCSchedulerTestRecurringCommitment(501, startedAt, lockEndsAt, @{
+        @"enabled": @NO, @"startMinute": @1380, @"endMinute": @300,
+    });
+    NSArray *valid = [SCDaemonScheduler validRecurringCommitmentsFromValue:@{
+        SCSchedulerTestCommitmentID: commitment,
+    } ownerUID:501];
+    XCTAssertEqual(valid.count, 1U);
+    NSArray *foreignOwner = [SCDaemonScheduler validRecurringCommitmentsFromValue:@{
+        SCSchedulerTestCommitmentID: commitment,
+    } ownerUID:502];
+    XCTAssertEqual(foreignOwner.count, 0U);
+
+    NSArray *occurrences = [SCDaemonScheduler recurringOccurrenceRecordsAtDate:now
+                                                                    commitments:valid
+                                                                        calendar:[self utcGregorianCalendar]];
+    XCTAssertEqual(occurrences.count, 3U);
+    NSDictionary *desired = [SCDaemonScheduler desiredScheduleRecordAtDate:now records:occurrences];
+    XCTAssertEqualObjects(desired[@"scheduleID"], SCSchedulerTestScheduleID1);
+    XCTAssertEqualObjects(desired[SCDaemonScheduleSchemaVersionKey], @3);
+    XCTAssertEqualObjects(desired[SCDaemonScheduleCommitmentIDKey], SCSchedulerTestCommitmentID);
+    XCTAssertEqualObjects(desired[@"approvedStartDate"],
+                          [self dateWithYear:2026 month:7 day:13 hour:9 minute:0]);
+    XCTAssertEqualObjects(desired[@"approvedEndDate"],
+                          [self dateWithYear:2026 month:7 day:13 hour:10 minute:0]);
+    XCTAssertTrue([lockEndsAt compare:now] == NSOrderedAscending,
+                  @"The elapsed edit lock must not remove recurring enforcement occurrences");
+}
+
+- (void)testProtectedHoursAndTimedBreakUseHalfOpenRuntimeTransitions {
+    NSCalendar *calendar = [self utcGregorianCalendar];
+    NSDate *startedAt = [self dateWithYear:2026 month:7 day:1 hour:9 minute:0];
+    NSDictionary *commitment = SCSchedulerTestRecurringCommitment(501, startedAt,
+        [startedAt dateByAddingTimeInterval:86400], @{
+            @"enabled": @YES, @"startMinute": @1380, @"endMinute": @300,
+        });
+    NSDate *atStart = [self dateWithYear:2026 month:7 day:13 hour:23 minute:0];
+    NSDate *beforeEnd = [self dateWithYear:2026 month:7 day:14 hour:4 minute:59];
+    NSDate *atEnd = [self dateWithYear:2026 month:7 day:14 hour:5 minute:0];
+    XCTAssertTrue([SCDaemonScheduler protectedHoursAreActiveAtDate:atStart
+                                                        commitment:commitment calendar:calendar]);
+    XCTAssertTrue([SCDaemonScheduler protectedHoursAreActiveAtDate:beforeEnd
+                                                        commitment:commitment calendar:calendar]);
+    XCTAssertFalse([SCDaemonScheduler protectedHoursAreActiveAtDate:atEnd
+                                                         commitment:commitment calendar:calendar]);
+    XCTAssertEqualObjects([SCDaemonScheduler nextProtectedHoursBoundaryAfterDate:atStart
+                                                                       commitment:commitment
+                                                                          calendar:calendar], atEnd);
+    XCTAssertFalse([SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:
+        [self dateWithYear:2026 month:7 day:13 hour:20 minute:59]
+                                                               commitment:commitment calendar:calendar]);
+    XCTAssertTrue([SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:
+        [self dateWithYear:2026 month:7 day:13 hour:21 minute:0]
+                                                              commitment:commitment calendar:calendar]);
+    XCTAssertFalse([SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:atEnd
+                                                               commitment:commitment calendar:calendar]);
+
+    NSDictionary *almostAllDay = SCSchedulerTestRecurringCommitment(501, startedAt,
+        [startedAt dateByAddingTimeInterval:86400], @{
+            @"enabled": @YES, @"startMinute": @0, @"endMinute": @(23 * 60),
+        });
+    XCTAssertTrue([SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:
+        [self dateWithYear:2026 month:7 day:13 hour:12 minute:0]
+                                                              commitment:almostAllDay calendar:calendar]);
+
+    NSDate *breakStart = [self dateWithYear:2026 month:7 day:13 hour:9 minute:15];
+    NSDate *breakEnd = [breakStart dateByAddingTimeInterval:15 * 60];
+    NSDictionary *activeBreaks = @{SCSchedulerTestCommitmentID: @{
+        @"schemaVersion": @1,
+        @"commitmentID": SCSchedulerTestCommitmentID,
+        @"generation": SCSchedulerTestGenerationID,
+        @"controllingUID": @501,
+        @"startedAt": breakStart,
+        @"endsAt": breakEnd,
+    }};
+    XCTAssertNotNil([SCDaemonScheduler activeBreakAtDate:breakStart value:activeBreaks
+                                                 ownerUID:501 commitment:commitment]);
+    XCTAssertNil([SCDaemonScheduler activeBreakAtDate:breakEnd value:activeBreaks
+                                              ownerUID:501 commitment:commitment]);
+    XCTAssertNil([SCDaemonScheduler activeBreakAtDate:breakStart value:activeBreaks
+                                              ownerUID:502 commitment:commitment]);
+}
+
+- (void)testRecurringActiveMatchRequiresRecurringProvenanceAndOccurrenceEnd {
+    NSDate *start = [self dateWithYear:2026 month:7 day:13 hour:9 minute:0];
+    NSDictionary *commitment = SCSchedulerTestRecurringCommitment(501,
+        [start dateByAddingTimeInterval:-86400], [start dateByAddingTimeInterval:-1], @{
+            @"enabled": @NO, @"startMinute": @1380, @"endMinute": @300,
+        });
+    NSDictionary *record = [SCDaemonScheduler recurringOccurrenceRecordsAtDate:start
+                                                                     commitments:@[commitment]
+                                                                         calendar:[self utcGregorianCalendar]][1];
+    NSMutableDictionary *state = [@{
+        @"block_running": @YES,
+        @"block_end_date": record[@"approvedEndDate"],
+        @"active_block_source": SCDaemonActiveBlockSourceSchedulerRecurring,
+        @"active_schedule_id": record[@"scheduleID"],
+        @"active_commitment_id": SCSchedulerTestCommitmentID,
+        @"active_generation": SCSchedulerTestGenerationID,
+        @"active_policy_revision": SCSchedulerTestPolicyRevisionID,
+        @"active_blocklist": @[@"example.com"],
+        @"active_is_allowlist": @NO,
+        @"active_owner_uid": @501,
+    } mutableCopy];
+    XCTAssertTrue([SCDaemonScheduler activeState:state matchesRecord:record]);
+    state[@"active_block_source"] = SCDaemonActiveBlockSourceSchedulerV2;
+    XCTAssertFalse([SCDaemonScheduler activeState:state matchesRecord:record]);
+    state[@"active_block_source"] = SCDaemonActiveBlockSourceSchedulerRecurring;
+    state[@"block_end_date"] = [record[@"approvedEndDate"] dateByAddingTimeInterval:60];
+    XCTAssertFalse([SCDaemonScheduler activeState:state matchesRecord:record]);
 }
 
 - (void)testSelectionUsesHalfOpenIntervalsAndFindsStrictlyFutureBoundaries {

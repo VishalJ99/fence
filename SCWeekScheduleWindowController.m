@@ -4,6 +4,7 @@
 //
 
 #import "SCWeekScheduleWindowController.h"
+#import "SCEmergencyExitWindowController.h"
 #import "SCWeekGridView.h"
 #import "SCBundleSidebarView.h"
 #import "SCCalendarGridView.h"
@@ -81,6 +82,7 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, strong) SCWeekGridView *weekGridView;
 @property (nonatomic, strong) NSScrollView *gridScrollView;
 @property (nonatomic, strong) NSButton *addBundleButton;
+@property (nonatomic, strong) NSButton *breakButton;
 @property (nonatomic, strong) NSButton *emergencyUnlockButton;
 @property (nonatomic, strong) NSButton *commitButton;
 @property (nonatomic, strong) NSTextField *commitmentLabel;
@@ -101,6 +103,7 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, strong, nullable) SCDayScheduleEditorController *dayEditorController;
 @property (nonatomic, strong, nullable) SCBundleEditorController *bundleEditorController;
 @property (nonatomic, strong, nullable) SCLicenseWindowController *licenseWindowController;
+@property (nonatomic, strong, nullable) SCEmergencyExitWindowController *emergencyExitWindowController;
 
 // Flag to prevent redundant reloadData when grid updates schedule
 @property (nonatomic, assign) BOOL isUpdatingFromGrid;
@@ -108,8 +111,13 @@ static BOOL const kUseCalendarUI = YES;
 // Event monitor for Cmd+Q during alert sheets
 @property (nonatomic, strong) id cmdQMonitor;
 
-// Periodic refresh timer (5 min) for NOW line and status updates
+// Periodic refresh timer for active break countdown and NOW/status updates
 @property (nonatomic, strong) NSTimer *refreshTimer;
+@property (nonatomic, assign) NSUInteger refreshTickCount;
+
+// Prevent the migration choice sheet from being presented more than once at a time.
+@property (nonatomic, assign) BOOL migrationChoiceAlertPresented;
+@property (nonatomic, assign) BOOL migrationChoiceDeferred;
 
 @end
 
@@ -197,7 +205,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.titleLabel.autoresizingMask = NSViewMinYMargin; // Stay pinned to top
     [contentView addSubview:self.titleLabel];
 
-    // Week navigation (right side): [< This Week] [Week Label] [Next Week >]
+    // The schedule is a date-independent seven-day template. Keep the existing
+    // navigation controls allocated for layout compatibility, but hide them.
     CGFloat navX = contentView.bounds.size.width - 390 - padding;
 
     // Previous week button (This Week)
@@ -209,6 +218,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.prevWeekButton.action = @selector(navigateToPrevWeek:);
     self.prevWeekButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
     self.prevWeekButton.enabled = NO; // Disabled when on current week
+    self.prevWeekButton.hidden = YES;
     [contentView addSubview:self.prevWeekButton];
 
     // Week label (center of navigation)
@@ -231,6 +241,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.nextWeekButton.target = self;
     self.nextWeekButton.action = @selector(navigateToNextWeek:);
     self.nextWeekButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    self.nextWeekButton.hidden = YES;
     [contentView addSubview:self.nextWeekButton];
 
     // Status view - use semi-transparent background to work with frosted glass
@@ -268,7 +279,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [contentView addSubview:self.bundleSidebar];
 
         // "Traveling?" button below sidebar (positioned at bottom, above main controls)
-        CGFloat travelingButtonY = 53; // Position between sidebar (85) and commit buttons (45)
+        CGFloat travelingButtonY = 16; // Keep clear of the bottom action row at minimum width.
         self.travelingButton = [[SCHoverableLinkButton alloc] initWithFrame:NSMakeRect(padding, travelingButtonY, sidebarWidth, 20)];
         self.travelingButton.title = @"Traveling?";
         self.travelingButton.bezelStyle = NSBezelStyleInline;
@@ -288,7 +299,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         CGFloat calendarWidth = contentView.bounds.size.width - calendarX - padding;
         self.calendarGridView = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(calendarX, bottomControlsHeight, calendarWidth, mainAreaHeight)];
         self.calendarGridView.delegate = self;
-        self.calendarGridView.showOnlyRemainingDays = YES;
+        self.calendarGridView.showOnlyRemainingDays = NO;
         self.calendarGridView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [contentView addSubview:self.calendarGridView];
 
@@ -303,7 +314,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
         self.weekGridView = [[SCWeekGridView alloc] initWithFrame:NSMakeRect(0, 0, self.gridScrollView.bounds.size.width, 300)];
         self.weekGridView.delegate = self;
-        self.weekGridView.showOnlyRemainingDays = YES;
+        self.weekGridView.showOnlyRemainingDays = NO;
 
         self.gridScrollView.documentView = self.weekGridView;
         [contentView addSubview:self.gridScrollView];
@@ -323,6 +334,16 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [contentView addSubview:self.addBundleButton];
     }
 
+    // Break, emergency exit, and commitment controls.
+    self.breakButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 160 - 10 - 150, buttonY, 150, 30)];
+    self.breakButton.title = @"Take Break (0)";
+    self.breakButton.bezelStyle = NSBezelStyleRounded;
+    self.breakButton.target = self;
+    self.breakButton.action = @selector(breakButtonClicked:);
+    self.breakButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+    self.breakButton.toolTip = @"Ending a break early does not refund its credit.";
+    [contentView addSubview:self.breakButton];
+
     // Emergency Unlock button (red, next to commit button)
     self.emergencyUnlockButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 160, buttonY, 160, 30)];
     self.emergencyUnlockButton.bezelStyle = NSBezelStyleRounded;
@@ -333,7 +354,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [contentView addSubview:self.emergencyUnlockButton];
 
     self.commitButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150, buttonY, 150, 30)];
-    self.commitButton.title = @"Commit to Week";
+    self.commitButton.title = @"Commit";
     self.commitButton.bezelStyle = NSBezelStyleRounded;
     self.commitButton.target = self;
     self.commitButton.action = @selector(commitClicked:);
@@ -386,8 +407,9 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
                                                                name:NSWorkspaceDidWakeNotification
                                                              object:nil];
 
-    // 5-minute timer to refresh NOW line and status (block boundaries are covered by SCScheduleManagerDidChangeNotification)
-    self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:300.0  // 5 minutes
+    // The one-second tick keeps an active break countdown accurate. Full data
+    // refreshes remain infrequent unless a manager notification arrives.
+    self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                          target:self
                                                        selector:@selector(refreshTimerFired:)
                                                        userInfo:nil
@@ -438,7 +460,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)showWeekScheduleWindowRequested:(NSNotification*)note {
+    self.currentWeekOffset = 0;
     [self.window makeKeyAndOrderFront:nil];
+    [self reloadData];
+    [self presentRecurringMigrationChoiceIfNeeded];
+}
+
+- (void)showWindow:(id)sender {
+    self.currentWeekOffset = 0;
+    [super showWindow:sender];
+    [self reloadData];
+    [self presentRecurringMigrationChoiceIfNeeded];
 }
 
 - (void)windowDidResize:(NSNotification *)note {
@@ -456,8 +488,11 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)refreshTimerFired:(NSTimer *)timer {
-    // Periodic refresh for NOW line position and status updates
-    [self reloadData];
+    self.refreshTickCount++;
+    [self updateCommitmentUI];
+    if (self.refreshTickCount % 300 == 0) {
+        [self updateStatusLabel];
+    }
     [self.calendarGridView setNeedsDisplay:YES];
 }
 
@@ -465,44 +500,40 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)reloadData {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    BOOL isCommitted = [manager isCommittedForWeekOffset:self.currentWeekOffset];
+    self.currentWeekOffset = 0;
+    BOOL editingLocked = manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
 
     if (kUseCalendarUI) {
-        // NEW CALENDAR UI: Update sidebar and calendar
-
-        // Build schedules dictionary (used by both sidebar and calendar)
+        // Build the single recurring schedule dictionary used by both views.
         NSMutableDictionary *scheduleDict = [NSMutableDictionary dictionary];
         for (SCBlockBundle *bundle in manager.bundles) {
-            SCWeeklySchedule *schedule = [manager scheduleForBundleID:bundle.bundleID weekOffset:self.currentWeekOffset];
+            SCWeeklySchedule *schedule = [manager recurringScheduleForBundleID:bundle.bundleID];
             if (schedule) {
                 scheduleDict[bundle.bundleID] = schedule;
             }
         }
 
-        // Update sidebar - grey out bundles that have schedules for this week
         self.bundleSidebar.bundles = manager.bundles;
         self.bundleSidebar.selectedBundleID = self.focusedBundleID;
         self.bundleSidebar.schedules = scheduleDict;
-        self.bundleSidebar.isCommitted = isCommitted;
+        self.bundleSidebar.isCommitted = editingLocked;
         [self.bundleSidebar reloadData];
 
-        // Update calendar grid
         self.calendarGridView.bundles = manager.bundles;
         self.calendarGridView.schedules = scheduleDict;
-
         self.calendarGridView.focusedBundleID = self.focusedBundleID;
-        self.calendarGridView.isCommitted = isCommitted;
-        self.calendarGridView.showOnlyRemainingDays = (self.currentWeekOffset == 0);
-        self.calendarGridView.weekOffset = self.currentWeekOffset;
+        self.calendarGridView.isCommitted = editingLocked;
+        self.calendarGridView.showOnlyRemainingDays = NO;
+        self.calendarGridView.weekOffset = 0;
         [self.calendarGridView reloadData];
 
     } else {
-        // OLD GRID UI: Update grid with week-specific data
+        // Old grid fallback, also backed by the recurring template.
         self.weekGridView.bundles = manager.bundles;
-        self.weekGridView.schedules = [manager schedulesForWeekOffset:self.currentWeekOffset];
-        self.weekGridView.isCommitted = isCommitted;
-        self.weekGridView.showOnlyRemainingDays = (self.currentWeekOffset == 0);
-        self.weekGridView.weekOffset = self.currentWeekOffset;
+        self.weekGridView.schedules = manager.recurringSchedules;
+        self.weekGridView.isCommitted = editingLocked;
+        self.weekGridView.showOnlyRemainingDays = NO;
+        self.weekGridView.weekOffset = 0;
         [self.weekGridView reloadData];
     }
 
@@ -518,26 +549,30 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Update navigation buttons
     [self updateNavigationButtons];
 
-    // Resize grid to fit content - MUST be at least as tall as scroll view
-    // In non-flipped coordinates, a smaller document view pins to BOTTOM (y=0)
-    // Making it at least viewport height ensures content appears at top
-    CGFloat contentHeight = 30 + manager.bundles.count * 60;
-    CGFloat viewportHeight = self.gridScrollView.contentSize.height;
-    CGFloat gridHeight = MAX(contentHeight, viewportHeight);
+    if (!kUseCalendarUI) {
+        CGFloat contentHeight = 30 + manager.bundles.count * 60;
+        CGFloat viewportHeight = self.gridScrollView.contentSize.height;
+        CGFloat gridHeight = MAX(contentHeight, viewportHeight);
+        NSRect gridFrame = self.weekGridView.frame;
+        gridFrame.size.width = self.gridScrollView.contentSize.width;
+        gridFrame.size.height = gridHeight;
+        self.weekGridView.frame = gridFrame;
+    }
 
-    NSRect gridFrame = self.weekGridView.frame;
-    gridFrame.size.width = self.gridScrollView.contentSize.width; // Update width too
-    gridFrame.size.height = gridHeight;
-    self.weekGridView.frame = gridFrame;
+    if (manager.recurringScheduleMigrationNeedsChoice && self.window.isVisible) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self presentRecurringMigrationChoiceIfNeeded];
+        });
+    }
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)telemetryRenderSnapshot {
     BOOL windowLoaded = self.isWindowLoaded;
     BOOL windowVisible = windowLoaded && self.window.isVisible;
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    NSInteger selectedWeekOffset = MAX(0, MIN(1, self.currentWeekOffset));
+    NSInteger selectedWeekOffset = 0;
     NSUInteger modelBundleCount = manager.bundles.count;
-    NSUInteger modelScheduleCount = [manager schedulesForWeekOffset:selectedWeekOffset].count;
+    NSUInteger modelScheduleCount = manager.recurringSchedules.count;
 
     BOOL calendarAttached = NO;
     BOOL calendarHasArea = NO;
@@ -636,9 +671,30 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
-    // Only show blocking status when committed
-    if (![manager isCommittedForWeekOffset:0]) {
-        NSTextField *uncommittedLabel = [NSTextField labelWithString:@"No active schedule - do you have the courage to commit?"];
+    if (manager.hasActiveTimedBreak) {
+        NSInteger remainingSeconds = (NSInteger)ceil(MAX(
+            0, [manager.activeTimedBreakEndDate timeIntervalSinceNow]));
+        NSString *message = manager.protectedHoursActiveNow
+            ? [NSString stringWithFormat:
+                @"Protected Hours are enforcing your schedule. Your break has %ld:%02ld remaining.",
+                (long)(remainingSeconds / 60), (long)(remainingSeconds % 60)]
+            : [NSString stringWithFormat:
+                @"Break active — scheduled blocking resumes in %ld:%02ld.",
+                (long)(remainingSeconds / 60), (long)(remainingSeconds % 60)];
+        NSTextField *breakLabel = [NSTextField labelWithString:message];
+        breakLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+        breakLabel.textColor = manager.protectedHoursActiveNow
+            ? NSColor.systemOrangeColor : NSColor.systemGreenColor;
+        [self.statusStackView addArrangedSubview:breakLabel];
+        return;
+    }
+
+    // The recurring commitment record is the enforcement-session lifecycle.
+    if (!manager.hasRecurringCommitment) {
+        NSString *message = manager.hasUnexpiredLegacyCommitment
+            ? @"Your legacy schedule remains enforced until its current commitment expires."
+            : @"No active schedule - do you have the courage to commit?";
+        NSTextField *uncommittedLabel = [NSTextField labelWithString:message];
         uncommittedLabel.font = [NSFont systemFontOfSize:12];
         uncommittedLabel.textColor = [NSColor secondaryLabelColor];
         [self.statusStackView addArrangedSubview:uncommittedLabel];
@@ -657,7 +713,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         BOOL allowed = [manager wouldBundleBeAllowed:bundle.bundleID];
         NSString *statusStr = [manager statusStringForBundleID:bundle.bundleID];
 
-        // Skip bundles with no schedule for current week
+        // Skip bundles with no recurring schedule.
         if (statusStr.length == 0) continue;
 
         // Create pill container
@@ -743,77 +799,130 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)updateCommitmentUI {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    BOOL isCommitted = [manager isCommittedForWeekOffset:self.currentWeekOffset];
+    BOOL hasRecurringCommitment = manager.hasRecurringCommitment;
 
-    // Update emergency unlock button
-    NSInteger credits = [manager emergencyUnlockCreditsRemaining];
-    [self updateEmergencyButtonTitle:[NSString stringWithFormat:@"Emergency Unlock (%ld)", (long)credits]];
-    // Only enabled when committed AND have credits remaining
-    self.emergencyUnlockButton.enabled = (isCommitted && credits > 0);
+    NSInteger emergencyCredits = [manager emergencyUnlockCreditsRemaining];
+    [self updateEmergencyButtonTitle:[NSString stringWithFormat:@"Emergency Unlock (%ld)", (long)emergencyCredits]];
+    self.emergencyUnlockButton.enabled =
+        (hasRecurringCommitment || manager.hasUnexpiredLegacyCommitment) && emergencyCredits > 0;
 
-    if (isCommitted) {
+    NSInteger breakCredits = manager.breakCreditsRemainingToday;
+    if (manager.hasActiveTimedBreak) {
+        NSTimeInterval remaining = MAX(0, [manager.activeTimedBreakEndDate timeIntervalSinceNow]);
+        NSInteger remainingSeconds = (NSInteger)ceil(remaining);
+        NSString *breakAction = manager.protectedHoursActiveNow ? @"End Paused Break" : @"End Break";
+        self.breakButton.title = [NSString stringWithFormat:@"%@ · %ld:%02ld", breakAction,
+                                  (long)(remainingSeconds / 60),
+                                  (long)(remainingSeconds % 60)];
+        self.breakButton.enabled = YES;
+    } else {
+        self.breakButton.title = [NSString stringWithFormat:@"Take Break (%ld)", (long)breakCredits];
+        self.breakButton.enabled = hasRecurringCommitment &&
+            breakCredits > 0 &&
+            !manager.protectedHoursActiveNow &&
+            [self hasCurrentlyBlockedRecurringBundle];
+    }
+
+    if (hasRecurringCommitment && manager.isRecurringCommitmentLockActive) {
         self.commitButton.title = @"Committed ✓";
         self.commitButton.enabled = NO;
-
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-        formatter.dateFormat = @"EEEE";
-        NSDate *endDate = [manager commitmentEndDateForWeekOffset:self.currentWeekOffset];
-        // V2 uses the next Monday as an exclusive half-open week bound.
-        NSString *endDay = [formatter stringFromDate:[endDate dateByAddingTimeInterval:-1]];
-        self.commitmentLabel.stringValue = [NSString stringWithFormat:@"Until %@", endDay];
+        formatter.dateFormat = @"EEE, MMM d 'at' h:mm a";
+        NSDate *endDate = manager.recurringCommitmentLockEndDate;
+        self.commitmentLabel.stringValue = endDate
+            ? [NSString stringWithFormat:@"End available %@; editing stays locked until you end it", [formatter stringFromDate:endDate]]
+            : @"Editing is locked";
         self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
+    } else if (hasRecurringCommitment) {
+        self.commitButton.title = @"End Commitment";
+        self.commitButton.enabled = !manager.protectedHoursActiveNow;
+        self.commitmentLabel.stringValue = manager.protectedHoursActiveNow
+            ? @"Protected Hours active"
+            : @"Schedule repeats until you end it";
+        self.commitmentLabel.textColor = manager.protectedHoursActiveNow
+            ? [NSColor systemOrangeColor]
+            : [NSColor secondaryLabelColor];
     } else {
-        NSString *weekName = (self.currentWeekOffset == 0) ? @"This Week" : @"Next Week";
-        self.commitButton.title = [NSString stringWithFormat:@"Commit to %@", weekName];
-
-        // For next week, only allow commit on Sunday
-        if (self.currentWeekOffset > 0) {
-            NSCalendar *calendar = [NSCalendar currentCalendar];
-            NSInteger weekday = [calendar component:NSCalendarUnitWeekday fromDate:[NSDate date]];
-            BOOL isSunday = (weekday == 1); // 1 = Sunday
-
-            if (!isSunday) {
-                self.commitButton.enabled = NO;
-                self.commitmentLabel.stringValue = @"Commit available on Sunday";
-                self.commitmentLabel.textColor = [NSColor tertiaryLabelColor];
-                return;
-            }
+        self.commitButton.title = @"Commit";
+        self.commitButton.enabled = manager.bundles.count > 0 &&
+            !manager.hasUnexpiredLegacyCommitment &&
+            !manager.recurringScheduleMigrationNeedsChoice;
+        if (manager.recurringScheduleMigrationNeedsChoice) {
+            self.commitmentLabel.stringValue = @"Choose a legacy schedule to continue";
+        } else if (manager.hasUnexpiredLegacyCommitment) {
+            self.commitmentLabel.stringValue = @"Current legacy commitment must finish first";
+        } else {
+            self.commitmentLabel.stringValue = @"Repeats until explicitly ended";
         }
-
-        self.commitButton.enabled = (manager.bundles.count > 0);
-        self.commitmentLabel.stringValue = @"";
+        self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
     }
 }
 
-- (void)updateWeekLabel {
-    NSCalendar *calendar = [NSCalendar currentCalendar];
-
-    // Get the Monday of the target week
-    NSDate *weekStart = [SCWeeklySchedule startOfCurrentWeek];
-    if (self.currentWeekOffset > 0) {
-        weekStart = [calendar dateByAddingUnit:NSCalendarUnitDay
-                                         value:self.currentWeekOffset * 7
-                                        toDate:weekStart
-                                       options:0];
+- (BOOL)hasCurrentlyBlockedRecurringBundle {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    for (SCBlockBundle *bundle in manager.bundles) {
+        if (!bundle.enabled || bundle.entries.count == 0) continue;
+        if (![manager wouldBundleBeAllowed:bundle.bundleID]) return YES;
     }
-    NSDate *weekEnd = [calendar dateByAddingUnit:NSCalendarUnitDay value:6 toDate:weekStart options:0];
+    return NO;
+}
 
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"MMM d";
-
-    NSString *weekType = (self.currentWeekOffset == 0) ? @"This Week" : @"Next Week";
-    self.weekLabel.stringValue = [NSString stringWithFormat:@"%@: %@ - %@",
-                                   weekType,
-                                   [formatter stringFromDate:weekStart],
-                                   [formatter stringFromDate:weekEnd]];
+- (void)updateWeekLabel {
+    self.currentWeekOffset = 0;
+    self.weekLabel.stringValue = @"Repeats every week";
 }
 
 #pragma mark - Actions
 
+- (void)presentRecurringMigrationChoiceIfNeeded {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (!manager.recurringScheduleMigrationNeedsChoice ||
+        self.migrationChoiceAlertPresented ||
+        self.migrationChoiceDeferred ||
+        !self.window.isVisible ||
+        self.window.attachedSheet != nil) {
+        return;
+    }
+
+    self.migrationChoiceAlertPresented = YES;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Choose Your Recurring Schedule";
+    alert.informativeText = @"Fence found different schedules for this week and next week. Choose which one should become the seven-day schedule that repeats every week.";
+    [alert addButtonWithTitle:@"Use This Week"];
+    [alert addButtonWithTitle:@"Use Next Week"];
+    [alert addButtonWithTitle:@"Not Now"];
+
+    __weak typeof(self) weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf == nil) return;
+        strongSelf.migrationChoiceAlertPresented = NO;
+
+        if (response == NSAlertFirstButtonReturn) {
+            [manager resolveRecurringScheduleMigrationUsingNextWeek:NO];
+        } else if (response == NSAlertSecondButtonReturn) {
+            [manager resolveRecurringScheduleMigrationUsingNextWeek:YES];
+        } else {
+            strongSelf.migrationChoiceDeferred = YES;
+        }
+        [strongSelf reloadData];
+    }];
+}
+
 - (void)addBundleClicked:(id)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Schedule Locked";
+        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
+            ? @"Choose which legacy schedule should repeat before editing bundles."
+            : @"Bundles cannot be added or edited while a recurring commitment exists.";
+        [alert runModal];
+        return;
+    }
+
     self.bundleEditorController = [[SCBundleEditorController alloc] initForNewBundle];
     self.bundleEditorController.delegate = self;
-    // New bundles have no schedule yet, so never locked
     self.bundleEditorController.isCommitted = NO;
     [self.bundleEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -823,29 +932,43 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)navigateToPrevWeek:(id)sender {
-    if (self.currentWeekOffset > 0) {
-        self.currentWeekOffset--;
-        [self updateNavigationButtons];
-        [self reloadData];
-        [self updateWeekLabel];
-    }
+    self.currentWeekOffset = 0;
 }
 
 - (void)navigateToNextWeek:(id)sender {
-    self.currentWeekOffset++;
-    [self updateNavigationButtons];
-    [self reloadData];
-    [self updateWeekLabel];
+    self.currentWeekOffset = 0;
 }
 
 - (void)updateNavigationButtons {
-    self.prevWeekButton.enabled = (self.currentWeekOffset > 0);
-    // For now, only allow navigating to next week (offset 1)
-    self.nextWeekButton.enabled = (self.currentWeekOffset < 1);
+    self.currentWeekOffset = 0;
+    self.prevWeekButton.enabled = NO;
+    self.nextWeekButton.enabled = NO;
+    self.prevWeekButton.hidden = YES;
+    self.nextWeekButton.hidden = YES;
 }
 
 - (void)commitClicked:(id)sender {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+
+    if (manager.hasRecurringCommitment) {
+        if (manager.isRecurringCommitmentLockActive || manager.protectedHoursActiveNow) return;
+        [self endRecurringCommitment];
+        return;
+    }
+
+    if (manager.recurringScheduleMigrationNeedsChoice) {
+        self.migrationChoiceDeferred = NO;
+        [self presentRecurringMigrationChoiceIfNeeded];
+        return;
+    }
+
+    if (manager.hasUnexpiredLegacyCommitment) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Legacy Commitment Still Active";
+        alert.informativeText = @"Your current legacy commitment must finish before you can start a recurring commitment.";
+        [alert runModal];
+        return;
+    }
 
     if (manager.bundles.count == 0) {
         NSAlert *alert = [[NSAlert alloc] init];
@@ -855,7 +978,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         return;
     }
 
-    // Check license FIRST, before showing confirmation dialog
+    // Preserve the existing license gate for starting a commitment.
     if (![[SCLicenseManager sharedManager] canCommit]) {
         [self showLicenseModalWithCompletion:^{
             // License now valid, show the confirmation dialog
@@ -872,21 +995,13 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
     NSAlert *alert = [[NSAlert alloc] init];
-    NSString *weekName = (self.currentWeekOffset == 0) ? @"This Week" : @"Next Week";
-    alert.messageText = [NSString stringWithFormat:@"Commit to %@?", weekName];
-
-    // Get the last day of the target week
-    NSArray *days = [manager daysToDisplayForWeekOffset:self.currentWeekOffset];
-    NSString *lastDay = @"Sunday"; // Always Sunday for Mon-Sun weeks
-    if (days.count > 0) {
-        lastDay = [SCWeeklySchedule displayNameForDay:[[days lastObject] integerValue]];
-    }
+    alert.messageText = @"Start Recurring Commitment?";
 
     // Check for bundles with no allow blocks (will be blocked all week)
     NSMutableArray<NSString *> *bundlesWithNoAllowBlocks = [NSMutableArray array];
     for (SCBlockBundle *bundle in manager.bundles) {
         if (!bundle.enabled) continue;
-        SCWeeklySchedule *schedule = [manager scheduleForBundleID:bundle.bundleID weekOffset:self.currentWeekOffset];
+        SCWeeklySchedule *schedule = [manager recurringScheduleForBundleID:bundle.bundleID];
         // No schedule OR schedule with no allowed windows = blocked all week
         BOOL hasAnyAllowWindows = NO;
         if (schedule) {
@@ -902,25 +1017,35 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
     }
 
-    // Main informative text
-    NSString *mainText = [NSString stringWithFormat:
-        @"Once committed, the schedule is locked till %@ (expires midnight) and cannot be modified, "
-        @"except for adding apps and websites to active bundles.", lastDay];
+    alert.informativeText = @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. Editing and bundle changes stay locked until you end it; the selected period controls when End first becomes available.";
+
+    CGFloat accessoryHeight = bundlesWithNoAllowBlocks.count > 0 ? 78 : 30;
+    NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, accessoryHeight)];
+    NSTextField *durationLabel = [NSTextField labelWithString:@"End available after:"];
+    durationLabel.frame = NSMakeRect(0, accessoryHeight - 24, 130, 20);
+    [accessory addSubview:durationLabel];
+
+    NSPopUpButton *durationPopUp = [[NSPopUpButton alloc]
+        initWithFrame:NSMakeRect(135, accessoryHeight - 28, 130, 26)
+        pullsDown:NO];
+    for (NSInteger dayCount = 1; dayCount <= 7; dayCount++) {
+        [durationPopUp addItemWithTitle:[NSString stringWithFormat:@"%ld day%@",
+                                         (long)dayCount,
+                                         dayCount == 1 ? @"" : @"s"]];
+    }
+    [durationPopUp selectItemAtIndex:2];
+    [accessory addSubview:durationPopUp];
 
     if (bundlesWithNoAllowBlocks.count > 0) {
-        // Show warning in red using accessory view
-        alert.informativeText = mainText;
-
         NSString *bundleList = [bundlesWithNoAllowBlocks componentsJoinedByString:@", "];
-        NSString *warningText = [NSString stringWithFormat:@"Warning: %@ will be blocked for the entire week (no allow windows scheduled).", bundleList];
+        NSString *warningText = [NSString stringWithFormat:@"Warning: %@ will always be blocked because no allow windows are scheduled.", bundleList];
         NSTextField *warningLabel = [NSTextField wrappingLabelWithString:warningText];
         warningLabel.textColor = [NSColor systemRedColor];
         warningLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-        [warningLabel setFrameSize:NSMakeSize(300, 40)];
-        alert.accessoryView = warningLabel;
-    } else {
-        alert.informativeText = mainText;
+        warningLabel.frame = NSMakeRect(0, 0, 360, 42);
+        [accessory addSubview:warningLabel];
     }
+    alert.accessoryView = accessory;
 
     [alert addButtonWithTitle:@"Commit"];
     [alert addButtonWithTitle:@"Cancel"];
@@ -928,7 +1053,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Setup Cmd+Q monitor so user can quit during alert
     [self setupCmdQMonitor];
 
-    NSInteger weekOffset = self.currentWeekOffset;
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
         [self removeCmdQMonitor];
 
@@ -936,8 +1060,9 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
             self.commitButton.title = @"Committing…";
             self.commitButton.enabled = NO;
             self.commitmentLabel.stringValue = @"Saving with the Fence helper";
+            NSInteger days = durationPopUp.indexOfSelectedItem + 1;
             __weak typeof(self) weakSelf = self;
-            [manager commitToWeekWithOffset:weekOffset completion:^(BOOL verified, NSError *error) {
+            [manager commitRecurringScheduleForDays:days completion:^(BOOL verified, NSError *error) {
                 typeof(self) strongSelf = weakSelf;
                 if (strongSelf == nil) return;
 
@@ -946,18 +1071,97 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
                 [NSApp activateIgnoringOtherApps:YES];
                 if (verified || [SCMiscUtilities errorIsAuthCanceled:error]) return;
 
-                BOOL rootStorePersisted = [manager isCommittedForWeekOffset:weekOffset];
+                BOOL rootStorePersisted = manager.hasRecurringCommitment;
                 NSAlert *failureAlert = [[NSAlert alloc] init];
                 failureAlert.messageText = rootStorePersisted
                     ? @"Schedule Saved; Verification Incomplete"
                     : @"Schedule Was Not Committed";
                 failureAlert.informativeText = rootStorePersisted
-                    ? (error.localizedDescription ?: @"Fence saved and locked the root-owned schedule, but immediate enforcement verification did not finish. The daemon will continue retrying; use Send Diagnostic Report Now if this persists.")
-                    : (error.localizedDescription ?: @"Fence could not verify the root-owned schedule store. Your schedule remains editable and existing active blocks are unchanged.");
+                    ? (error.localizedDescription ?: @"Fence saved the recurring commitment, but immediate enforcement verification did not finish. The daemon will continue retrying.")
+                    : (error.localizedDescription ?: @"Fence could not verify the recurring commitment. Your schedule remains editable and existing active blocks are unchanged.");
                 failureAlert.alertStyle = NSAlertStyleCritical;
                 [failureAlert beginSheetModalForWindow:strongSelf.window completionHandler:nil];
             }];
         }
+    }];
+}
+
+- (void)endRecurringCommitment {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    self.commitButton.title = @"Ending…";
+    self.commitButton.enabled = NO;
+    [manager endExpiredRecurringCommitmentWithCompletion:^(BOOL ended, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self reloadData];
+            [self.window makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+            if (ended || [SCMiscUtilities errorIsAuthCanceled:error]) return;
+
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Commitment Was Not Ended";
+            alert.informativeText = error.localizedDescription ?: @"Fence could not end the recurring commitment.";
+            alert.alertStyle = NSAlertStyleCritical;
+            [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        });
+    }];
+}
+
+- (void)breakButtonClicked:(id)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.hasActiveTimedBreak) {
+        self.breakButton.title = @"Ending Break…";
+        self.breakButton.enabled = NO;
+        [manager endTimedBreakWithCompletion:^(BOOL ended, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self reloadData];
+                if (ended || [SCMiscUtilities errorIsAuthCanceled:error]) return;
+
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Break Was Not Ended";
+                alert.informativeText = error.localizedDescription ?: @"Fence could not end the active break.";
+                alert.alertStyle = NSAlertStyleCritical;
+                [alert beginSheetModalForWindow:self.window completionHandler:nil];
+            });
+        }];
+        return;
+    }
+
+    if (!manager.hasRecurringCommitment ||
+        manager.breakCreditsRemainingToday <= 0 ||
+        manager.protectedHoursActiveNow ||
+        ![self hasCurrentlyBlockedRecurringBundle]) {
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Take a Break";
+    alert.informativeText = @"Choose a break length. This uses one credit; ending the break early does not refund it.";
+    [alert addButtonWithTitle:@"5 minutes"];
+    [alert addButtonWithTitle:@"15 minutes"];
+    [alert addButtonWithTitle:@"30 minutes"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        NSInteger minutes = 0;
+        if (response == NSAlertFirstButtonReturn) minutes = 5;
+        else if (response == NSAlertSecondButtonReturn) minutes = 15;
+        else if (response == NSAlertThirdButtonReturn) minutes = 30;
+        if (minutes == 0) return;
+
+        self.breakButton.title = @"Starting Break…";
+        self.breakButton.enabled = NO;
+        [manager beginTimedBreakForMinutes:minutes completion:^(BOOL started, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self reloadData];
+                if (started || [SCMiscUtilities errorIsAuthCanceled:error]) return;
+
+                NSAlert *failureAlert = [[NSAlert alloc] init];
+                failureAlert.messageText = @"Break Did Not Start";
+                failureAlert.informativeText = error.localizedDescription ?: @"Fence could not start the timed break.";
+                failureAlert.alertStyle = NSAlertStyleCritical;
+                [failureAlert beginSheetModalForWindow:self.window completionHandler:nil];
+            });
+        }];
     }];
 }
 
@@ -1018,6 +1222,20 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     NSInteger credits = [manager emergencyUnlockCreditsRemaining];
 
+    if (self.emergencyExitWindowController != nil) {
+        [self.emergencyExitWindowController.window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        return;
+    }
+
+    if (!manager.hasRecurringCommitment && !manager.hasUnexpiredLegacyCommitment) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Active Commitment";
+        alert.informativeText = @"Emergency Exit is available while a recurring or legacy commitment is active.";
+        [alert runModal];
+        return;
+    }
+
     if (credits <= 0) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"No Credits Remaining";
@@ -1028,13 +1246,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
     // Confirmation dialog
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Use Emergency Unlock?";
+    alert.messageText = @"Begin Emergency Exit?";
     alert.informativeText = [NSString stringWithFormat:
-        @"This will immediately end all blocking and use 1 of your %ld remaining emergency unlock%@.\n\n"
-        @"This cannot be undone.",
+        @"This starts a three-minute attention check. Fence must remain full screen, foreground, and focused for the entire timer. "
+        @"One surprise prompt must be confirmed within three seconds or the timer restarts.\n\n"
+        @"Completing the timer ends all blocking and uses 1 of your %ld remaining emergency unlock%@. The credit is used only after cleanup succeeds.",
         (long)credits, credits == 1 ? @"" : @"s"];
     alert.alertStyle = NSAlertStyleWarning;
-    [alert addButtonWithTitle:@"Unlock"];
+    [alert addButtonWithTitle:@"Begin"];
     [alert addButtonWithTitle:@"Cancel"];
 
     // Setup Cmd+Q monitor so user can quit during alert
@@ -1044,7 +1263,24 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [self removeCmdQMonitor];
 
         if (returnCode == NSAlertFirstButtonReturn) {
-            [self performEmergencyUnlock];
+            __weak typeof(self) weakSelf = self;
+            self.emergencyExitWindowController = [[SCEmergencyExitWindowController alloc]
+                initWithCompletionHandler:^{
+                    typeof(self) strongSelf = weakSelf;
+                    if (strongSelf == nil) return;
+                    strongSelf.emergencyExitWindowController = nil;
+                    [strongSelf.window makeKeyAndOrderFront:nil];
+                    [NSApp activateIgnoringOtherApps:YES];
+                    [strongSelf performEmergencyUnlock];
+                }
+                cancellationHandler:^{
+                    typeof(self) strongSelf = weakSelf;
+                    if (strongSelf == nil) return;
+                    strongSelf.emergencyExitWindowController = nil;
+                    [strongSelf.window makeKeyAndOrderFront:nil];
+                    [NSApp activateIgnoringOtherApps:YES];
+                }];
+            [self.emergencyExitWindowController begin];
         }
     }];
 }
@@ -1145,6 +1381,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
     }
     [defaults removeObjectForKey:@"SCIsCommitted"];
+    [defaults removeObjectForKey:@"SCRecurringCommitment"];
+    [defaults removeObjectForKey:@"SCActiveTimedBreak"];
     [defaults synchronize];
 
     // Post notification to refresh UI
@@ -1178,46 +1416,49 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)weekGridView:(SCWeekGridView *)gridView didSelectBundle:(SCBlockBundle *)bundle forDay:(SCDayOfWeek)day {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
-    // Remember which week we're editing
-    self.editingWeekOffset = self.currentWeekOffset;
+    self.editingWeekOffset = 0;
 
-    // Block opening editor when committed - schedule is locked
-    if ([manager isCommittedForWeekOffset:self.editingWeekOffset]) {
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Schedule Locked";
-        alert.informativeText = @"You're committed to this week. The schedule cannot be modified.";
+        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
+            ? @"Choose which legacy schedule should repeat before editing."
+            : @"The recurring schedule cannot be modified while a commitment exists.";
         [alert runModal];
         return;
     }
 
-    SCWeeklySchedule *schedule = [manager scheduleForBundleID:bundle.bundleID weekOffset:self.editingWeekOffset];
+    SCWeeklySchedule *schedule = [manager recurringScheduleForBundleID:bundle.bundleID];
 
     if (!schedule) {
-        schedule = [manager createScheduleForBundle:bundle weekOffset:self.editingWeekOffset];
+        schedule = [manager createRecurringScheduleForBundle:bundle];
     }
 
     self.dayEditorController = [[SCDayScheduleEditorController alloc] initWithBundle:bundle
                                                                             schedule:schedule
                                                                                  day:day];
     self.dayEditorController.delegate = self;
-    self.dayEditorController.isCommitted = NO;  // Will never be YES now since we block above
+    self.dayEditorController.isCommitted = NO;
 
     [self.dayEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
 
 - (void)weekGridView:(SCWeekGridView *)gridView didRequestEditBundle:(SCBlockBundle *)bundle {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Bundles Locked";
+        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
+            ? @"Choose which legacy schedule should repeat before editing bundles."
+            : @"Bundle changes stay locked until you end the recurring commitment.";
+        [alert runModal];
+        return;
+    }
     self.bundleEditorController = [[SCBundleEditorController alloc] initWithBundle:bundle];
     self.bundleEditorController.delegate = self;
 
-    // Lock editor if bundle is used in ANY committed schedule (This Week OR Next Week)
-    BOOL thisWeekCommitted = [manager isCommittedForWeekOffset:0];
-    BOOL nextWeekCommitted = [manager isCommittedForWeekOffset:1];
-    SCWeeklySchedule *scheduleForThisWeek = [manager scheduleForBundleID:bundle.bundleID weekOffset:0];
-    SCWeeklySchedule *scheduleForNextWeek = [manager scheduleForBundleID:bundle.bundleID weekOffset:1];
-    BOOL usedInCommittedSchedule = (thisWeekCommitted && scheduleForThisWeek != nil)
-                                || (nextWeekCommitted && scheduleForNextWeek != nil);
-    self.bundleEditorController.isCommitted = usedInCommittedSchedule;
+    self.bundleEditorController.isCommitted =
+        manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
 
     [self.bundleEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1243,17 +1484,20 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)bundleSidebar:(SCBundleSidebarView *)sidebar didRequestEditBundle:(SCBlockBundle *)bundle {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Bundles Locked";
+        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
+            ? @"Choose which legacy schedule should repeat before editing bundles."
+            : @"Bundle changes stay locked until you end the recurring commitment.";
+        [alert runModal];
+        return;
+    }
     self.bundleEditorController = [[SCBundleEditorController alloc] initWithBundle:bundle];
     self.bundleEditorController.delegate = self;
 
-    // Lock editor if bundle is used in ANY committed schedule (This Week OR Next Week)
-    BOOL thisWeekCommitted = [manager isCommittedForWeekOffset:0];
-    BOOL nextWeekCommitted = [manager isCommittedForWeekOffset:1];
-    SCWeeklySchedule *scheduleForThisWeek = [manager scheduleForBundleID:bundle.bundleID weekOffset:0];
-    SCWeeklySchedule *scheduleForNextWeek = [manager scheduleForBundleID:bundle.bundleID weekOffset:1];
-    BOOL usedInCommittedSchedule = (thisWeekCommitted && scheduleForThisWeek != nil)
-                                || (nextWeekCommitted && scheduleForNextWeek != nil);
-    self.bundleEditorController.isCommitted = usedInCommittedSchedule;
+    self.bundleEditorController.isCommitted =
+        manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
 
     [self.bundleEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1263,20 +1507,18 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)calendarGrid:(SCCalendarGridView *)grid didUpdateSchedule:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
-    // Capture old schedule for undo
-    SCWeeklySchedule *oldSchedule = [manager scheduleForBundleID:bundleID weekOffset:self.currentWeekOffset];
-    NSInteger weekOffset = self.currentWeekOffset;
+    SCWeeklySchedule *oldSchedule = [manager recurringScheduleForBundleID:bundleID];
 
     // Register undo action
     [[grid.undoManager prepareWithInvocationTarget:self] restoreSchedule:oldSchedule
                                                              forBundleID:bundleID
-                                                              weekOffset:weekOffset
+                                                              weekOffset:0
                                                             calendarGrid:grid];
 
     // Save the updated schedule to the manager
     // Set flag to prevent redundant reloadData (grid already updated itself)
     self.isUpdatingFromGrid = YES;
-    [manager updateSchedule:schedule forWeekOffset:self.currentWeekOffset];
+    [manager updateRecurringSchedule:schedule];
     self.isUpdatingFromGrid = NO;
 }
 
@@ -1287,14 +1529,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
     // Capture current state for redo
-    SCWeeklySchedule *currentSchedule = [manager scheduleForBundleID:bundleID weekOffset:weekOffset];
+    SCWeeklySchedule *currentSchedule = [manager recurringScheduleForBundleID:bundleID];
     [[grid.undoManager prepareWithInvocationTarget:self] restoreSchedule:currentSchedule
                                                              forBundleID:bundleID
                                                               weekOffset:weekOffset
                                                             calendarGrid:grid];
 
     // Restore the old schedule
-    [manager updateSchedule:schedule forWeekOffset:weekOffset];
+    [manager updateRecurringSchedule:schedule];
 
     // Refresh the UI
     [self reloadData];
@@ -1313,18 +1555,28 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Open the day editor sheet for detailed editing
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
-    self.editingWeekOffset = self.currentWeekOffset;
+    self.editingWeekOffset = 0;
 
-    SCWeeklySchedule *schedule = [manager scheduleForBundleID:bundle.bundleID weekOffset:self.editingWeekOffset];
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Schedule Locked";
+        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
+            ? @"Choose which legacy schedule should repeat before editing."
+            : @"The recurring schedule cannot be modified while a commitment exists.";
+        [alert runModal];
+        return;
+    }
+
+    SCWeeklySchedule *schedule = [manager recurringScheduleForBundleID:bundle.bundleID];
     if (!schedule) {
-        schedule = [manager createScheduleForBundle:bundle weekOffset:self.editingWeekOffset];
+        schedule = [manager createRecurringScheduleForBundle:bundle];
     }
 
     self.dayEditorController = [[SCDayScheduleEditorController alloc] initWithBundle:bundle
                                                                             schedule:schedule
                                                                                  day:day];
     self.dayEditorController.delegate = self;
-    self.dayEditorController.isCommitted = [manager isCommittedForWeekOffset:self.editingWeekOffset];
+    self.dayEditorController.isCommitted = NO;
 
     [self.dayEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1441,7 +1693,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
          didSaveSchedule:(SCWeeklySchedule *)schedule
                   forDay:(SCDayOfWeek)day {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    [manager updateSchedule:schedule forWeekOffset:self.editingWeekOffset];
+    [manager updateRecurringSchedule:schedule];
     self.dayEditorController = nil;
 }
 

@@ -18,6 +18,7 @@ NSString * const SCDaemonActiveBlockSourceManual = @"manual";
 NSString * const SCDaemonActiveBlockSourceTest = @"test";
 NSString * const SCDaemonActiveBlockSourceLegacySchedule = @"legacy_schedule";
 NSString * const SCDaemonActiveBlockSourceSchedulerV2 = @"scheduler_v2";
+NSString * const SCDaemonActiveBlockSourceSchedulerRecurring = @"scheduler_recurring";
 
 BOOL SCDaemonScheduleEntryCountCanAdd(NSUInteger currentCount,
                                       NSUInteger additionCount,
@@ -37,12 +38,25 @@ BOOL SCDaemonScheduleIntervalsOverlap(NSDate *leftStart,
         [rightStart compare:leftEnd] == NSOrderedAscending;
 }
 
+BOOL SCDaemonScheduleAdmissionConflictsWithRecurringCommitments(id recurringCommitments,
+                                                                uid_t ownerUID) {
+    if (ownerUID == 0 || ![recurringCommitments isKindOfClass:[NSDictionary class]]) return NO;
+    for (id candidate in [(NSDictionary *)recurringCommitments allValues]) {
+        if (![candidate isKindOfClass:[NSDictionary class]]) continue;
+        NSNumber *owner = [candidate[@"controllingUID"] isKindOfClass:[NSNumber class]]
+            ? candidate[@"controllingUID"] : nil;
+        if (owner.unsignedIntValue == ownerUID) return YES;
+    }
+    return NO;
+}
+
 static NSString * const SCDaemonSchedulerRecordIDKey = @"scheduleID";
 static NSString * const SCDaemonSchedulerStartKey = @"approvedStartDate";
 static NSString * const SCDaemonSchedulerEndKey = @"approvedEndDate";
 static NSString * const SCDaemonSchedulerOwnerKey = @"controllingUID";
 static NSString * const SCDaemonSchedulerBlocklistKey = @"blocklist";
 static NSString * const SCDaemonSchedulerBlockSettingsKey = @"blockSettings";
+static NSString * const SCDaemonSchedulerRecurringMarkerKey = @"recurringOccurrence";
 
 static BOOL SCDaemonSchedulerUUIDString(id value) {
     return [value isKindOfClass:[NSString class]] &&
@@ -56,6 +70,61 @@ static BOOL SCDaemonSchedulerStringArray(id value, BOOL requireUUIDs) {
             (requireUUIDs && !SCDaemonSchedulerUUIDString(candidate))) return NO;
     }
     return YES;
+}
+
+static BOOL SCDaemonSchedulerIntegerInRange(id value, NSInteger minimum, NSInteger maximum) {
+    if (![value isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
+    double number = [value doubleValue];
+    return isfinite(number) && floor(number) == number && number >= minimum && number <= maximum;
+}
+
+static BOOL SCDaemonSchedulerProtectedHoursAreValid(id value) {
+    if (![value isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *hours = value;
+    id enabled = hours[@"enabled"];
+    if (![enabled isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)enabled) != CFBooleanGetTypeID()) return NO;
+    if (!SCDaemonSchedulerIntegerInRange(hours[@"startMinute"], 0, 1439) ||
+        !SCDaemonSchedulerIntegerInRange(hours[@"endMinute"], 0, 1439)) return NO;
+    return [hours[@"startMinute"] integerValue] != [hours[@"endMinute"] integerValue];
+}
+
+static NSCalendar *SCDaemonSchedulerLocalCalendar(void) {
+    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    calendar.timeZone = [NSTimeZone localTimeZone];
+    calendar.firstWeekday = 2;
+    return calendar;
+}
+
+static NSDate *SCDaemonSchedulerStartOfMondayWeek(NSDate *date, NSCalendar *calendar) {
+    NSDate *startOfDay = [calendar startOfDayForDate:date];
+    NSInteger weekday = [calendar component:NSCalendarUnitWeekday fromDate:startOfDay];
+    NSInteger daysSinceMonday = (weekday + 5) % 7;
+    return [calendar dateByAddingUnit:NSCalendarUnitDay value:-daysSinceMonday toDate:startOfDay options:0];
+}
+
+static NSDate *SCDaemonSchedulerDateForMinuteOfWeek(NSInteger minuteOfWeek,
+                                                     NSDate *weekStart,
+                                                     NSCalendar *calendar) {
+    NSInteger dayOffset = minuteOfWeek / (24 * 60);
+    NSInteger minuteOfDay = minuteOfWeek % (24 * 60);
+    NSDate *day = [calendar dateByAddingUnit:NSCalendarUnitDay value:dayOffset toDate:weekStart options:0];
+    return [calendar dateBySettingHour:minuteOfDay / 60
+                                minute:minuteOfDay % 60
+                                second:0
+                                ofDate:day
+                               options:NSCalendarMatchNextTimePreservingSmallerUnits];
+}
+
+static NSString *SCDaemonSchedulerWeekKey(NSDate *weekStart, NSCalendar *calendar) {
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.calendar = calendar;
+    formatter.timeZone = calendar.timeZone;
+    formatter.dateFormat = @"yyyy-MM-dd";
+    return [formatter stringFromDate:weekStart];
 }
 
 static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
@@ -89,6 +158,60 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
     return YES;
 }
 
+static BOOL SCDaemonSchedulerRecurringSegmentIsValid(NSDictionary<NSString *, id> *segment) {
+    if (![segment isKindOfClass:[NSDictionary class]] ||
+        !SCDaemonSchedulerUUIDString(segment[@"segmentID"]) ||
+        !SCDaemonSchedulerIntegerInRange(segment[@"startMinuteOfWeek"], 0, 10079) ||
+        !SCDaemonSchedulerIntegerInRange(segment[@"endMinuteOfWeek"], 1, 10080) ||
+        [segment[@"endMinuteOfWeek"] integerValue] <= [segment[@"startMinuteOfWeek"] integerValue] ||
+        !SCDaemonSchedulerStringArray(segment[@"blocklist"], NO) ||
+        [segment[@"blocklist"] count] == 0 ||
+        !SCDaemonSchedulerStringArray(segment[SCDaemonScheduleSourceBundleIDsKey], YES) ||
+        [segment[SCDaemonScheduleSourceBundleIDsKey] count] == 0 ||
+        !SCDaemonSchedulerUUIDString(segment[SCDaemonSchedulePolicyRevisionKey])) return NO;
+    id allowlist = segment[@"isAllowlist"];
+    return [allowlist isKindOfClass:[NSNumber class]] &&
+        CFGetTypeID((__bridge CFTypeRef)allowlist) == CFBooleanGetTypeID() && ![allowlist boolValue];
+}
+
+static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
+                                                         NSDictionary<NSString *, id> *commitment,
+                                                         uid_t ownerUID) {
+    NSNumber *owner = [commitment[@"controllingUID"] isKindOfClass:[NSNumber class]]
+        ? commitment[@"controllingUID"] : nil;
+    NSDate *startedAt = [commitment[@"startedAt"] isKindOfClass:[NSDate class]]
+        ? commitment[@"startedAt"] : nil;
+    NSDate *lockEndsAt = [commitment[@"lockEndsAt"] isKindOfClass:[NSDate class]]
+        ? commitment[@"lockEndsAt"] : nil;
+    NSArray *segments = [commitment[@"segments"] isKindOfClass:[NSArray class]]
+        ? commitment[@"segments"] : nil;
+    if (!SCDaemonSchedulerUUIDString(commitmentID) ||
+        ![commitment[@"commitmentID"] isEqual:commitmentID] ||
+        !SCDaemonSchedulerUUIDString(commitment[@"generation"]) ||
+        !SCDaemonSchedulerIntegerInRange(commitment[@"schemaVersion"], 1, 1) ||
+        owner == nil || owner.longLongValue <= 0 ||
+        (ownerUID != 0 && owner.unsignedIntValue != ownerUID) ||
+        startedAt == nil || lockEndsAt == nil || [lockEndsAt compare:startedAt] != NSOrderedDescending ||
+        !SCDaemonSchedulerProtectedHoursAreValid(commitment[@"protectedHours"]) ||
+        ![commitment[@"blockSettings"] isKindOfClass:[NSDictionary class]] ||
+        segments == nil || segments.count == 0 || segments.count > 512) return NO;
+
+    NSMutableSet<NSString *> *segmentIDs = [NSMutableSet set];
+    NSInteger previousEnd = 0;
+    BOOL first = YES;
+    for (id value in segments) {
+        NSDictionary *segment = [value isKindOfClass:[NSDictionary class]] ? value : nil;
+        if (!SCDaemonSchedulerRecurringSegmentIsValid(segment) ||
+            [segmentIDs containsObject:segment[@"segmentID"]]) return NO;
+        NSInteger start = [segment[@"startMinuteOfWeek"] integerValue];
+        if (!first && start < previousEnd) return NO;
+        first = NO;
+        previousEnd = [segment[@"endMinuteOfWeek"] integerValue];
+        [segmentIDs addObject:segment[@"segmentID"]];
+    }
+    return YES;
+}
+
 @interface SCDaemonScheduler ()
 @property (nonatomic, copy) SCDaemonSchedulerStateProvider stateProvider;
 @property (nonatomic, copy) SCDaemonSchedulerReconcileHandler reconcileHandler;
@@ -103,6 +226,12 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
 @property (nonatomic, copy) NSString *pendingTrigger;
 @property (nonatomic) NSMutableArray *currentCompletions;
 @property (nonatomic) NSMutableArray *pendingCompletions;
+- (void)armBoundaryAfterDate:(NSDate *)now
+                      records:(NSArray<NSDictionary<NSString *, id> *> *)records
+                        state:(NSDictionary<NSString *, id> *)state
+                   commitment:(nullable NSDictionary<NSString *, id> *)commitment
+                  activeBreak:(nullable NSDictionary<NSString *, id> *)activeBreak
+                     calendar:(NSCalendar *)calendar;
 @end
 
 @implementation SCDaemonScheduler
@@ -125,6 +254,147 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
         return [left[SCDaemonSchedulerRecordIDKey] compare:right[SCDaemonSchedulerRecordIDKey]];
     }];
     return records;
+}
+
++ (NSArray<NSDictionary<NSString *,id> *> *)validRecurringCommitmentsFromValue:(id)value
+                                                                        ownerUID:(uid_t)ownerUID {
+    if (![value isKindOfClass:[NSDictionary class]]) return @[];
+    NSMutableArray<NSDictionary<NSString *, id> *> *commitments = [NSMutableArray array];
+    [(NSDictionary *)value enumerateKeysAndObjectsUsingBlock:^(id key, id candidate, BOOL *stop) {
+        if (![key isKindOfClass:[NSString class]] || ![candidate isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *commitment = candidate;
+        if (!SCDaemonSchedulerRecurringCommitmentIsValid(key, commitment, ownerUID)) return;
+        [commitments addObject:commitment];
+    }];
+    [commitments sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        return [left[@"commitmentID"] compare:right[@"commitmentID"]];
+    }];
+    return commitments;
+}
+
++ (NSArray<NSDictionary<NSString *,id> *> *)recurringOccurrenceRecordsAtDate:(NSDate *)now
+                                                                    commitments:(NSArray<NSDictionary<NSString *,id> *> *)commitments
+                                                                        calendar:(NSCalendar *)calendar {
+    if (![now isKindOfClass:[NSDate class]] || ![calendar isKindOfClass:[NSCalendar class]]) return @[];
+    NSDate *currentWeek = SCDaemonSchedulerStartOfMondayWeek(now, calendar);
+    if (currentWeek == nil) return @[];
+    NSMutableArray<NSDictionary<NSString *, id> *> *records = [NSMutableArray array];
+    for (NSDictionary *commitment in commitments) {
+        NSArray *segments = commitment[@"segments"];
+        for (NSInteger weekOffset = -1; weekOffset <= 1; weekOffset++) {
+            NSDate *weekStart = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                                     value:weekOffset * 7
+                                                    toDate:currentWeek
+                                                   options:0];
+            NSString *weekKey = SCDaemonSchedulerWeekKey(weekStart, calendar);
+            for (NSDictionary *segment in segments) {
+                NSDate *start = SCDaemonSchedulerDateForMinuteOfWeek(
+                    [segment[@"startMinuteOfWeek"] integerValue], weekStart, calendar);
+                NSDate *end = SCDaemonSchedulerDateForMinuteOfWeek(
+                    [segment[@"endMinuteOfWeek"] integerValue], weekStart, calendar);
+                if (start == nil || end == nil || [end compare:start] != NSOrderedDescending) continue;
+                [records addObject:@{
+                    SCDaemonSchedulerRecordIDKey: segment[@"segmentID"],
+                    SCDaemonScheduleSchemaVersionKey: @3,
+                    SCDaemonScheduleWeekKey: weekKey,
+                    SCDaemonScheduleCommitmentIDKey: commitment[@"commitmentID"],
+                    SCDaemonScheduleGenerationKey: commitment[@"generation"],
+                    SCDaemonSchedulePolicyRevisionKey: segment[SCDaemonSchedulePolicyRevisionKey],
+                    SCDaemonScheduleSourceBundleIDsKey: segment[SCDaemonScheduleSourceBundleIDsKey],
+                    SCDaemonSchedulerBlocklistKey: segment[@"blocklist"],
+                    @"isAllowlist": segment[@"isAllowlist"],
+                    SCDaemonSchedulerBlockSettingsKey: commitment[@"blockSettings"],
+                    SCDaemonSchedulerOwnerKey: commitment[@"controllingUID"],
+                    SCDaemonSchedulerStartKey: start,
+                    SCDaemonSchedulerEndKey: end,
+                    SCDaemonSchedulerRecurringMarkerKey: @YES,
+                }];
+            }
+        }
+    }
+    [records sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        NSComparisonResult startOrder = [left[SCDaemonSchedulerStartKey] compare:right[SCDaemonSchedulerStartKey]];
+        if (startOrder != NSOrderedSame) return startOrder;
+        return [left[SCDaemonSchedulerRecordIDKey] compare:right[SCDaemonSchedulerRecordIDKey]];
+    }];
+    return records;
+}
+
++ (BOOL)protectedHoursAreActiveAtDate:(NSDate *)date
+                            commitment:(NSDictionary<NSString *,id> *)commitment
+                               calendar:(NSCalendar *)calendar {
+    NSDictionary *hours = commitment[@"protectedHours"];
+    if (![date isKindOfClass:[NSDate class]] || ![calendar isKindOfClass:[NSCalendar class]] ||
+        !SCDaemonSchedulerProtectedHoursAreValid(hours) || ![hours[@"enabled"] boolValue]) return NO;
+    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute)
+                                                fromDate:date];
+    NSInteger minute = components.hour * 60 + components.minute;
+    NSInteger start = [hours[@"startMinute"] integerValue];
+    NSInteger end = [hours[@"endMinute"] integerValue];
+    return start < end ? (minute >= start && minute < end) : (minute >= start || minute < end);
+}
+
++ (BOOL)protectedHoursEditLockIsActiveAtDate:(NSDate *)date
+                                     commitment:(NSDictionary<NSString *,id> *)commitment
+                                        calendar:(NSCalendar *)calendar {
+    NSDictionary *hours = commitment[@"protectedHours"];
+    if (![date isKindOfClass:[NSDate class]] || ![calendar isKindOfClass:[NSCalendar class]] ||
+        !SCDaemonSchedulerProtectedHoursAreValid(hours) || ![hours[@"enabled"] boolValue]) return NO;
+    NSInteger start = [hours[@"startMinute"] integerValue];
+    NSInteger end = [hours[@"endMinute"] integerValue];
+    NSInteger protectedDuration = start < end ? end - start : 24 * 60 - start + end;
+    if (protectedDuration + 120 >= 24 * 60) return YES;
+
+    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute)
+                                                fromDate:date];
+    NSInteger minute = components.hour * 60 + components.minute;
+    NSInteger lockStart = (start - 120 + 24 * 60) % (24 * 60);
+    return lockStart < end ? (minute >= lockStart && minute < end)
+                           : (minute >= lockStart || minute < end);
+}
+
++ (NSDate *)nextProtectedHoursBoundaryAfterDate:(NSDate *)date
+                                      commitment:(NSDictionary<NSString *,id> *)commitment
+                                         calendar:(NSCalendar *)calendar {
+    NSDictionary *hours = commitment[@"protectedHours"];
+    if (![date isKindOfClass:[NSDate class]] || ![calendar isKindOfClass:[NSCalendar class]] ||
+        !SCDaemonSchedulerProtectedHoursAreValid(hours) || ![hours[@"enabled"] boolValue]) return nil;
+    NSDate *startOfDay = [calendar startOfDayForDate:date];
+    NSDate *next = nil;
+    for (NSInteger dayOffset = 0; dayOffset <= 1; dayOffset++) {
+        NSDate *day = [calendar dateByAddingUnit:NSCalendarUnitDay value:dayOffset toDate:startOfDay options:0];
+        for (NSString *key in @[@"startMinute", @"endMinute"]) {
+            NSInteger minute = [hours[key] integerValue];
+            NSDate *candidate = [calendar dateBySettingHour:minute / 60
+                                                     minute:minute % 60
+                                                     second:0
+                                                     ofDate:day
+                                                    options:NSCalendarMatchNextTimePreservingSmallerUnits];
+            if (candidate == nil || [candidate compare:date] != NSOrderedDescending) continue;
+            if (next == nil || [candidate compare:next] == NSOrderedAscending) next = candidate;
+        }
+    }
+    return next;
+}
+
++ (NSDictionary<NSString *,id> *)activeBreakAtDate:(NSDate *)date
+                                               value:(id)value
+                                            ownerUID:(uid_t)ownerUID
+                                          commitment:(NSDictionary<NSString *,id> *)commitment {
+    if (![date isKindOfClass:[NSDate class]] || ![value isKindOfClass:[NSDictionary class]] ||
+        ![commitment isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *commitmentID = commitment[@"commitmentID"];
+    NSDictionary *activeBreak = [(NSDictionary *)value objectForKey:commitmentID];
+    if (![activeBreak isKindOfClass:[NSDictionary class]] ||
+        ![activeBreak[@"commitmentID"] isEqual:commitmentID] ||
+        ![activeBreak[@"generation"] isEqual:commitment[@"generation"]] ||
+        [activeBreak[@"controllingUID"] unsignedIntValue] != ownerUID ||
+        !SCDaemonSchedulerIntegerInRange(activeBreak[@"schemaVersion"], 1, 1) ||
+        ![activeBreak[@"startedAt"] isKindOfClass:[NSDate class]] ||
+        ![activeBreak[@"endsAt"] isKindOfClass:[NSDate class]] ||
+        [activeBreak[@"endsAt"] compare:activeBreak[@"startedAt"]] != NSOrderedDescending ||
+        [activeBreak[@"endsAt"] compare:date] != NSOrderedDescending) return nil;
+    return activeBreak;
 }
 
 + (NSDictionary<NSString *,id> *)desiredScheduleRecordAtDate:(NSDate *)now
@@ -164,8 +434,12 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
     if (![state[@"block_running"] boolValue]) return NO;
     NSString *source = [state[@"active_block_source"] isKindOfClass:[NSString class]]
         ? state[@"active_block_source"] : nil;
-    if (![source isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] &&
-        ![source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2]) return NO;
+    NSInteger schemaVersion = [record[SCDaemonScheduleSchemaVersionKey] integerValue];
+    BOOL sourceMatches = schemaVersion >= 3
+        ? [source isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring]
+        : ([source isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] ||
+           [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2]);
+    if (!sourceMatches) return NO;
     NSNumber *activeOwner = [state[@"active_owner_uid"] isKindOfClass:[NSNumber class]]
         ? state[@"active_owner_uid"] : nil;
     NSNumber *recordOwner = [record[SCDaemonSchedulerOwnerKey] isKindOfClass:[NSNumber class]]
@@ -175,9 +449,10 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
     if (![state[@"active_schedule_id"] isEqual:record[SCDaemonSchedulerRecordIDKey]]) return NO;
     NSString *recordRevision = record[SCDaemonSchedulePolicyRevisionKey];
     if (recordRevision != nil && ![state[@"active_policy_revision"] isEqual:recordRevision]) return NO;
-    if ([record[SCDaemonScheduleSchemaVersionKey] integerValue] >= 2 &&
+    if (schemaVersion >= 2 &&
         (![state[@"active_commitment_id"] isEqual:record[SCDaemonScheduleCommitmentIDKey]] ||
          ![state[@"active_generation"] isEqual:record[SCDaemonScheduleGenerationKey]])) return NO;
+    if (schemaVersion >= 3 && ![state[@"block_end_date"] isEqual:record[SCDaemonSchedulerEndKey]]) return NO;
 
     BOOL recordIsAllowlist = [record[@"isAllowlist"] boolValue];
     if ([state[@"active_is_allowlist"] boolValue] != recordIsAllowlist) return NO;
@@ -300,7 +575,8 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
     NSString *source = [state[@"active_block_source"] isKindOfClass:[NSString class]]
         ? state[@"active_block_source"] : @"unknown";
     BOOL schedulerOwnsActive = [source isEqualToString:SCDaemonActiveBlockSourceLegacySchedule] ||
-        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2];
+        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerV2] ||
+        [source isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring];
     uid_t consoleUID = [state[@"console_uid"] unsignedIntValue];
     uid_t activeOwnerUID = [state[@"active_owner_uid"] unsignedIntValue];
     // A fast-user switch must never make another console user's empty desired
@@ -308,13 +584,45 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
     // policy first; once it ends, a fresh evaluation selects the console user.
     uid_t selectedOwner = blockRunning && schedulerOwnsActive && activeOwnerUID != 0
         ? activeOwnerUID : (consoleUID != 0 ? consoleUID : activeOwnerUID);
-    NSArray *records = [SCDaemonScheduler validScheduleRecordsFromApprovedSchedules:state[@"approved_schedules"]
-                                                                                  ownerUID:selectedOwner];
     NSDate *now = [state[@"now"] isKindOfClass:[NSDate class]] ? state[@"now"] : [NSDate date];
-    NSDictionary *desired = [SCDaemonScheduler desiredScheduleRecordAtDate:now records:records];
+    NSArray *absoluteRecords = [SCDaemonScheduler
+        validScheduleRecordsFromApprovedSchedules:state[@"approved_schedules"]
+                                           ownerUID:selectedOwner];
+    NSArray *recurringCommitments = [SCDaemonScheduler
+        validRecurringCommitmentsFromValue:state[@"approved_recurring_commitments"]
+                                  ownerUID:selectedOwner];
+    NSDictionary *recurringCommitment = recurringCommitments.firstObject;
+    NSCalendar *calendar = SCDaemonSchedulerLocalCalendar();
+    NSArray *recurringRecords = [SCDaemonScheduler recurringOccurrenceRecordsAtDate:now
+                                                                         commitments:recurringCommitments
+                                                                             calendar:calendar];
+    NSMutableArray *allRecords = [absoluteRecords mutableCopy];
+    [allRecords addObjectsFromArray:recurringRecords];
+    NSDictionary *activeBreak = [SCDaemonScheduler activeBreakAtDate:now
+                                                               value:state[@"active_schedule_breaks"]
+                                                            ownerUID:selectedOwner
+                                                          commitment:recurringCommitment];
+    BOOL protectedHoursActive = recurringCommitment != nil &&
+        [SCDaemonScheduler protectedHoursAreActiveAtDate:now
+                                               commitment:recurringCommitment
+                                                  calendar:calendar];
+    NSArray *effectiveRecords = allRecords;
+    if (activeBreak != nil && !protectedHoursActive) {
+        NSPredicate *notRecurring = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *record,
+                                                                          NSDictionary *bindings) {
+            return ![record[SCDaemonSchedulerRecurringMarkerKey] boolValue];
+        }];
+        effectiveRecords = [allRecords filteredArrayUsingPredicate:notRecurring];
+    }
+    NSDictionary *desired = [SCDaemonScheduler desiredScheduleRecordAtDate:now records:effectiveRecords];
     BOOL activeMatches = desired != nil && [SCDaemonScheduler activeState:state matchesRecord:desired];
 
-    [self armBoundaryAfterDate:now records:records state:state];
+    [self armBoundaryAfterDate:now
+                       records:allRecords
+                         state:state
+                    commitment:recurringCommitment
+                   activeBreak:activeBreak
+                      calendar:calendar];
     if (activeMatches || (!blockRunning && desired == nil)) {
         [self finishEvaluation:@{@"status": @"verified", @"stage": @"none", @"trigger": trigger}];
         return;
@@ -386,11 +694,22 @@ static BOOL SCDaemonSchedulerRecordIsValid(NSString *scheduleID,
 
 - (void)armBoundaryAfterDate:(NSDate *)now
                       records:(NSArray<NSDictionary<NSString *, id> *> *)records
-                        state:(NSDictionary<NSString *, id> *)state {
+                        state:(NSDictionary<NSString *, id> *)state
+                   commitment:(NSDictionary<NSString *, id> *)commitment
+                  activeBreak:(NSDictionary<NSString *, id> *)activeBreak
+                     calendar:(NSCalendar *)calendar {
     NSDate *next = [SCDaemonScheduler nextBoundaryAfterDate:now records:records];
     NSDate *activeEnd = [state[@"block_end_date"] isKindOfClass:[NSDate class]] ? state[@"block_end_date"] : nil;
     if (activeEnd != nil && [activeEnd compare:now] == NSOrderedDescending &&
         (next == nil || [activeEnd compare:next] == NSOrderedAscending)) next = activeEnd;
+    NSDate *breakEnd = [activeBreak[@"endsAt"] isKindOfClass:[NSDate class]] ? activeBreak[@"endsAt"] : nil;
+    if (breakEnd != nil && [breakEnd compare:now] == NSOrderedDescending &&
+        (next == nil || [breakEnd compare:next] == NSOrderedAscending)) next = breakEnd;
+    NSDate *protectedBoundary = [SCDaemonScheduler nextProtectedHoursBoundaryAfterDate:now
+                                                                            commitment:commitment
+                                                                               calendar:calendar];
+    if (protectedBoundary != nil &&
+        (next == nil || [protectedBoundary compare:next] == NSOrderedAscending)) next = protectedBoundary;
 
     if (self.boundaryTimer != nil) {
         dispatch_source_cancel(self.boundaryTimer);

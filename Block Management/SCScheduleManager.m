@@ -5,6 +5,8 @@
 
 #import "SCScheduleManager.h"
 #import "SCScheduleLaunchdBridge.h"
+#import "SCRecurringScheduleCompiler.h"
+#import "SCProtectionPolicy.h"
 #import "SCBlockUtilities.h"
 #import "SCXPCClient.h"
 #import "SCMiscUtilities.h"
@@ -53,6 +55,18 @@ static NSString * const kBundlesKey = @"SCScheduleBundles";
 static NSString * const kWeekSchedulesPrefix = @"SCWeekSchedules_"; // + week key (e.g., "2024-12-23")
 static NSString * const kWeekCommitmentPrefix = @"SCWeekCommitment_"; // + week key
 static NSString * const kWeekScheduleManifestPrefix = @"SCScheduleManifest_"; // local V2 ID/source mapping
+static NSString * const kRecurringSchedulesKey = @"SCRecurringSchedules";
+static NSString * const kRecurringCommitmentKey = @"SCRecurringCommitment";
+static NSString * const kRecurringMigrationStateKey = @"SCRecurringScheduleMigrationState";
+static NSString * const kRecurringMigrationVersionKey = @"SCRecurringScheduleMigrationVersion";
+static const NSInteger kRecurringMigrationVersion = 1;
+static NSString * const kBreakCreditsPerDayKey = @"SCBreakCreditsPerDay";
+static NSString * const kBreakCreditsRemainingKey = @"SCBreakCreditsRemainingToday";
+static NSString * const kBreakCreditsLastResetDayKey = @"SCBreakCreditsLastResetDay";
+static NSString * const kActiveTimedBreakKey = @"SCActiveTimedBreak";
+static NSString * const kProtectedHoursEnabledKey = @"SCProtectedHoursEnabled";
+static NSString * const kProtectedHoursStartMinuteKey = @"SCProtectedHoursStartMinute";
+static NSString * const kProtectedHoursEndMinuteKey = @"SCProtectedHoursEndMinute";
 static NSString * const kCommitmentEndDateKey = @"SCCommitmentEndDate";
 static NSString * const kIsCommittedKey = @"SCIsCommitted";
 static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
@@ -134,6 +148,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 @property (nonatomic, strong) NSMutableArray<SCBlockBundle *> *mutableBundles;
 // Cache for week-specific schedules: weekKey -> array of schedules
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<SCWeeklySchedule *> *> *weekSchedulesCache;
+@property (nonatomic, strong) NSMutableArray<SCWeeklySchedule *> *mutableRecurringSchedules;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, SCStrictifyRetryState *> *strictifyRetryStatesByToken;
 @property (nonatomic, strong) NSMutableArray<NSString *> *strictifyRetryTokenOrder;
 @property (nonatomic, copy, nullable) NSString *lastStrictifyOperationToken;
@@ -184,6 +199,16 @@ static NSError *SCScheduleCommitError(NSInteger code,
                                      bundleSaved:(BOOL)bundleSaved
                                   operationToken:(nullable NSString *)operationToken;
 - (void)clearStrictifyRetryStateForOperationToken:(NSString *)operationToken;
+- (NSArray<SCWeeklySchedule *> *)decodedSchedulesFromValue:(id)value;
+- (void)loadRecurringSchedules;
+- (void)saveRecurringSchedules;
+- (void)ensureRecurringScheduleMigration;
+- (nullable NSDictionary<NSString *, id> *)recurringCommitmentDictionary;
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state;
+- (void)saveProtectedHoursEnabled:(BOOL)enabled
+                       startMinute:(NSInteger)startMinute
+                         endMinute:(NSInteger)endMinute;
+- (nullable NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date;
 
 @end
 
@@ -237,6 +262,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
     if (self) {
         _mutableBundles = [NSMutableArray array];
         _weekSchedulesCache = [NSMutableDictionary dictionary];
+        _mutableRecurringSchedules = [NSMutableArray array];
         _strictifyRetryStatesByToken = [NSMutableDictionary dictionary];
         _strictifyRetryTokenOrder = [NSMutableArray array];
         [self reload];
@@ -251,6 +277,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)addBundle:(SCBlockBundle *)bundle {
+    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) {
+        NSLog(@"SCScheduleManager: Cannot add bundles while recurring edits are locked");
+        return;
+    }
     if (!bundle || [self bundleWithID:bundle.bundleID]) {
         return; // Already exists or invalid
     }
@@ -266,7 +296,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
 - (void)removeBundleWithID:(NSString *)bundleID {
     // Cannot delete bundles while committed - this would loosen restrictions
-    if ([self isCommittedForWeekOffset:0]) {
+    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice ||
+        [self isCommittedForWeekOffset:0]) {
         NSLog(@"SCScheduleManager: Cannot delete bundle while committed - would loosen restrictions");
         return;
     }
@@ -287,6 +318,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)updateBundle:(SCBlockBundle *)bundle {
+    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) {
+        NSLog(@"SCScheduleManager: Cannot edit bundles while recurring edits are locked");
+        return;
+    }
     NSInteger index = [self indexOfBundleWithID:bundle.bundleID];
     if (index != NSNotFound) {
         SCBlockBundle *oldBundle = [self.mutableBundles[index] copy];
@@ -1261,13 +1296,532 @@ static NSError *SCScheduleCommitError(NSInteger code,
             [defaults setObject:filtered forKey:key];
         }
     }
+
+    NSMutableArray<SCWeeklySchedule *> *recurringToRemove = [NSMutableArray array];
+    for (SCWeeklySchedule *schedule in self.mutableRecurringSchedules) {
+        if ([schedule.bundleID isEqualToString:bundleID]) [recurringToRemove addObject:schedule];
+    }
+    if (recurringToRemove.count > 0) {
+        [self.mutableRecurringSchedules removeObjectsInArray:recurringToRemove];
+        [self saveRecurringSchedules];
+    }
     [defaults synchronize];
+}
+
+#pragma mark - Recurring Schedule
+
+- (NSArray<SCWeeklySchedule *> *)decodedSchedulesFromValue:(id)value {
+    if (![value isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray<SCWeeklySchedule *> *decoded = [NSMutableArray array];
+    for (id candidate in (NSArray *)value) {
+        if (![candidate isKindOfClass:[NSDictionary class]]) continue;
+        SCWeeklySchedule *schedule = [SCWeeklySchedule scheduleFromDictionary:candidate];
+        if (schedule != nil) [decoded addObject:schedule];
+    }
+    return decoded;
+}
+
+- (void)loadRecurringSchedules {
+    [self.mutableRecurringSchedules removeAllObjects];
+    NSArray *decoded = [self decodedSchedulesFromValue:
+        [[NSUserDefaults standardUserDefaults] objectForKey:kRecurringSchedulesKey]];
+    [self.mutableRecurringSchedules addObjectsFromArray:decoded];
+}
+
+- (void)saveRecurringSchedules {
+    NSMutableArray<NSDictionary *> *serialized = [NSMutableArray array];
+    for (SCWeeklySchedule *schedule in self.mutableRecurringSchedules) {
+        [serialized addObject:schedule.toDictionary];
+    }
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:serialized forKey:kRecurringSchedulesKey];
+    [defaults synchronize];
+}
+
+- (void)ensureRecurringScheduleMigration {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults integerForKey:kRecurringMigrationVersionKey] >= kRecurringMigrationVersion ||
+        [defaults objectForKey:kRecurringSchedulesKey] != nil) {
+        if ([defaults objectForKey:kRecurringSchedulesKey] != nil &&
+            [defaults integerForKey:kRecurringMigrationVersionKey] < kRecurringMigrationVersion) {
+            [defaults setInteger:kRecurringMigrationVersion forKey:kRecurringMigrationVersionKey];
+            [defaults synchronize];
+        }
+        [self loadRecurringSchedules];
+        return;
+    }
+
+    NSDictionary *existingState = [defaults objectForKey:kRecurringMigrationStateKey];
+    if ([existingState isKindOfClass:[NSDictionary class]] &&
+        [existingState[@"status"] isEqualToString:@"pending_choice"]) {
+        [self loadRecurringSchedules];
+        return;
+    }
+
+    NSString *currentWeekKey = [self weekKeyForOffset:0];
+    NSString *nextWeekKey = [self weekKeyForOffset:1];
+    NSString *currentStorageKey = [kWeekSchedulesPrefix stringByAppendingString:currentWeekKey];
+    NSString *nextStorageKey = [kWeekSchedulesPrefix stringByAppendingString:nextWeekKey];
+    id currentValue = [defaults objectForKey:currentStorageKey];
+    id nextValue = [defaults objectForKey:nextStorageKey];
+    BOOL hasCurrent = [currentValue isKindOfClass:[NSArray class]];
+    BOOL hasNext = [nextValue isKindOfClass:[NSArray class]];
+    NSArray<SCWeeklySchedule *> *currentSchedules = [self decodedSchedulesFromValue:currentValue];
+    NSArray<SCWeeklySchedule *> *nextSchedules = [self decodedSchedulesFromValue:nextValue];
+    NSArray *canonicalCurrent = [SCRecurringScheduleCompiler
+        canonicalDictionariesForSchedules:currentSchedules];
+    NSArray *canonicalNext = [SCRecurringScheduleCompiler
+        canonicalDictionariesForSchedules:nextSchedules];
+
+    if (hasCurrent && hasNext && ![canonicalCurrent isEqual:canonicalNext]) {
+        [defaults setObject:@{
+            @"schemaVersion": @1,
+            @"status": @"pending_choice",
+            @"currentWeekKey": currentWeekKey,
+            @"nextWeekKey": nextWeekKey,
+        } forKey:kRecurringMigrationStateKey];
+        [defaults synchronize];
+        [self.mutableRecurringSchedules removeAllObjects];
+        return;
+    }
+
+    NSArray<SCWeeklySchedule *> *selected = hasCurrent ? currentSchedules : (hasNext ? nextSchedules : @[]);
+    [self.mutableRecurringSchedules removeAllObjects];
+    [self.mutableRecurringSchedules addObjectsFromArray:selected];
+    [self saveRecurringSchedules];
+    [defaults setInteger:kRecurringMigrationVersion forKey:kRecurringMigrationVersionKey];
+    [defaults setObject:@{@"schemaVersion": @1, @"status": @"complete"}
+                 forKey:kRecurringMigrationStateKey];
+    [defaults synchronize];
+}
+
+- (NSArray<SCWeeklySchedule *> *)recurringSchedules {
+    return [self.mutableRecurringSchedules copy];
+}
+
+- (BOOL)recurringScheduleMigrationNeedsChoice {
+    NSDictionary *state = [[NSUserDefaults standardUserDefaults] objectForKey:kRecurringMigrationStateKey];
+    return [state isKindOfClass:[NSDictionary class]] &&
+        [state[@"status"] isEqualToString:@"pending_choice"];
+}
+
+- (void)resolveRecurringScheduleMigrationUsingNextWeek:(BOOL)useNextWeek {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *state = [defaults objectForKey:kRecurringMigrationStateKey];
+    if (![state isKindOfClass:[NSDictionary class]] ||
+        ![state[@"status"] isEqualToString:@"pending_choice"]) return;
+    NSString *weekKey = state[useNextWeek ? @"nextWeekKey" : @"currentWeekKey"];
+    if (![weekKey isKindOfClass:[NSString class]] || weekKey.length != 10) return;
+    NSArray *selected = [self decodedSchedulesFromValue:
+        [defaults objectForKey:[kWeekSchedulesPrefix stringByAppendingString:weekKey]]];
+    [self.mutableRecurringSchedules removeAllObjects];
+    [self.mutableRecurringSchedules addObjectsFromArray:selected];
+    [self saveRecurringSchedules];
+    [defaults setInteger:kRecurringMigrationVersion forKey:kRecurringMigrationVersionKey];
+    [defaults setObject:@{
+        @"schemaVersion": @1,
+        @"status": @"complete",
+        @"selectedWeekKey": weekKey,
+    } forKey:kRecurringMigrationStateKey];
+    [defaults synchronize];
+    [self postChangeNotification];
+}
+
+- (SCWeeklySchedule *)recurringScheduleForBundleID:(NSString *)bundleID {
+    for (SCWeeklySchedule *schedule in self.mutableRecurringSchedules) {
+        if ([schedule.bundleID isEqualToString:bundleID]) return schedule;
+    }
+    return nil;
+}
+
+- (void)updateRecurringSchedule:(SCWeeklySchedule *)schedule {
+    if (schedule == nil || self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) return;
+    NSUInteger index = [self.mutableRecurringSchedules indexOfObjectPassingTest:
+        ^BOOL(SCWeeklySchedule *candidate, NSUInteger idx, BOOL *stop) {
+            #pragma unused(idx)
+            #pragma unused(stop)
+            return [candidate.bundleID isEqualToString:schedule.bundleID];
+        }];
+    if (index == NSNotFound) {
+        [self.mutableRecurringSchedules addObject:schedule];
+    } else {
+        self.mutableRecurringSchedules[index] = schedule;
+    }
+    [self saveRecurringSchedules];
+    [self postChangeNotification];
+}
+
+- (SCWeeklySchedule *)createRecurringScheduleForBundle:(SCBlockBundle *)bundle {
+    SCWeeklySchedule *existing = [self recurringScheduleForBundleID:bundle.bundleID];
+    if (existing != nil) return existing;
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    if (!self.hasRecurringCommitment && !self.recurringScheduleMigrationNeedsChoice) {
+        [self.mutableRecurringSchedules addObject:schedule];
+        [self saveRecurringSchedules];
+    }
+    return schedule;
+}
+
+- (void)commitRecurringScheduleForDays:(NSInteger)days
+                            completion:(void (^)(BOOL, NSError *))completion {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self commitRecurringScheduleForDays:days completion:completion];
+        });
+        return;
+    }
+
+    void (^finish)(BOOL, NSError *) = ^(BOOL verified, NSError *error) {
+        if (completion != nil) completion(verified, error);
+    };
+    if (days < 1 || days > 7) {
+        finish(NO, SCScheduleCommitError(20, @"validate",
+            @"Choose a commitment duration from one through seven days.", NO));
+        return;
+    }
+    if (self.recurringScheduleMigrationNeedsChoice) {
+        finish(NO, SCScheduleCommitError(21, @"validate",
+            @"Choose which legacy week to use before committing.", NO));
+        return;
+    }
+    if (self.hasRecurringCommitment) {
+        finish(NO, SCScheduleCommitError(22, @"validate",
+            @"A recurring commitment is already active.", NO));
+        return;
+    }
+    if (self.hasUnexpiredLegacyCommitment) {
+        finish(NO, SCScheduleCommitError(23, @"validate",
+            @"Your existing weekly commitment must finish before starting a recurring commitment.", NO));
+        return;
+    }
+
+    NSMutableArray<SCBlockBundle *> *enabledBundles = [NSMutableArray array];
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (!bundle.enabled) continue;
+        [enabledBundles addObject:bundle];
+        if ([self recurringScheduleForBundleID:bundle.bundleID] == nil) {
+            [self createRecurringScheduleForBundle:bundle];
+        }
+    }
+    if (enabledBundles.count == 0) {
+        finish(NO, SCScheduleCommitError(24, @"validate",
+            @"Enable at least one bundle before committing.", NO));
+        return;
+    }
+
+    NSArray<NSDictionary<NSString *, id> *> *compiled =
+        [SCRecurringScheduleCompiler segmentsForBundles:enabledBundles
+                                               schedules:self.recurringSchedules];
+    NSMutableArray<NSDictionary<NSString *, id> *> *segments = [NSMutableArray array];
+    NSUInteger aggregateEntryCount = 0;
+    NSError *preflightError = nil;
+    for (NSDictionary<NSString *, id> *candidate in compiled) {
+        NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+        for (id rawEntry in candidate[SCRecurringSegmentBlocklistKey] ?: @[]) {
+            NSString *canonical = [rawEntry isKindOfClass:[NSString class]]
+                ? [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] : nil;
+            if (canonical == nil) {
+                preflightError = SCScheduleCommitError(25, @"validate",
+                    @"A scheduled bundle contains an invalid block entry.", NO);
+                break;
+            }
+            [entries addObject:canonical];
+        }
+        if (preflightError != nil) break;
+        if (entries.count == 0) continue;
+        BOOL exceedsEntryLimit = entries.count > SCScheduleMaximumCommitmentEntries ||
+            aggregateEntryCount > SCScheduleMaximumCommitmentEntries - entries.count;
+        if (exceedsEntryLimit || segments.count >= SCScheduleMaximumCommitmentSegments) {
+            preflightError = SCScheduleCommitError(26, @"validate",
+                @"The recurring schedule is too large to commit.", NO);
+            break;
+        }
+        aggregateEntryCount += entries.count;
+        [segments addObject:@{
+            SCRecurringSegmentIDKey: candidate[SCRecurringSegmentIDKey],
+            SCRecurringSegmentStartMinuteKey: candidate[SCRecurringSegmentStartMinuteKey],
+            SCRecurringSegmentEndMinuteKey: candidate[SCRecurringSegmentEndMinuteKey],
+            SCRecurringSegmentBlocklistKey: entries.array,
+            @"isAllowlist": @NO,
+            SCRecurringSegmentSourceBundleIDsKey:
+                candidate[SCRecurringSegmentSourceBundleIDsKey] ?: @[],
+            SCRecurringSegmentPolicyRevisionKey:
+                candidate[SCRecurringSegmentPolicyRevisionKey],
+        }];
+    }
+    if (preflightError != nil) {
+        finish(NO, preflightError);
+        return;
+    }
+    if (segments.count == 0) {
+        finish(NO, SCScheduleCommitError(27, @"validate",
+            @"This schedule does not currently block anything.", NO));
+        return;
+    }
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL telemetryConsent = [defaults boolForKey:@"ErrorReportingPromptDismissed"] &&
+        [defaults boolForKey:@"EnableErrorReporting"];
+    NSDictionary<NSString *, id> *blockSettings = @{
+        @"ClearCaches": [defaults objectForKey:@"ClearCaches"] ?: @NO,
+        @"AllowLocalNetworks": [defaults objectForKey:@"AllowLocalNetworks"] ?: @YES,
+        @"EvaluateCommonSubdomains": [defaults objectForKey:@"EvaluateCommonSubdomains"] ?: @YES,
+        @"IncludeLinkedDomains": [defaults objectForKey:@"IncludeLinkedDomains"] ?: @YES,
+        @"BlockSoundShouldPlay": [defaults objectForKey:@"BlockSoundShouldPlay"] ?: @NO,
+        @"BlockSound": [defaults objectForKey:@"BlockSound"] ?: @5,
+        @"EnableErrorReporting": @(telemetryConsent),
+    };
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    NSDictionary<NSString *, id> *protectedHours = @{
+        @"enabled": @(self.protectedHoursEnabled),
+        @"startMinute": @(range.startMinute),
+        @"endMinute": @(range.endMinute),
+    };
+    NSDate *startedAt = [NSDate date];
+    NSDate *lockEndsAt = [[NSCalendar currentCalendar] dateByAddingUnit:NSCalendarUnitDay
+                                                                  value:days
+                                                                 toDate:startedAt
+                                                                options:0];
+    if (lockEndsAt == nil) {
+        lockEndsAt = [startedAt dateByAddingTimeInterval:days * 24.0 * 60.0 * 60.0];
+    }
+    NSString *commitmentID = NSUUID.UUID.UUIDString;
+    NSString *generation = NSUUID.UUID.UUIDString;
+
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc installRecurringCommitmentWithID:commitmentID
+                                generation:generation
+                                  startedAt:startedAt
+                                 lockEndsAt:lockEndsAt
+                             protectedHours:protectedHours
+                              blockSettings:blockSettings
+                                   segments:segments
+                                      reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSUInteger storedCount = [result[@"segments_stored"] unsignedIntegerValue];
+            BOOL storePersisted = [result[@"store_persisted"] boolValue];
+            BOOL postWriteMatch = [result[@"post_write_match"] boolValue];
+            BOOL reconcileSucceeded = [result[@"reconcile_succeeded"] boolValue];
+            BOOL storeVerified = storePersisted && postWriteMatch && storedCount == segments.count;
+            NSString *stage = [result[@"failed_stage"] isKindOfClass:[NSString class]]
+                ? result[@"failed_stage"] : @"transport";
+
+            if (!storeVerified) {
+                [defaults setObject:@"failed" forKey:kLastScheduleCommitOutcomeKey];
+                [defaults setObject:stage forKey:kLastScheduleCommitFailureStageKey];
+                [defaults synchronize];
+                if (![SCMiscUtilities errorIsAuthCanceled:error]) {
+                    SCEmitScheduleCommitStoreFailure(stage, segments.count, storedCount, 0,
+                        error.code, storePersisted, postWriteMatch, reconcileSucceeded);
+                }
+                finish(NO, error ?: SCScheduleCommitError(28, stage,
+                    @"Fence could not verify the recurring schedule store.", storePersisted));
+                return;
+            }
+
+            NSDictionary<NSString *, id> *localCommitment = @{
+                @"schemaVersion": @1,
+                @"commitmentID": commitmentID,
+                @"generation": generation,
+                @"startedAt": startedAt,
+                @"lockEndsAt": lockEndsAt,
+            };
+            [defaults setObject:localCommitment forKey:kRecurringCommitmentKey];
+            [defaults setObject:(reconcileSucceeded ? @"verified" : @"stored")
+                         forKey:kLastScheduleCommitOutcomeKey];
+            if (reconcileSucceeded) {
+                [defaults removeObjectForKey:kLastScheduleCommitFailureStageKey];
+            } else {
+                [defaults setObject:@"evaluate" forKey:kLastScheduleCommitFailureStageKey];
+            }
+            BOOL localPersisted = [defaults synchronize];
+            [self reconcileBreakCreditsForDate:startedAt forceReset:YES];
+            [SCVersionTracker markHasEverCommitted];
+            [self postChangeNotification];
+
+            if (!localPersisted) {
+                finish(NO, SCScheduleCommitError(29, @"manifest",
+                    @"The recurring schedule was saved, but Fence could not verify its local index.", YES));
+                return;
+            }
+            if (!reconcileSucceeded) {
+                finish(NO, SCScheduleCommitError(30, @"evaluate",
+                    @"The recurring schedule was saved and locked, but immediate enforcement verification did not finish.", YES));
+                return;
+            }
+            finish(YES, nil);
+        });
+    }];
+}
+
+- (void)endExpiredRecurringCommitmentWithCompletion:
+    (void (^)(BOOL, NSError *))completion {
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(31, @"validate",
+            @"No recurring commitment is active.", NO));
+        return;
+    }
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc endExpiredRecurringCommitmentWithID:commitment[@"commitmentID"]
+                                   generation:commitment[@"generation"]
+                                        reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL removed = [result[@"store_persisted"] boolValue];
+            if (removed) {
+                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                [defaults removeObjectForKey:kRecurringCommitmentKey];
+                [defaults removeObjectForKey:kActiveTimedBreakKey];
+                [defaults synchronize];
+                [self postChangeNotification];
+            }
+            if (completion != nil) completion(removed, error);
+        });
+    }];
+}
+
+- (void)refreshRecurringRuntimeStateWithCompletion:
+    (void (^)(BOOL, NSError *))completion {
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc getRecurringScheduleRuntimeState:^(NSDictionary<NSString *,id> *state, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error != nil) {
+                if (completion != nil) completion(NO, error);
+                return;
+            }
+
+            BOOL refreshed = [self applyRecurringRuntimeState:state];
+            NSError *stateError = refreshed ? nil : SCScheduleCommitError(
+                40, @"runtime_state", @"Fence received an invalid recurring runtime state.", NO);
+            if (completion != nil) completion(refreshed, stateError);
+        });
+    }];
+}
+
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state {
+    if (![state isKindOfClass:[NSDictionary class]] ||
+        ![state[@"has_commitment"] isKindOfClass:[NSNumber class]]) {
+        return NO;
+    }
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL hasRootCommitment = [state[@"has_commitment"] boolValue];
+    if (!hasRootCommitment) {
+        BOOL changed = [defaults objectForKey:kRecurringCommitmentKey] != nil ||
+            [defaults objectForKey:kActiveTimedBreakKey] != nil;
+        [defaults removeObjectForKey:kRecurringCommitmentKey];
+        [defaults removeObjectForKey:kActiveTimedBreakKey];
+        if (changed) {
+            [defaults synchronize];
+            [self postChangeNotification];
+        }
+        return YES;
+    }
+
+    NSString *commitmentID = [state[@"commitment_id"] isKindOfClass:[NSString class]]
+        ? state[@"commitment_id"] : nil;
+    NSString *generation = [state[@"generation"] isKindOfClass:[NSString class]]
+        ? state[@"generation"] : nil;
+    NSDate *startedAt = [state[@"started_at"] isKindOfClass:[NSDate class]]
+        ? state[@"started_at"] : nil;
+    NSDate *lockEndsAt = [state[@"lock_ends_at"] isKindOfClass:[NSDate class]]
+        ? state[@"lock_ends_at"] : nil;
+    NSDictionary *protectedHours = [state[@"protected_hours"] isKindOfClass:[NSDictionary class]]
+        ? state[@"protected_hours"] : nil;
+    NSNumber *protectedEnabled = [protectedHours[@"enabled"] isKindOfClass:[NSNumber class]]
+        ? protectedHours[@"enabled"] : nil;
+    NSNumber *protectedStart = [protectedHours[@"startMinute"] isKindOfClass:[NSNumber class]]
+        ? protectedHours[@"startMinute"] : nil;
+    NSNumber *protectedEnd = [protectedHours[@"endMinute"] isKindOfClass:[NSNumber class]]
+        ? protectedHours[@"endMinute"] : nil;
+    NSNumber *breakActiveValue = [state[@"break_active"] isKindOfClass:[NSNumber class]]
+        ? state[@"break_active"] : nil;
+    BOOL identifiersValid = commitmentID.length > 0 && generation.length > 0 &&
+        [[NSUUID alloc] initWithUUIDString:commitmentID] != nil &&
+        [[NSUUID alloc] initWithUUIDString:generation] != nil;
+    BOOL datesValid = startedAt != nil && lockEndsAt != nil &&
+        [lockEndsAt compare:startedAt] == NSOrderedDescending;
+    if (!identifiersValid || !datesValid || protectedEnabled == nil ||
+        protectedStart == nil || protectedEnd == nil || breakActiveValue == nil) {
+        return NO;
+    }
+
+    BOOL rootBreakActive = breakActiveValue.boolValue;
+    NSDate *breakEndsAt = [state[@"break_ends_at"] isKindOfClass:[NSDate class]]
+        ? state[@"break_ends_at"] : nil;
+    if (rootBreakActive && breakEndsAt == nil) return NO;
+
+    BOOL adoptingMissingCommitment = self.recurringCommitmentDictionary == nil;
+    NSDictionary<NSString *, id> *localCommitment = @{
+        @"schemaVersion": @1,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"startedAt": startedAt,
+        @"lockEndsAt": lockEndsAt,
+    };
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
+        protectedStart.integerValue, protectedEnd.integerValue);
+    [defaults setObject:localCommitment forKey:kRecurringCommitmentKey];
+    [defaults setBool:protectedEnabled.boolValue forKey:kProtectedHoursEnabledKey];
+    [defaults setInteger:range.startMinute forKey:kProtectedHoursStartMinuteKey];
+    [defaults setInteger:range.endMinute forKey:kProtectedHoursEndMinuteKey];
+    if (rootBreakActive && [breakEndsAt timeIntervalSinceNow] > 0) {
+        [defaults setObject:@{@"endsAt": breakEndsAt} forKey:kActiveTimedBreakKey];
+    } else {
+        [defaults removeObjectForKey:kActiveTimedBreakKey];
+    }
+    [defaults synchronize];
+
+    if (adoptingMissingCommitment) {
+        [self reconcileBreakCreditsForDate:[NSDate date] forceReset:YES];
+    }
+    [self postChangeNotification];
+    return YES;
 }
 
 #pragma mark - Commitment
 
+- (NSDictionary<NSString *, id> *)recurringCommitmentDictionary {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kRecurringCommitmentKey];
+    if (![value isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *commitment = value;
+    if (![commitment[@"commitmentID"] isKindOfClass:[NSString class]] ||
+        [[NSUUID alloc] initWithUUIDString:commitment[@"commitmentID"]] == nil ||
+        ![commitment[@"generation"] isKindOfClass:[NSString class]] ||
+        [[NSUUID alloc] initWithUUIDString:commitment[@"generation"]] == nil ||
+        ![commitment[@"lockEndsAt"] isKindOfClass:[NSDate class]]) return nil;
+    return commitment;
+}
+
+- (BOOL)hasRecurringCommitment {
+    return self.recurringCommitmentDictionary != nil;
+}
+
+- (NSDate *)recurringCommitmentLockEndDate {
+    return self.recurringCommitmentDictionary[@"lockEndsAt"];
+}
+
+- (BOOL)isRecurringCommitmentLockActive {
+    NSDate *lockEnd = self.recurringCommitmentLockEndDate;
+    return lockEnd != nil && [lockEnd timeIntervalSinceNow] > 0;
+}
+
+- (BOOL)hasUnexpiredLegacyCommitment {
+    NSDate *now = [NSDate date];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
+        if (![key hasPrefix:kWeekCommitmentPrefix]) continue;
+        NSDate *endDate = [defaults objectForKey:key];
+        if ([endDate isKindOfClass:[NSDate class]] && [endDate compare:now] == NSOrderedDescending) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 - (BOOL)isCommitted {
-    return [self isCommittedForWeekOffset:0];
+    return self.hasRecurringCommitment || [self isCommittedForWeekOffset:0];
 }
 
 - (nullable NSDate *)commitmentEndDate {
@@ -1699,6 +2253,14 @@ static NSError *SCScheduleCommitError(NSInteger code,
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:[kWeekCommitmentPrefix stringByAppendingString:currentWeekKey]];
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:[kWeekCommitmentPrefix stringByAppendingString:nextWeekKey]];
 
+    // Clear recurring commitment, break, and draft state for the same DEBUG
+    // reset operation.
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kRecurringCommitmentKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kActiveTimedBreakKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kRecurringSchedulesKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kRecurringMigrationStateKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kRecurringMigrationVersionKey];
+
     // Clear all local week schedules and V2 ID/source manifests.
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
@@ -1711,6 +2273,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
     // Clear in-memory cache
     [self.weekSchedulesCache removeAllObjects];
+    [self.mutableRecurringSchedules removeAllObjects];
 
     [defaults synchronize];
 
@@ -1881,10 +2444,11 @@ static NSError *SCScheduleCommitError(NSInteger code,
 #pragma mark - Status Display
 
 - (NSString *)statusStringForBundleID:(NSString *)bundleID {
-    SCWeeklySchedule *schedule = [self scheduleForBundleID:bundleID weekOffset:0];
+    SCWeeklySchedule *schedule = [self recurringScheduleForBundleID:bundleID];
     if (!schedule) {
-        // No schedule for current week = not active, return empty
-        return @"";
+        // Recurring compilation treats a missing allow-window schedule as
+        // blocked all week. Keep the committed status UI aligned with it.
+        return self.hasRecurringCommitment ? @"continuously" : @"";
     }
 
     NSString *baseStatus = [schedule currentStatusString];
@@ -1892,11 +2456,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
     // If no next state change (empty string), use commitment end date
     // This happens when bundle is blocked all week with no allowed windows
     if (baseStatus.length == 0) {
-        NSDate *commitmentEnd = [self commitmentEndDateForWeekOffset:0];
-        if (commitmentEnd) {
-            return [self formatStatusStringForDate:commitmentEnd];
-        }
-        return @"";  // Fallback
+        return self.hasRecurringCommitment ? @"continuously" : @"";
     }
     return baseStatus;
 }
@@ -1915,12 +2475,72 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (BOOL)wouldBundleBeAllowed:(NSString *)bundleID {
-    SCWeeklySchedule *schedule = [self scheduleForBundleID:bundleID weekOffset:0];
+    SCWeeklySchedule *schedule = [self recurringScheduleForBundleID:bundleID];
     if (!schedule) {
-        // No schedule for current week = not active = allowed
-        return YES;
+        return !self.hasRecurringCommitment;
     }
-    return [schedule isAllowedNow];
+    NSDateComponents *components = [[NSCalendar currentCalendar]
+        components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
+          fromDate:[NSDate date]];
+    SCDayOfWeek day = (SCDayOfWeek)(components.weekday - 1);
+    NSInteger minute = components.hour * 60 + components.minute;
+    for (SCTimeRange *window in [schedule allowedWindowsForDay:day]) {
+        // Recurring enforcement uses half-open allow windows.
+        if (window.startMinutes <= minute && minute < window.endMinutes) return YES;
+    }
+    return NO;
+}
+
+- (NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date {
+    if (!self.hasRecurringCommitment) return nil;
+
+    NSCalendar *calendar = [[NSCalendar alloc]
+        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    calendar.timeZone = [NSTimeZone localTimeZone];
+    calendar.firstWeekday = 2;
+
+    SCProtectedHoursRange protectedRange = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    BOOL protectedHoursActive = SCProtectedHoursAreActive(
+        self.protectedHoursEnabled, protectedRange, date, calendar);
+
+    NSDictionary *storedBreak = [[NSUserDefaults standardUserDefaults]
+        objectForKey:kActiveTimedBreakKey];
+    NSDate *breakStartedAt = [storedBreak isKindOfClass:[NSDictionary class]] &&
+        [storedBreak[@"startedAt"] isKindOfClass:[NSDate class]]
+        ? storedBreak[@"startedAt"] : nil;
+    NSDate *breakEndsAt = [storedBreak isKindOfClass:[NSDictionary class]] &&
+        [storedBreak[@"endsAt"] isKindOfClass:[NSDate class]]
+        ? storedBreak[@"endsAt"] : nil;
+    BOOL breakHasStarted = breakStartedAt == nil ||
+        [breakStartedAt compare:date] != NSOrderedDescending;
+    BOOL breakActive = breakHasStarted &&
+        [breakEndsAt compare:date] == NSOrderedDescending;
+    if (breakActive && !protectedHoursActive) return @[];
+
+    NSDateComponents *components = [calendar
+        components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
+          fromDate:date];
+    NSInteger dayFromMonday = (components.weekday + 5) % 7;
+    NSInteger minuteOfWeek = dayFromMonday * 24 * 60 +
+        components.hour * 60 + components.minute;
+    NSArray<NSDictionary<NSString *, id> *> *segments =
+        [SCRecurringScheduleCompiler segmentsForBundles:self.mutableBundles
+                                                schedules:self.recurringSchedules];
+    for (NSDictionary<NSString *, id> *segment in segments) {
+        NSInteger startMinute = [segment[SCRecurringSegmentStartMinuteKey] integerValue];
+        NSInteger endMinute = [segment[SCRecurringSegmentEndMinuteKey] integerValue];
+        if (startMinute > minuteOfWeek || minuteOfWeek >= endMinute) continue;
+
+        NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+        for (NSString *entry in segment[SCRecurringSegmentBlocklistKey] ?: @[]) {
+            NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+            [entries addObject:canonical ?: entry];
+        }
+        return entries.array;
+    }
+    return @[];
 }
 
 #pragma mark - Persistence
@@ -1951,6 +2571,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
     [self.mutableBundles sortUsingComparator:^NSComparisonResult(SCBlockBundle *b1, SCBlockBundle *b2) {
         return [@(b1.displayOrder) compare:@(b2.displayOrder)];
     }];
+    [self ensureRecurringScheduleMigration];
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)telemetryStructuralSnapshot {
@@ -1977,6 +2598,12 @@ static NSError *SCScheduleCommitError(NSInteger code,
         decodedScheduleCount += [self schedulesForWeekOffset:weekOffset].count;
         if ([self isCommittedForWeekOffset:weekOffset]) commitmentCount += 1;
     }
+    id rawRecurringSchedulesValue = persistentDomain[kRecurringSchedulesKey];
+    if ([rawRecurringSchedulesValue isKindOfClass:[NSArray class]]) {
+        rawScheduleCount += [rawRecurringSchedulesValue count];
+    }
+    decodedScheduleCount += self.recurringSchedules.count;
+    if (self.hasRecurringCommitment) commitmentCount += 1;
 
     NSDictionary<NSString *, NSArray<NSString *> *> *installedJobs = [self installedMergedScheduleIDsByStartKey];
     NSUInteger installedJobCount = 0;
@@ -1984,34 +2611,41 @@ static NSError *SCScheduleCommitError(NSInteger code,
         installedJobCount += matchingJobs.count;
     }
 
-    BOOL activeProjectionAvailable = [self isCommittedForWeekOffset:0];
+    NSDate *now = [NSDate date];
+    NSArray<NSString *> *recurringActiveEntries =
+        [self expectedRecurringActiveEntriesAtDate:now];
+    BOOL activeProjectionAvailable = recurringActiveEntries != nil ||
+        [self isCommittedForWeekOffset:0];
     NSUInteger expectedActiveEntryCount = 0;
     NSUInteger expectedActiveAppEntryCount = 0;
     NSUInteger expectedActiveSiteEntryCount = 0;
     BOOL expectedRequiresHosts = NO;
     BOOL expectedRequiresPacketFilter = NO;
+    NSMutableOrderedSet<NSString *> *expectedEntries = [NSMutableOrderedSet orderedSet];
     if (activeProjectionAvailable) {
-        SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
-        NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:[self enabledBundlesForCommittedBlockCalculations]
-                                                                          weekOffset:0
-                                                                              bridge:bridge];
-        NSDate *now = [NSDate date];
-        NSMutableOrderedSet<NSString *> *expectedEntries = [NSMutableOrderedSet orderedSet];
-        for (SCBlockSegment *segment in segments) {
-            if ([segment.startDate compare:now] == NSOrderedDescending ||
-                [segment.endDate compare:now] == NSOrderedAscending) {
-                continue;
-            }
-            for (SCBlockBundle *activeBundle in segment.activeBundles) {
-                for (id rawEntry in activeBundle.entries ?: @[]) {
-                    if (![rawEntry isKindOfClass:[NSString class]]) continue;
-                    NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
-                    // Existing opaque legacy entries remain part of the local
-                    // projection count; the value itself never leaves memory.
-                    [expectedEntries addObject:canonicalEntry ?: rawEntry];
+        if (recurringActiveEntries != nil) {
+            [expectedEntries addObjectsFromArray:recurringActiveEntries];
+        } else {
+            SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
+            NSArray<SCBlockSegment *> *segments = [self calculateBlockSegmentsForBundles:[self enabledBundlesForCommittedBlockCalculations]
+                                                                              weekOffset:0
+                                                                                  bridge:bridge];
+            for (SCBlockSegment *segment in segments) {
+                if ([segment.startDate compare:now] == NSOrderedDescending ||
+                    [segment.endDate compare:now] == NSOrderedAscending) {
+                    continue;
                 }
+                for (SCBlockBundle *activeBundle in segment.activeBundles) {
+                    for (id rawEntry in activeBundle.entries ?: @[]) {
+                        if (![rawEntry isKindOfClass:[NSString class]]) continue;
+                        NSString *canonicalEntry = [SCMiscUtilities canonicalBlockEntryFromString:rawEntry];
+                        // Existing opaque legacy entries remain part of the local
+                        // projection count; the value itself never leaves memory.
+                        [expectedEntries addObject:canonicalEntry ?: rawEntry];
+                    }
+                }
+                break;
             }
-            break;
         }
         expectedActiveEntryCount = expectedEntries.count;
         for (NSString *entry in expectedEntries) {
@@ -2054,8 +2688,24 @@ static NSError *SCScheduleCommitError(NSInteger code,
     NSMutableArray<NSDictionary<NSString *, id> *> *expectedApprovals = [NSMutableArray array];
     NSMutableArray<NSDictionary<NSString *, id> *> *expectedJobs = [NSMutableArray array];
     NSMutableOrderedSet<NSString *> *expectedActiveEntries = [NSMutableOrderedSet orderedSet];
-    BOOL activeProjectionAvailable = [self isCommittedForWeekOffset:0];
-    NSUInteger totalProjectedEntries = 0;
+    NSArray<NSString *> *recurringActiveEntries =
+        [self expectedRecurringActiveEntriesAtDate:now];
+    BOOL activeProjectionAvailable = recurringActiveEntries != nil ||
+        [self isCommittedForWeekOffset:0];
+    if (recurringActiveEntries != nil) {
+        [expectedActiveEntries addObjectsFromArray:recurringActiveEntries];
+    }
+    NSUInteger totalProjectedEntries = expectedActiveEntries.count;
+    if (totalProjectedEntries > kMaximumProjectedEntries) {
+        return @{
+            @"schema_version": @1,
+            @"projection_valid": @NO,
+            @"active_projection_available": @(activeProjectionAvailable),
+            @"active_entries": @[],
+            @"approval_schedules": @[],
+            @"job_schedules": @[],
+        };
+    }
 
     NSArray<SCBlockBundle *> *enabledBundles = [self enabledBundlesForCommittedBlockCalculations];
     SCScheduleLaunchdBridge *bridge = [[SCScheduleLaunchdBridge alloc] init];
@@ -2099,7 +2749,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
             if ([segment.startDate compare:now] == NSOrderedDescending) {
                 [expectedApprovals addObject:descriptor];
                 if (!usesRootScheduler) [expectedJobs addObject:descriptor];
-            } else if (weekOffset == 0) {
+            } else if (weekOffset == 0 && recurringActiveEntries == nil) {
                 [expectedActiveEntries addObjectsFromArray:segmentEntries.array];
             }
         }
@@ -2118,11 +2768,23 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (void)clearAllData {
     [self.mutableBundles removeAllObjects];
     [self.weekSchedulesCache removeAllObjects];
+    [self.mutableRecurringSchedules removeAllObjects];
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults removeObjectForKey:kBundlesKey];
     [defaults removeObjectForKey:kCommitmentEndDateKey];
     [defaults removeObjectForKey:kIsCommittedKey];
+    [defaults removeObjectForKey:kRecurringSchedulesKey];
+    [defaults removeObjectForKey:kRecurringCommitmentKey];
+    [defaults removeObjectForKey:kRecurringMigrationStateKey];
+    [defaults removeObjectForKey:kRecurringMigrationVersionKey];
+    [defaults removeObjectForKey:kBreakCreditsPerDayKey];
+    [defaults removeObjectForKey:kBreakCreditsRemainingKey];
+    [defaults removeObjectForKey:kBreakCreditsLastResetDayKey];
+    [defaults removeObjectForKey:kActiveTimedBreakKey];
+    [defaults removeObjectForKey:kProtectedHoursEnabledKey];
+    [defaults removeObjectForKey:kProtectedHoursStartMinuteKey];
+    [defaults removeObjectForKey:kProtectedHoursEndMinuteKey];
     for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
         if ([key hasPrefix:kWeekSchedulesPrefix] ||
             [key hasPrefix:kWeekCommitmentPrefix] ||
@@ -2140,6 +2802,261 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (void)postChangeNotification {
     [[NSNotificationCenter defaultCenter] postNotificationName:SCScheduleManagerDidChangeNotification
                                                         object:self];
+}
+
+#pragma mark - Break Credits and Protected Hours
+
+- (NSInteger)breakCreditsPerDay {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kBreakCreditsPerDayKey];
+    return value == nil ? SCBreakCreditDefaultAllowance : SCClampBreakCreditAllowance([value integerValue]);
+}
+
+- (void)reconcileBreakCreditsForDate:(NSDate *)date forceReset:(BOOL)forceReset {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id remainingValue = [defaults objectForKey:kBreakCreditsRemainingKey];
+    NSInteger remaining = remainingValue == nil ? self.breakCreditsPerDay : [remainingValue integerValue];
+    NSDate *resolvedDay = nil;
+    BOOL didReset = NO;
+    NSInteger resolved = SCReconcileBreakCredits(
+        self.breakCreditsPerDay,
+        remaining,
+        [defaults objectForKey:kBreakCreditsLastResetDayKey],
+        date ?: [NSDate date],
+        [NSCalendar currentCalendar],
+        forceReset,
+        &resolvedDay,
+        &didReset);
+    BOOL changed = remainingValue == nil || resolved != remaining || didReset;
+    [defaults setInteger:resolved forKey:kBreakCreditsRemainingKey];
+    if (resolvedDay != nil) [defaults setObject:resolvedDay forKey:kBreakCreditsLastResetDayKey];
+    if (changed) [defaults synchronize];
+}
+
+- (NSInteger)breakCreditsRemainingToday {
+    [self reconcileBreakCreditsForDate:[NSDate date] forceReset:NO];
+    return MAX(0, MIN(self.breakCreditsPerDay,
+        [[NSUserDefaults standardUserDefaults] integerForKey:kBreakCreditsRemainingKey]));
+}
+
+- (void)setBreakCreditsPerDay:(NSInteger)allowance {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSInteger resolved = SCResolveBreakCreditAllowanceUpdate(
+        allowance, self.breakCreditsPerDay, self.hasRecurringCommitment);
+    [defaults setInteger:resolved forKey:kBreakCreditsPerDayKey];
+    NSInteger remaining = MIN(self.breakCreditsRemainingToday, resolved);
+    [defaults setInteger:remaining forKey:kBreakCreditsRemainingKey];
+    [defaults synchronize];
+    [self postChangeNotification];
+}
+
+- (BOOL)protectedHoursEnabled {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kProtectedHoursEnabledKey];
+}
+
+- (NSInteger)protectedHoursStartMinute {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id startValue = [defaults objectForKey:kProtectedHoursStartMinuteKey];
+    id endValue = [defaults objectForKey:kProtectedHoursEndMinuteKey];
+    return SCNormalizeProtectedHoursRange(startValue == nil ? 23 * 60 : [startValue integerValue],
+                                           endValue == nil ? 5 * 60 : [endValue integerValue]).startMinute;
+}
+
+- (NSInteger)protectedHoursEndMinute {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id startValue = [defaults objectForKey:kProtectedHoursStartMinuteKey];
+    id endValue = [defaults objectForKey:kProtectedHoursEndMinuteKey];
+    return SCNormalizeProtectedHoursRange(startValue == nil ? 23 * 60 : [startValue integerValue],
+                                           endValue == nil ? 5 * 60 : [endValue integerValue]).endMinute;
+}
+
+- (BOOL)protectedHoursActiveNow {
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    return SCProtectedHoursAreActive(self.protectedHoursEnabled, range,
+                                     [NSDate date], [NSCalendar currentCalendar]);
+}
+
+- (BOOL)canEditProtectedHours {
+    if (!self.hasRecurringCommitment) return YES;
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    return !SCProtectedHoursEditLockIsActive(self.protectedHoursEnabled, range,
+                                             [NSDate date], [NSCalendar currentCalendar]);
+}
+
+- (void)saveProtectedHoursEnabled:(BOOL)enabled
+                       startMinute:(NSInteger)startMinute
+                         endMinute:(NSInteger)endMinute {
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(startMinute, endMinute);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:kProtectedHoursEnabledKey];
+    [defaults setInteger:range.startMinute forKey:kProtectedHoursStartMinuteKey];
+    [defaults setInteger:range.endMinute forKey:kProtectedHoursEndMinuteKey];
+    [defaults synchronize];
+    [self postChangeNotification];
+}
+
+- (void)updateProtectedHoursEnabled:(BOOL)enabled
+                        startMinute:(NSInteger)startMinute
+                          endMinute:(NSInteger)endMinute
+                         completion:(void (^)(BOOL, NSError *))completion {
+    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(startMinute, endMinute);
+    if (!self.hasRecurringCommitment) {
+        [self saveProtectedHoursEnabled:enabled
+                            startMinute:range.startMinute
+                              endMinute:range.endMinute];
+        if (completion != nil) completion(YES, nil);
+        return;
+    }
+    if (!self.canEditProtectedHours) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(32, @"protected_hours",
+            @"Protected Hours cannot be changed from two hours before they start until they end.", YES));
+        return;
+    }
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    NSDictionary<NSString *, id> *protectedHours = @{
+        @"enabled": @(enabled),
+        @"startMinute": @(range.startMinute),
+        @"endMinute": @(range.endMinute),
+    };
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc updateProtectedHoursForRecurringCommitmentID:commitment[@"commitmentID"]
+                                            generation:commitment[@"generation"]
+                                        protectedHours:protectedHours
+                                                 reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL persisted = [result[@"store_persisted"] boolValue];
+            if (persisted) {
+                [self saveProtectedHoursEnabled:enabled
+                                    startMinute:range.startMinute
+                                      endMinute:range.endMinute];
+            }
+            if (completion != nil) completion(persisted, error);
+        });
+    }];
+}
+
+- (BOOL)hasActiveTimedBreak {
+    return [self.activeTimedBreakEndDate timeIntervalSinceNow] > 0;
+}
+
+- (NSDate *)activeTimedBreakEndDate {
+    NSDictionary *value = [[NSUserDefaults standardUserDefaults] objectForKey:kActiveTimedBreakKey];
+    NSDate *endDate = [value isKindOfClass:[NSDictionary class]] &&
+        [value[@"endsAt"] isKindOfClass:[NSDate class]] ? value[@"endsAt"] : nil;
+    if (endDate != nil && [endDate timeIntervalSinceNow] <= 0) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kActiveTimedBreakKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        return nil;
+    }
+    return endDate;
+}
+
+- (void)beginTimedBreakForMinutes:(NSInteger)minutes
+                       completion:(void (^)(BOOL, NSError *))completion {
+    if (!(minutes == 5 || minutes == 15 || minutes == 30)) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(33, @"break",
+            @"Choose a 5, 15, or 30 minute break.", YES));
+        return;
+    }
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(34, @"break",
+            @"Breaks are available only during a recurring commitment.", NO));
+        return;
+    }
+    if (self.protectedHoursActiveNow) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(35, @"break",
+            @"Breaks are unavailable during Protected Hours.", YES));
+        return;
+    }
+    if (self.hasActiveTimedBreak) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(36, @"break",
+            @"A timed break is already active.", YES));
+        return;
+    }
+    NSInteger remaining = self.breakCreditsRemainingToday;
+    if (remaining <= 0) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(37, @"break",
+            @"No break credits remain today.", YES));
+        return;
+    }
+    BOOL somethingBlocked = NO;
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (bundle.enabled && bundle.entries.count > 0 &&
+            ![self wouldBundleBeAllowed:bundle.bundleID]) {
+            somethingBlocked = YES;
+            break;
+        }
+    }
+    if (!somethingBlocked) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(38, @"break",
+            @"Nothing in the recurring schedule is blocked right now.", YES));
+        return;
+    }
+
+    // Reserve before crossing the XPC boundary so a transport interruption can
+    // never grant a verified break without spending its credit.
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setInteger:remaining - 1 forKey:kBreakCreditsRemainingKey];
+    [defaults synchronize];
+    [self postChangeNotification];
+
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc beginRecurringTimedBreakForCommitmentID:commitment[@"commitmentID"]
+                                       generation:commitment[@"generation"]
+                                  durationMinutes:minutes
+                                            reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSDate *startedAt = [result[@"break_started_at"] isKindOfClass:[NSDate class]]
+                ? result[@"break_started_at"] : nil;
+            NSDate *endsAt = [result[@"break_ends_at"] isKindOfClass:[NSDate class]]
+                ? result[@"break_ends_at"] : nil;
+            BOOL started = [result[@"store_persisted"] boolValue] &&
+                [result[@"reconcile_succeeded"] boolValue] && startedAt != nil && endsAt != nil;
+            if (started) {
+                [defaults setObject:@{
+                    @"startedAt": startedAt,
+                    @"endsAt": endsAt,
+                    @"durationMinutes": @(minutes),
+                } forKey:kActiveTimedBreakKey];
+                [defaults synchronize];
+            } else if (result[@"store_persisted"] != nil &&
+                       ![result[@"store_persisted"] boolValue]) {
+                // The daemon gave a definitive rejection or rolled the break
+                // back. Ambiguous transport failures intentionally stay spent.
+                [defaults setInteger:remaining forKey:kBreakCreditsRemainingKey];
+                [defaults synchronize];
+            }
+            [self postChangeNotification];
+            if (completion != nil) completion(started, error);
+        });
+    }];
+}
+
+- (void)endTimedBreakWithCompletion:(void (^)(BOOL, NSError *))completion {
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(39, @"break",
+            @"No recurring commitment is active.", NO));
+        return;
+    }
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc endRecurringTimedBreakForCommitmentID:commitment[@"commitmentID"]
+                                     generation:commitment[@"generation"]
+                                          reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL ended = [result[@"store_persisted"] boolValue];
+            if (ended) {
+                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                [defaults removeObjectForKey:kActiveTimedBreakKey];
+                [defaults synchronize];
+                [self postChangeNotification];
+            }
+            // Ending early never refunds the already-consumed daily credit.
+            if (completion != nil) completion(ended, error);
+        });
+    }];
 }
 
 #pragma mark - Emergency Unlock Credits

@@ -16,6 +16,8 @@
 #import "BlockManager.h"
 #import "HostFileBlocker.h"
 #import "SCBlockBundle.h"
+#import "SCWeeklySchedule.h"
+#import "SCTimeRange.h"
 #import "SCScheduleManager.h"
 #import "SCLogger.h"
 #import "SCCalendarGridView.h"
@@ -156,7 +158,119 @@ static NSDictionary<NSString *, id> *SCSentryParsedEnvelopeFromRequest(NSURLRequ
                                      bundleSaved:(BOOL)bundleSaved
                                   operationToken:(NSString *)operationToken;
 - (void)clearStrictifyRetryStateForOperationToken:(NSString *)operationToken;
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state;
+- (nullable NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date;
 @end
+
+static NSArray<NSString *> *SCRecurringRuntimeDefaultsKeys(void) {
+    return @[
+        @"SCRecurringCommitment",
+        @"SCActiveTimedBreak",
+        @"SCProtectedHoursEnabled",
+        @"SCProtectedHoursStartMinute",
+        @"SCProtectedHoursEndMinute",
+        @"SCBreakCreditsPerDay",
+        @"SCBreakCreditsRemainingToday",
+        @"SCBreakCreditsLastResetDay",
+    ];
+}
+
+static NSDictionary<NSString *, id> *SCDefaultsSnapshot(NSUserDefaults *defaults,
+                                                         NSArray<NSString *> *keys) {
+    NSMutableDictionary<NSString *, id> *snapshot = [NSMutableDictionary dictionary];
+    for (NSString *key in keys) snapshot[key] = [defaults objectForKey:key] ?: NSNull.null;
+    return [snapshot copy];
+}
+
+static void SCRestoreDefaultsSnapshot(NSUserDefaults *defaults,
+                                      NSDictionary<NSString *, id> *snapshot) {
+    for (NSString *key in snapshot) {
+        id value = snapshot[key];
+        if (value == NSNull.null) [defaults removeObjectForKey:key];
+        else [defaults setObject:value forKey:key];
+    }
+    [defaults synchronize];
+}
+
+static NSDictionary<NSString *, id> *SCRecurringRuntimeState(
+    NSString *commitmentID,
+    NSString *generation,
+    NSDate *startedAt,
+    NSDate *lockEndsAt,
+    BOOL protectedEnabled,
+    NSInteger protectedStart,
+    NSInteger protectedEnd,
+    NSDate *breakEndsAt) {
+    NSMutableDictionary<NSString *, id> *state = [@{
+        @"has_commitment": @YES,
+        @"commitment_id": commitmentID,
+        @"generation": generation,
+        @"started_at": startedAt,
+        @"lock_ends_at": lockEndsAt,
+        @"protected_hours": @{
+            @"enabled": @(protectedEnabled),
+            @"startMinute": @(protectedStart),
+            @"endMinute": @(protectedEnd),
+        },
+        @"break_active": @(breakEndsAt != nil),
+    } mutableCopy];
+    if (breakEndsAt != nil) state[@"break_ends_at"] = breakEndsAt;
+    return [state copy];
+}
+
+static NSArray<NSString *> *SCRecurringTelemetryDefaultsKeys(NSUserDefaults *defaults) {
+    NSMutableOrderedSet<NSString *> *keys = [NSMutableOrderedSet orderedSetWithArray:
+        SCRecurringRuntimeDefaultsKeys()];
+    [keys addObjectsFromArray:@[
+        @"SCScheduleBundles",
+        @"SCRecurringSchedules",
+        @"SCRecurringScheduleMigrationState",
+        @"SCRecurringScheduleMigrationVersion",
+    ]];
+    for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
+        if ([key hasPrefix:@"SCWeekSchedules_"] ||
+            [key hasPrefix:@"SCWeekCommitment_"] ||
+            [key hasPrefix:@"SCScheduleManifest_"]) {
+            [keys addObject:key];
+        }
+    }
+    return keys.array;
+}
+
+static void SCClearRecurringTelemetryDefaults(NSUserDefaults *defaults) {
+    for (NSString *key in SCRecurringTelemetryDefaultsKeys(defaults)) {
+        [defaults removeObjectForKey:key];
+    }
+    [defaults synchronize];
+}
+
+static SCScheduleManager *SCInstallRecurringTelemetryFixture(NSUserDefaults *defaults) {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Recurring telemetry fixture"
+                                                   color:[SCBlockBundle colorBlue]];
+    bundle.enabled = YES;
+    [bundle.entries addObject:@"Example.COM"];
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    NSDate *startedAt = [NSDate dateWithTimeIntervalSinceNow:-60];
+    NSDate *lockEndsAt = [NSDate dateWithTimeIntervalSinceNow:24 * 60 * 60];
+    [defaults setObject:@[[bundle toDictionary]] forKey:@"SCScheduleBundles"];
+    [defaults setObject:@[[schedule toDictionary]] forKey:@"SCRecurringSchedules"];
+    [defaults setInteger:1 forKey:@"SCRecurringScheduleMigrationVersion"];
+    [defaults setObject:@{@"schemaVersion": @1, @"status": @"complete"}
+                 forKey:@"SCRecurringScheduleMigrationState"];
+    [defaults setObject:@{
+        @"schemaVersion": @1,
+        @"commitmentID": NSUUID.UUID.UUIDString,
+        @"generation": NSUUID.UUID.UUIDString,
+        @"startedAt": startedAt,
+        @"lockEndsAt": lockEndsAt,
+    } forKey:@"SCRecurringCommitment"];
+    [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
+    [defaults setInteger:23 * 60 forKey:@"SCProtectedHoursStartMinute"];
+    [defaults setInteger:5 * 60 forKey:@"SCProtectedHoursEndMinute"];
+    [defaults removeObjectForKey:@"SCActiveTimedBreak"];
+    [defaults synchronize];
+    return [[SCScheduleManager alloc] init];
+}
 
 @interface SCUtilityTests : XCTestCase
 
@@ -404,6 +518,9 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityConsistencyProjection,
         SCDaemonCapabilityRootScheduleStore,
         SCDaemonCapabilityRootScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleStore,
+        SCDaemonCapabilityRecurringScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleBreaks,
         @"future-safe-capability-v1",
     ];
 
@@ -414,6 +531,46 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                                                capabilities:capabilities
                           compatibleWithCurrentAppWithReason:&reason]);
         XCTAssertEqualObjects(reason, @"compatible");
+    }
+}
+
+- (void)testDaemonCapabilitiesRequireRecurringScheduleFeatures {
+    NSArray<NSString*>* capabilities = @[
+        SCDaemonCapabilityActiveBlocklistAppend,
+        SCDaemonCapabilityApprovedSchedulesAppend,
+        SCDaemonCapabilityTelemetrySpool,
+        SCDaemonCapabilityStrictApplyResults,
+        SCDaemonCapabilityScheduleOwnerBounds,
+        SCDaemonCapabilityConsistencyProjection,
+        SCDaemonCapabilityRootScheduleStore,
+        SCDaemonCapabilityRootScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleStore,
+        SCDaemonCapabilityRecurringScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleBreaks,
+    ];
+    NSArray<NSArray<NSString*>*>* missingCapabilities = @[
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRecurringScheduleStore];
+        }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRecurringScheduleTimer];
+        }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRecurringScheduleBreaks];
+        }]],
+    ];
+    NSArray<NSString*>* expectedReasons = @[
+        @"recurring-schedule-store-missing",
+        @"recurring-schedule-timer-missing",
+        @"recurring-schedule-breaks-missing",
+    ];
+
+    for (NSUInteger index = 0; index < missingCapabilities.count; index++) {
+        NSString *reason = nil;
+        XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                               capabilities:missingCapabilities[index]
+                          compatibleWithCurrentAppWithReason:&reason]);
+        XCTAssertEqualObjects(reason, expectedReasons[index]);
     }
 }
 
@@ -736,6 +893,165 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         XCTAssertTrue([current.entries containsObject:@"second.invalid"]);
     } @finally {
         [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    }
+}
+
+- (void)testRecurringRuntimeRefreshAdoptsMissingRootCommitmentAndRefillsCreditsOnce {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys());
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    NSDate *startedAt = [NSDate dateWithTimeIntervalSinceNow:-60];
+    NSDate *lockEndsAt = [NSDate dateWithTimeIntervalSinceNow:2 * 24 * 60 * 60];
+    NSDate *breakEndsAt = [NSDate dateWithTimeIntervalSinceNow:15 * 60];
+    NSString *commitmentID = NSUUID.UUID.UUIDString;
+    NSString *generation = NSUUID.UUID.UUIDString;
+
+    @try {
+        [defaults removeObjectForKey:@"SCRecurringCommitment"];
+        [defaults removeObjectForKey:@"SCActiveTimedBreak"];
+        [defaults setInteger:4 forKey:@"SCBreakCreditsPerDay"];
+        [defaults setInteger:0 forKey:@"SCBreakCreditsRemainingToday"];
+        [defaults setObject:[[NSCalendar currentCalendar] startOfDayForDate:[NSDate date]]
+                       forKey:@"SCBreakCreditsLastResetDay"];
+        [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
+        [defaults synchronize];
+
+        NSDictionary *rootState = SCRecurringRuntimeState(
+            commitmentID, generation, startedAt, lockEndsAt, YES, 23 * 60, 5 * 60, breakEndsAt);
+        XCTAssertTrue([manager applyRecurringRuntimeState:rootState]);
+
+        NSDictionary *local = [defaults objectForKey:@"SCRecurringCommitment"];
+        XCTAssertEqualObjects(local[@"commitmentID"], commitmentID);
+        XCTAssertEqualObjects(local[@"generation"], generation);
+        XCTAssertEqualObjects(local[@"startedAt"], startedAt);
+        XCTAssertEqualObjects(local[@"lockEndsAt"], lockEndsAt);
+        XCTAssertTrue([defaults boolForKey:@"SCProtectedHoursEnabled"]);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursStartMinute"], 23 * 60);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursEndMinute"], 5 * 60);
+        XCTAssertEqualObjects(manager.activeTimedBreakEndDate, breakEndsAt);
+        XCTAssertEqual([defaults integerForKey:@"SCBreakCreditsRemainingToday"], 4);
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringRuntimeRefreshRepairsExistingStateWithoutRefillAndClearsOnlyRuntimeOnEnd {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys());
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    NSDate *startedAt = [NSDate dateWithTimeIntervalSinceNow:-24 * 60 * 60];
+    NSDate *firstLockEnd = [NSDate dateWithTimeIntervalSinceNow:60 * 60];
+    NSDate *rootLockEnd = [NSDate dateWithTimeIntervalSinceNow:3 * 60 * 60];
+    NSString *commitmentID = NSUUID.UUID.UUIDString;
+    NSString *generation = NSUUID.UUID.UUIDString;
+
+    @try {
+        [defaults setObject:@{
+            @"schemaVersion": @1,
+            @"commitmentID": commitmentID,
+            @"generation": generation,
+            @"startedAt": startedAt,
+            @"lockEndsAt": firstLockEnd,
+        } forKey:@"SCRecurringCommitment"];
+        [defaults setObject:@{@"endsAt": [NSDate dateWithTimeIntervalSinceNow:10 * 60]}
+                       forKey:@"SCActiveTimedBreak"];
+        [defaults setInteger:4 forKey:@"SCBreakCreditsPerDay"];
+        [defaults setInteger:1 forKey:@"SCBreakCreditsRemainingToday"];
+        [defaults setObject:[[NSCalendar currentCalendar] startOfDayForDate:[NSDate date]]
+                       forKey:@"SCBreakCreditsLastResetDay"];
+        [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
+        [defaults setInteger:8 * 60 forKey:@"SCProtectedHoursStartMinute"];
+        [defaults setInteger:9 * 60 forKey:@"SCProtectedHoursEndMinute"];
+        [defaults synchronize];
+
+        NSDictionary *rootState = SCRecurringRuntimeState(
+            commitmentID, generation, startedAt, rootLockEnd, YES, 22 * 60, 6 * 60, nil);
+        XCTAssertTrue([manager applyRecurringRuntimeState:rootState]);
+        XCTAssertEqualObjects(manager.recurringCommitmentLockEndDate, rootLockEnd);
+        XCTAssertFalse(manager.hasActiveTimedBreak);
+        XCTAssertEqual([defaults integerForKey:@"SCBreakCreditsRemainingToday"], 1);
+        XCTAssertTrue([defaults boolForKey:@"SCProtectedHoursEnabled"]);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursStartMinute"], 22 * 60);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursEndMinute"], 6 * 60);
+
+        [defaults setObject:@{@"endsAt": [NSDate dateWithTimeIntervalSinceNow:5 * 60]}
+                       forKey:@"SCActiveTimedBreak"];
+        XCTAssertTrue([manager applyRecurringRuntimeState:@{@"has_commitment": @NO}]);
+        XCTAssertFalse(manager.hasRecurringCommitment);
+        XCTAssertFalse(manager.hasActiveTimedBreak);
+        XCTAssertTrue([defaults boolForKey:@"SCProtectedHoursEnabled"]);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursStartMinute"], 22 * 60);
+        XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursEndMinute"], 6 * 60);
+        XCTAssertEqual([defaults integerForKey:@"SCBreakCreditsRemainingToday"], 1);
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringCommitmentParticipatesInStructuralAndActiveTelemetryProjection {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *keys = SCRecurringTelemetryDefaultsKeys(defaults);
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, keys);
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCScheduleManager *manager = SCInstallRecurringTelemetryFixture(defaults);
+
+        NSDictionary<NSString *, NSNumber *> *structure = [manager telemetryStructuralSnapshot];
+        XCTAssertEqualObjects(structure[@"raw_bundle_count"], @1);
+        XCTAssertEqualObjects(structure[@"decoded_bundle_count"], @1);
+        XCTAssertEqualObjects(structure[@"raw_schedule_count"], @1);
+        XCTAssertEqualObjects(structure[@"decoded_schedule_count"], @1);
+        XCTAssertEqualObjects(structure[@"commitment_count"], @1);
+        XCTAssertEqualObjects(structure[@"active_projection_available"], @YES);
+        XCTAssertEqualObjects(structure[@"expected_active_entry_count"], @1);
+
+        NSDictionary<NSString *, id> *projection = [manager daemonConsistencyProjection];
+        XCTAssertEqualObjects(projection[@"projection_valid"], @YES);
+        XCTAssertEqualObjects(projection[@"active_projection_available"], @YES);
+        XCTAssertEqualObjects(projection[@"active_entries"], (@[@"example.com"]));
+        XCTAssertEqualObjects(projection[@"approval_schedules"], @[]);
+        XCTAssertEqualObjects(projection[@"job_schedules"], @[]);
+    } @finally {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringTelemetryBreakIsEmptyUnlessProtectedHoursOverrideIt {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *keys = SCRecurringTelemetryDefaultsKeys(defaults);
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, keys);
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCScheduleManager *manager = SCInstallRecurringTelemetryFixture(defaults);
+        NSCalendar *calendar = [[NSCalendar alloc]
+            initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        calendar.timeZone = [NSTimeZone localTimeZone];
+        NSDateComponents *components = [[NSDateComponents alloc] init];
+        components.year = 2026;
+        components.month = 8;
+        components.day = 17;
+        components.hour = 10;
+        NSDate *duringBreak = [calendar dateFromComponents:components];
+        XCTAssertNotNil(duringBreak);
+
+        [defaults setObject:@{
+            @"startedAt": [duringBreak dateByAddingTimeInterval:-30 * 60],
+            @"endsAt": [duringBreak dateByAddingTimeInterval:30 * 60],
+        } forKey:@"SCActiveTimedBreak"];
+        [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
+        [defaults synchronize];
+        XCTAssertEqualObjects([manager expectedRecurringActiveEntriesAtDate:duringBreak], @[]);
+
+        [defaults setBool:YES forKey:@"SCProtectedHoursEnabled"];
+        [defaults setInteger:9 * 60 forKey:@"SCProtectedHoursStartMinute"];
+        [defaults setInteger:11 * 60 forKey:@"SCProtectedHoursEndMinute"];
+        [defaults synchronize];
+        XCTAssertEqualObjects([manager expectedRecurringActiveEntriesAtDate:duringBreak],
+                              (@[@"example.com"]));
+    } @finally {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
     }
 }
 
@@ -1377,6 +1693,84 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     duplicateScheduleEnvelope[@"scheduleIDs"] = @[scheduleID, scheduleID];
     withCommitment[@"ApprovedScheduleCommitments"] = @{commitmentID: duplicateScheduleEnvelope};
     XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:withCommitment]);
+}
+
+- (void)testSettingsSchemaValidatesRecurringCommitmentsAndBreaks {
+    NSString *commitmentID = @"40000000-0000-4000-8000-000000000001";
+    NSString *generation = @"50000000-0000-4000-8000-000000000001";
+    NSString *segmentID = @"60000000-0000-4000-8000-000000000001";
+    NSString *bundleID = @"70000000-0000-4000-8000-000000000001";
+    NSString *policyRevision = @"80000000-0000-4000-8000-000000000001";
+    NSDate *startedAt = [NSDate dateWithTimeIntervalSince1970:1783900800];
+    NSDate *lockEndsAt = [startedAt dateByAddingTimeInterval:24 * 60 * 60];
+    NSDictionary *segment = @{
+        @"segmentID": segmentID,
+        @"startMinuteOfWeek": @540,
+        @"endMinuteOfWeek": @600,
+        @"blocklist": @[@"example.invalid"],
+        @"isAllowlist": @NO,
+        @"sourceBundleIDs": @[bundleID],
+        @"policyRevision": policyRevision,
+    };
+    NSDictionary *commitment = @{
+        @"schemaVersion": @1,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"controllingUID": @501,
+        @"startedAt": startedAt,
+        @"lockEndsAt": lockEndsAt,
+        @"protectedHours": @{
+            @"enabled": @YES,
+            @"startMinute": @1380,
+            @"endMinute": @300,
+        },
+        @"blockSettings": @{},
+        @"segments": @[segment],
+    };
+    NSMutableDictionary *settings = [@{
+        @"SettingsVersionNumber": @7,
+        @"LastSettingsUpdate": [NSDate date],
+        @"BlockIsRunning": @NO,
+        @"ApprovedRecurringScheduleCommitments": @{commitmentID: commitment},
+        @"ActiveScheduleBreaks": @{},
+    } mutableCopy];
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSDictionary *activeBreak = @{
+        @"schemaVersion": @1,
+        @"commitmentID": commitmentID,
+        @"generation": generation,
+        @"controllingUID": @501,
+        @"startedAt": startedAt,
+        @"endsAt": [startedAt dateByAddingTimeInterval:15 * 60],
+    };
+    settings[@"ActiveScheduleBreaks"] = @{commitmentID: activeBreak};
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *overlappingCommitment = [commitment mutableCopy];
+    NSMutableDictionary *overlappingSegment = [segment mutableCopy];
+    overlappingSegment[@"segmentID"] = NSUUID.UUID.UUIDString;
+    overlappingSegment[@"startMinuteOfWeek"] = @599;
+    overlappingSegment[@"endMinuteOfWeek"] = @660;
+    overlappingCommitment[@"segments"] = @[segment, overlappingSegment];
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: overlappingCommitment};
+    settings[@"ActiveScheduleBreaks"] = @{};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *invalidProtectedHours = [commitment mutableCopy];
+    invalidProtectedHours[@"protectedHours"] = @{
+        @"enabled": @YES,
+        @"startMinute": @300,
+        @"endMinute": @300,
+    };
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: invalidProtectedHours};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: commitment};
+    NSMutableDictionary *wrongGenerationBreak = [activeBreak mutableCopy];
+    wrongGenerationBreak[@"generation"] = NSUUID.UUID.UUIDString;
+    settings[@"ActiveScheduleBreaks"] = @{commitmentID: wrongGenerationBreak};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
 }
 
 - (void)testSettingsInitializationIsPerInstanceAndNeverLeavesDictionaryNil {
