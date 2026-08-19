@@ -39,9 +39,9 @@ NSErrorDomain const SCPacketFilterErrorDomain = @"SCPacketFilterErrorDomain";
 
     NSPipe* outputPipe = [NSPipe pipe];
     task.standardOutput = outputPipe;
-    // Merge stderr and drain the pipe before waiting. Waiting first can
-    // deadlock once a large ruleset fills the pipe buffer.
-    task.standardError = outputPipe;
+    // Only stdout contains rules. pfctl can emit benign platform warnings on
+    // stderr even when the anchor is empty, so stderr must not count as a block.
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
 
     @try {
         [task launch];
