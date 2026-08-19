@@ -12,3 +12,4 @@
 - `docs/TELEMETRY.md` — PER-355 privacy contract, event schema, cross-process transport design, consistency invariants, and verification plan for Fence diagnostics.
 - `docs/dictionary/root-owned-schedule.md` — PER-383 term and lifecycle reference for immutable root commitment envelopes, daemon-timed V2 segments, and the bounded V1 drain path.
 - `decisions/agent/pending/PER-383-root-scheduler-authority-and-legacy-rollback.md` — pending maintainer review record for scheduler authority, commitment immutability, strictify coupling, and rollback boundaries.
+- `decisions/human/PER-444-github-release-assets-trial.md` — approved 3.4.12 trial contract for publishing signed ZIP/DMG artifacts on GitHub Releases while retaining Cloudflare Pages for appcasts and the website.

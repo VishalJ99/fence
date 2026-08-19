@@ -1,8 +1,8 @@
 # Fence System Architecture
 
-> **Version:** 3.4.11 telemetry baseline plus PER-383 scheduler cutover (historical targets still use SelfControl names)
+> **Version:** 3.4.12 recurring-schedule parity baseline (historical targets still use SelfControl names)
 > **Purpose:** Comprehensive technical documentation for developers and AI agents
-> **Last Updated:** July 2026
+> **Last Updated:** August 2026
 
 ---
 
