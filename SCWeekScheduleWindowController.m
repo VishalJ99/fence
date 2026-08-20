@@ -4,6 +4,7 @@
 //
 
 #import "SCWeekScheduleWindowController.h"
+#import "AppController.h"
 #import "SCEmergencyExitWindowController.h"
 #import "SCWeekGridView.h"
 #import "SCBundleSidebarView.h"
@@ -76,6 +77,7 @@ static BOOL const kUseCalendarUI = YES;
 
 // UI Elements
 @property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) NSButton *settingsButton;
 @property (nonatomic, strong) NSView *statusView;
 @property (nonatomic, strong) NSStackView *statusStackView;
 @property (nonatomic, strong) SCWeekGridView *weekGridView;
@@ -200,6 +202,25 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.titleLabel.drawsBackground = NO;
     self.titleLabel.autoresizingMask = NSViewMinYMargin; // Stay pinned to top
     [contentView addSubview:self.titleLabel];
+
+    // Keep Settings discoverable in the primary window as well as the app menu.
+    CGFloat settingsButtonSize = 40.0;
+    self.settingsButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - settingsButtonSize,
+                                                                     y - 8.0,
+                                                                     settingsButtonSize,
+                                                                     settingsButtonSize)];
+    self.settingsButton.image = [NSImage imageWithSystemSymbolName:@"gearshape"
+                                           accessibilityDescription:@"Settings"];
+    self.settingsButton.imagePosition = NSImageOnly;
+    self.settingsButton.bezelStyle = NSBezelStyleTexturedRounded;
+    self.settingsButton.bordered = NO;
+    self.settingsButton.contentTintColor = NSColor.labelColor;
+    self.settingsButton.toolTip = @"Settings";
+    self.settingsButton.accessibilityLabel = @"Settings";
+    self.settingsButton.target = (AppController *)NSApp.delegate;
+    self.settingsButton.action = @selector(openPreferences:);
+    self.settingsButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [contentView addSubview:self.settingsButton];
 
     // Status view - use semi-transparent background to work with frosted glass
     y -= 66; // 50px height + 16px gap
