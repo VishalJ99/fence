@@ -267,12 +267,6 @@
     disableBlockingItem.target = self;
     [debugMenu addItem:disableBlockingItem];
 
-    NSMenuItem *resetCreditsItem = [[NSMenuItem alloc] initWithTitle:@"Reset Emergency Credits"
-                                                              action:@selector(debugResetCredits:)
-                                                       keyEquivalent:@""];
-    resetCreditsItem.target = self;
-    [debugMenu addItem:resetCreditsItem];
-
     NSMenuItem *triggerSafetyCheckItem = [[NSMenuItem alloc] initWithTitle:@"Trigger Safety Check"
                                                                     action:@selector(debugTriggerSafetyCheck:)
                                                              keyEquivalent:@""];
@@ -527,10 +521,6 @@
 #ifdef DEBUG
 - (void)debugDisableBlocking:(id)sender {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"SCDebugDisableBlockingRequested" object:nil];
-}
-
-- (void)debugResetCredits:(id)sender {
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"SCDebugResetCreditsRequested" object:nil];
 }
 
 - (void)debugTriggerSafetyCheck:(id)sender {

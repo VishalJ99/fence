@@ -1,136 +1,41 @@
 # Emergency Unlock
 
-<!-- KEYWORDS: emergency, unlock, escape, override, break, committed, credits, password, emergency.sh -->
+<!-- KEYWORDS: emergency, unlock, escape, override, committed, attention, foreground -->
 
-**Also known as:** Emergency Override, Escape Hatch
-
----
+**Also known as:** Emergency Exit, Escape Hatch
 
 ## Brief Definition
 
-An action that immediately breaks out of Committed State, ending all active blocking. Requires spending one Emergency Credit and entering the system password.
+A high-friction escape from an active commitment. The user must keep Fence full-screen, key, and foreground for the configured wait; a single surprise checkpoint must be confirmed within three seconds or the attempt resets.
 
----
+## Product Contract
 
-## Detailed Definition
-
-Emergency Unlock is a safety mechanism that allows users to escape their self-imposed restrictions when genuinely needed. It executes the `emergency.sh` script with administrator privileges to clear all blocking rules, daemon state, and commitment metadata.
-
-**Key characteristics:**
-- Only available when in Committed State
-- Consumes one Emergency Credit (finite resource)
-- Requires macOS administrator password
-- Clears ALL blocking immediately (hosts, PF rules, daemon state)
-- UI refreshes without app restart
-
----
-
-## Context/Trigger
-
-- User clicks "Emergency Unlock (N)" button in week schedule window
-- Button only enabled when: `isCommitted == YES && creditsRemaining > 0`
-- Confirmation dialog warns about credit consumption
-- macOS password prompt via NSAppleScript
-
----
+- Available whenever a recurring or surviving legacy commitment is active.
+- Has no credit balance or usage limit.
+- Wait is configured in Fence > Settings > Protection before committing.
+- Default wait is three minutes; supported settings are one through ten minutes.
+- At three minutes, the checkpoint follows N(90 seconds, 30 seconds), clamped to 45...177 seconds.
+- For other durations, mean and standard deviation scale to one-half and one-sixth of the wait, while the checkpoint remains at least 45 seconds in and at least three seconds before completion.
+- Losing foreground, key-window, or full-screen status resets the complete attempt.
+- Missing the three-second checkpoint resets the complete attempt.
+- Completing the attempt runs the existing verified emergency cleanup and ends the commitment.
 
 ## Code Locations
 
 | File | Purpose |
 |------|---------|
-| `SCWeekScheduleWindowController.m` | `emergencyUnlockButton` property |
-| `SCWeekScheduleWindowController.m` | `emergencyUnlockClicked:` - confirmation flow |
-| `SCWeekScheduleWindowController.m` | `performEmergencyUnlock` - script execution |
-| `emergency.sh` | Shell script with cleanup commands |
-
----
-
-## Data Model
-
-```objc
-// Button state determined by:
-BOOL isCommitted = [manager isCommittedForWeekOffset:self.currentWeekOffset];
-NSInteger credits = [manager emergencyUnlockCreditsRemaining];
-self.emergencyUnlockButton.enabled = (isCommitted && credits > 0);
-
-// Script execution via AppleScript
-NSString *appleScriptSource = [NSString stringWithFormat:
-    @"do shell script \"/bin/bash '%@'\" with administrator privileges", scriptPath];
-```
-
----
-
-## Call Stack
-
-```mermaid
-graph TD
-    A[User clicks 'Emergency Unlock'] --> B[emergencyUnlockClicked:]
-    B --> C[Show confirmation alert]
-    C --> D{User confirms?}
-    D -->|No| E[Abort - no credit used]
-    D -->|Yes| F[performEmergencyUnlock]
-    F --> G[Find emergency.sh script]
-    G --> H[Execute via NSAppleScript - PASSWORD PROMPT]
-    H --> I{Script succeeded?}
-    I -->|No| J[Show error - no credit used]
-    I -->|Yes| K[useEmergencyUnlockCredit]
-    K --> L[Clear SCWeekCommitment_* from defaults]
-    L --> M[Post SCScheduleManagerDidChangeNotification]
-    M --> N[Show success alert with remaining credits]
-    N --> O[UI refreshes - no longer committed]
-
-    style A fill:#ffcdd2
-    style H fill:#fff3e0
-    style O fill:#c8e6c9
-```
-
----
-
-## emergency.sh Script Actions
-
-```bash
-1. launchctl bootout system/org.eyebeam.selfcontrold  # Stop daemon
-2. pfctl -a org.eyebeam -F all                        # Clear firewall rules
-3. sed -i '' '/SELFCONTROL BLOCK/d' /etc/hosts        # Clear hosts entries
-4. dscacheutil -flushcache                            # Flush DNS
-5. rm /usr/local/etc/.*.plist                         # Clear settings
-6. defaults delete org.eyebeam.SelfControl SCIsCommitted  # Clear user defaults
-```
-
----
+| `SCEmergencyExitAttempt.m` | Continuous-attention state machine and checkpoint sampling |
+| `SCEmergencyExitWindowController.m` | Full-screen attempt UI |
+| `SCWeekScheduleWindowController.m` | Entry confirmation and verified cleanup result |
+| `Block Management/SCScheduleManager.m` | Configured wait and commitment state |
 
 ## Related Terms
 
-- [Committed State](committed-state.md) - The state this action escapes from
-- [Emergency Credits](emergency-credits.md) - Currency consumed by this action
+- [Committed State](committed-state.md)
+- [Break Credits](break-credits.md)
 
----
+## Anti-definitions
 
-## Anti-definitions (What this is NOT)
-
-- ❌ NOT a free escape - costs a finite credit
-- ❌ NOT reversible - once used, the credit is gone
-- ❌ NOT for regular use - designed for genuine emergencies only
-- ❌ NOT available in uncommitted state - button is disabled
-
----
-
-## UI Behavior
-
-| State | Button Appearance |
-|-------|-------------------|
-| Not committed | Disabled, shows "(N)" credits |
-| Committed, has credits | Enabled, red tint, shows "(N)" |
-| Committed, 0 credits | Disabled, shows "(0)" |
-
----
-
-## Confirmation Dialog
-
-```objc
-alert.messageText = @"Use Emergency Unlock?";
-alert.informativeText = [NSString stringWithFormat:
-    @"This will immediately end all blocking and use 1 of your %ld remaining emergency unlock%@.\n\n"
-    @"This cannot be undone.",
-    (long)credits, credits == 1 ? @"" : @"s"];
-```
+- Not a regular timed break; it ends the commitment.
+- Not an instant escape; the uninterrupted foreground wait is mandatory.
+- Not credit-limited.

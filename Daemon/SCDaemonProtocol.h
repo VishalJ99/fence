@@ -36,6 +36,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityRecurringScheduleStore @"recurring-schedule-store-v1"
 #define SCDaemonCapabilityRecurringScheduleTimer @"recurring-schedule-timer-v1"
 #define SCDaemonCapabilityRecurringScheduleBreaks @"recurring-schedule-breaks-v1"
+#define SCDaemonCapabilityRecurringCommitmentExtend @"recurring-commitment-extend-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -226,6 +227,15 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
                                   generation:(NSString *)generation
                                        reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                       NSError * _Nullable error))reply;
+
+/// Extends the caller's active commitment by 1...7 calendar days. The helper
+/// owns the deadline mutation and caps the total remaining lock horizon at 14
+/// days. Recurring enforcement still continues until explicit End.
+- (void)extendRecurringCommitmentWithID:(NSString *)commitmentID
+                              generation:(NSString *)generation
+                                    days:(NSInteger)days
+                                   reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                  NSError * _Nullable error))reply;
 
 - (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
                                            generation:(NSString *)generation

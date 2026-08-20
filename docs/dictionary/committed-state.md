@@ -103,7 +103,7 @@ graph TD
 - [Pre-Authorized Schedule](pre-authorized-schedule.md) - Registered at commit time
 - [Root-Owned Schedule](root-owned-schedule.md) - Current V2 committed segment
 - [Week Offset](week-offset.md) - Commitment is per-week
-- [Emergency Unlock](emergency-unlock.md) - Escape mechanism (costs credits)
+- [Emergency Unlock](emergency-unlock.md) - High-friction escape mechanism
 
 ---
 
@@ -111,7 +111,7 @@ graph TD
 
 - **NOT** the same as "saving" - saves are editable, commits are not
 - **NOT** auto-triggered - requires explicit user action
-- **NOT** reversible within the same week (except via [Emergency Unlock](emergency-unlock.md) which costs finite credits)
+- **NOT** reversible before its deadline through ordinary End (the high-friction [Emergency Unlock](emergency-unlock.md) remains available)
 - **NOT** a single timestamp - includes start date, end date, and status
 
 ---

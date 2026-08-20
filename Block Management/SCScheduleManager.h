@@ -117,6 +117,12 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 - (void)commitRecurringScheduleForDays:(NSInteger)days
                             completion:(void(^)(BOOL verified, NSError * _Nullable error))completion;
 
+/// Adds 1...7 days to the later of the current deadline or now. The helper
+/// caps the remaining lock horizon at 14 days and returns the authoritative
+/// updated deadline.
+- (void)extendRecurringCommitmentByDays:(NSInteger)days
+                              completion:(void(^)(BOOL extended, NSError * _Nullable error))completion;
+
 /// Ends an expired recurring commitment. The daemon enforces deadline and
 /// Protected Hours eligibility before removing the root record.
 - (void)endExpiredRecurringCommitmentWithCompletion:
@@ -132,7 +138,10 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 @property (nonatomic, readonly) NSInteger breakCreditsPerDay;
 @property (nonatomic, readonly) NSInteger breakCreditsRemainingToday;
+@property (nonatomic, readonly) NSInteger emergencyUnlockWaitMinutes;
+@property (nonatomic, readonly) BOOL canEditProtectionSettings;
 - (void)setBreakCreditsPerDay:(NSInteger)allowance;
+- (void)setEmergencyUnlockWaitMinutes:(NSInteger)minutes;
 - (void)reconcileBreakCreditsForDate:(NSDate *)date forceReset:(BOOL)forceReset;
 
 @property (nonatomic, readonly) BOOL protectedHoursEnabled;
@@ -224,17 +233,6 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 /// Clears all data (for testing)
 - (void)clearAllData;
-
-#pragma mark - Emergency Unlock Credits
-
-/// Returns the number of emergency unlock credits remaining (default: 5 for new users)
-- (NSInteger)emergencyUnlockCreditsRemaining;
-
-/// Uses one emergency unlock credit. Returns YES if successful, NO if no credits remaining.
-- (BOOL)useEmergencyUnlockCredit;
-
-/// Resets emergency unlock credits to 5 (DEBUG only)
-- (void)resetEmergencyUnlockCredits;
 
 @end
 

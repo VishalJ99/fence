@@ -276,18 +276,12 @@ static NSDictionary<NSString*, NSDictionary<NSString*, id>*> *SCTelemetryEventSc
                 @"required": @[@"stage", @"store_persisted", @"post_write_match", @"reconcile_succeeded",
                                @"segments_planned", @"segments_stored", @"week_offset", @"error_code"]
             },
-            @"emergency.failed": @{
-                @"enums": @{@"stage": @[@"credit", @"script_write", @"script_execute", @"verification"]},
-                @"unsigned": @[@"credits_remaining"],
-                @"signed": @[@"error_code"],
-                @"required": @[@"stage", @"credits_remaining", @"error_code"]
-            },
             @"emergency.unlock_result": @{
                 @"enums": @{@"outcome": @[@"success", @"script_error", @"verify_failed"]},
                 @"booleans": @[@"settings_cleared", @"hosts_clean", @"pf_check"],
-                @"unsigned": @[@"credits_remaining", @"duration_milliseconds"],
+                @"unsigned": @[@"duration_milliseconds"],
                 @"signed": @[@"apple_script_error_code"],
-                @"required": @[@"outcome", @"credits_remaining", @"settings_cleared",
+                @"required": @[@"outcome", @"settings_cleared",
                                  @"hosts_clean", @"pf_check", @"duration_milliseconds"]
             },
             @"support.diagnostic_snapshot": @{
@@ -1440,8 +1434,7 @@ static NSNumber *SCBooleanForBlockApplyStatus(id value) {
         @"ErrorReportingPromptDismissed", @"SuppressLongBlockWarning",
         @"SuppressRestartFirefoxWarning", @"FirstBlockStarted", @"V4MigrationComplete",
         @"SafetyCheckCompleted", @"SCTestBlock_Completed", @"SCHasEverCommitted",
-        @"SCEmergencyUnlockCreditsInitialized", @"SCIsCommitted",
-        @"SCRepairMigrationPER352CreditsApplied"
+        @"SCIsCommitted"
     ];
     for (NSString* key in booleanKeys) {
         id value = source[key];
@@ -1450,17 +1443,14 @@ static NSNumber *SCBooleanForBlockApplyStatus(id value) {
         }
     }
 
-    NSArray<NSString*>* numericKeys = @[@"BlockDuration", @"MaxBlockLength", @"BlockSound"];
+    NSArray<NSString*>* numericKeys = @[
+        @"BlockDuration", @"MaxBlockLength", @"BlockSound", @"SCEmergencyUnlockWaitMinutes"
+    ];
     for (NSString* key in numericKeys) {
         id value = source[key];
         if ([value isKindOfClass:[NSNumber class]]) {
             safe[key] = value;
         }
-    }
-
-    id credits = source[@"SCEmergencyUnlockCredits"];
-    if ([credits isKindOfClass:[NSNumber class]]) {
-        safe[@"EmergencyUnlockCreditsCount"] = @(MAX(0, [credits integerValue]));
     }
 
     NSArray<NSString*>* versionKeys = @[

@@ -15,10 +15,17 @@ FOUNDATION_EXPORT NSInteger const SCBreakCreditMaximumAllowance;
 /// Clamps a daily break allowance to the supported 0...10 range.
 FOUNDATION_EXPORT NSInteger SCClampBreakCreditAllowance(NSInteger allowance);
 
-/// A surviving commitment permits an allowance decrease but not an increase.
+/// An active commitment freezes the allowance until the commitment is ended.
 FOUNDATION_EXPORT NSInteger SCResolveBreakCreditAllowanceUpdate(NSInteger requestedAllowance,
                                                                  NSInteger currentAllowance,
                                                                  BOOL hasSurvivingCommitment);
+
+FOUNDATION_EXPORT NSInteger const SCEmergencyWaitDefaultMinutes;
+FOUNDATION_EXPORT NSInteger const SCEmergencyWaitMinimumMinutes;
+FOUNDATION_EXPORT NSInteger const SCEmergencyWaitMaximumMinutes;
+
+/// Clamps the emergency-unlock wait to the supported 1...10 minute range.
+FOUNDATION_EXPORT NSInteger SCClampEmergencyWaitMinutes(NSInteger minutes);
 
 /// Reconciles the remaining daily credits against an injected local calendar.
 /// A missing/different reset day or `forceReset` refills to the allowance.

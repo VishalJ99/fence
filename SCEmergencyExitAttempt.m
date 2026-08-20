@@ -21,12 +21,21 @@ static double SCClampOpenUniform(double value) {
 
 NSTimeInterval SCEmergencyExitCheckpointOffsetForUniforms(double firstUniform,
                                                            double secondUniform) {
+    return SCEmergencyExitCheckpointOffsetForUniformsAndDuration(
+        firstUniform, secondUniform, SCEmergencyExitAttemptDuration);
+}
+
+NSTimeInterval SCEmergencyExitCheckpointOffsetForUniformsAndDuration(
+    double firstUniform, double secondUniform, NSTimeInterval duration) {
+    NSTimeInterval resolvedDuration = MAX(60.0, duration);
     double u1 = SCClampOpenUniform(firstUniform);
     double u2 = SCClampOpenUniform(secondUniform);
     double standardNormal = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-    double sampledOffset = 90.0 + (30.0 * standardNormal);
-    return MIN(MAX(sampledOffset, SCEmergencyExitMinimumCheckpointOffset),
-               SCEmergencyExitMaximumCheckpointOffset);
+    double sampledOffset = (resolvedDuration / 2.0) +
+        ((resolvedDuration / 6.0) * standardNormal);
+    NSTimeInterval maximumOffset = resolvedDuration -
+        SCEmergencyExitCheckpointResponseDuration;
+    return MIN(MAX(sampledOffset, SCEmergencyExitMinimumCheckpointOffset), maximumOffset);
 }
 
 static double SCOpenUniformSample(void) {
@@ -35,14 +44,19 @@ static double SCOpenUniformSample(void) {
 }
 
 NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void) {
-    return SCEmergencyExitCheckpointOffsetForUniforms(SCOpenUniformSample(),
-                                                       SCOpenUniformSample());
+    return SCEmergencyExitSampleCheckpointOffsetForDuration(SCEmergencyExitAttemptDuration);
+}
+
+NSTimeInterval SCEmergencyExitSampleCheckpointOffsetForDuration(NSTimeInterval duration) {
+    return SCEmergencyExitCheckpointOffsetForUniformsAndDuration(
+        SCOpenUniformSample(), SCOpenUniformSample(), duration);
 }
 
 @interface SCEmergencyExitAttempt ()
 
 @property (nonatomic, readwrite) SCEmergencyExitAttemptState state;
 @property (nonatomic, readwrite) NSTimeInterval checkpointOffset;
+@property (nonatomic, readwrite) NSTimeInterval attemptDuration;
 @property (nonatomic, readwrite) NSUInteger attemptCount;
 @property (nonatomic, copy) SCEmergencyExitCheckpointProvider checkpointProvider;
 @property (nonatomic) NSTimeInterval startUptime;
@@ -53,8 +67,15 @@ NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void) {
 @implementation SCEmergencyExitAttempt
 
 - (instancetype)initWithCheckpointProvider:(SCEmergencyExitCheckpointProvider)checkpointProvider {
+    return [self initWithDuration:SCEmergencyExitAttemptDuration
+               checkpointProvider:checkpointProvider];
+}
+
+- (instancetype)initWithDuration:(NSTimeInterval)duration
+               checkpointProvider:(SCEmergencyExitCheckpointProvider)checkpointProvider {
     self = [super init];
     if (self) {
+        _attemptDuration = MAX(60.0, duration);
         _checkpointProvider = [checkpointProvider copy];
         _state = SCEmergencyExitAttemptStateWaitingForEligibility;
     }
@@ -69,8 +90,10 @@ NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void) {
 
 - (void)startAtUptime:(NSTimeInterval)uptime {
     NSTimeInterval sampledOffset = self.checkpointProvider();
+    NSTimeInterval maximumCheckpointOffset = self.attemptDuration -
+        SCEmergencyExitCheckpointResponseDuration;
     self.checkpointOffset = MIN(MAX(sampledOffset, SCEmergencyExitMinimumCheckpointOffset),
-                                SCEmergencyExitMaximumCheckpointOffset);
+                                maximumCheckpointOffset);
     self.startUptime = uptime;
     self.checkpointPresentedUptime = 0;
     self.attemptCount += 1;
@@ -137,7 +160,7 @@ NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void) {
     }
 
     if (self.state == SCEmergencyExitAttemptStateRunningAfterCheckpoint &&
-        elapsed >= SCEmergencyExitAttemptDuration) {
+        elapsed >= self.attemptDuration) {
         self.state = SCEmergencyExitAttemptStateCompleted;
         return SCEmergencyExitAttemptTransitionCompleted;
     }
@@ -162,12 +185,12 @@ NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void) {
 
 - (NSInteger)wholeSecondsRemainingAtUptime:(NSTimeInterval)uptime {
     if (self.state == SCEmergencyExitAttemptStateWaitingForEligibility) {
-        return (NSInteger)SCEmergencyExitAttemptDuration;
+        return (NSInteger)self.attemptDuration;
     }
     if (self.state == SCEmergencyExitAttemptStateCompleted) {
         return 0;
     }
-    NSTimeInterval remaining = MAX(0.0, SCEmergencyExitAttemptDuration - [self elapsedAtUptime:uptime]);
+    NSTimeInterval remaining = MAX(0.0, self.attemptDuration - [self elapsedAtUptime:uptime]);
     return (NSInteger)ceil(remaining);
 }
 

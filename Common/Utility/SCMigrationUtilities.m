@@ -264,9 +264,7 @@ static const NSInteger SCFenceDefaultsDomainMigrationVersion = 2;
         exactKeys = [NSSet setWithArray:@[
             @"SCScheduleBundles",
             @"SCCommitmentEndDate",
-            @"SCIsCommitted",
-            @"SCEmergencyUnlockCredits",
-            @"SCEmergencyUnlockCreditsInitialized"
+            @"SCIsCommitted"
         ]];
     });
 
@@ -286,11 +284,8 @@ static const NSInteger SCFenceDefaultsDomainMigrationVersion = 2;
 
     NSMutableDictionary<NSString*, id> *values = [NSMutableDictionary dictionary];
     [legacyDomain enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) {
-        BOOL isCreditKey = [key isEqualToString:@"SCEmergencyUnlockCredits"] ||
-                           [key isEqualToString:@"SCEmergencyUnlockCreditsInitialized"];
         if ([key isKindOfClass:[NSString class]] && value != nil &&
-            [self isFenceScheduleMigrationKey:key] &&
-            (!isCreditKey || currentDomain[key] == nil)) {
+            [self isFenceScheduleMigrationKey:key]) {
             values[key] = value;
         }
     }];

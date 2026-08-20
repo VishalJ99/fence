@@ -68,7 +68,7 @@ The Menu Bar is an `NSStatusItem`-based interface that appears in the macOS menu
 | Commitment info | Info (disabled) | Shows "Committed until [day]" or "No active commitment" |
 | Show Week Schedule | Action | Opens `SCWeekScheduleWindowController` |
 | View Blocklist (X sites, Y apps) | Action | Opens `DomainListWindowController` |
-| Debug Options | Submenu (DEBUG only) | "Disable All Blocking", "Reset Emergency Credits" |
+| Debug Options | Submenu (DEBUG only) | Blocking and schedule test controls |
 
 ---
 
@@ -130,7 +130,6 @@ graph TD
 - [Status Pill](status-pill.md) - The colored status display format (also used in week schedule window)
 - [Committed State](committed-state.md) - Menu bar is primary UI when committed
 - [Bundle](bundle.md) - Each bundle gets a status line in the menu
-- [Emergency Unlock](emergency-unlock.md) - Debug menu can reset credits
 
 ---
 

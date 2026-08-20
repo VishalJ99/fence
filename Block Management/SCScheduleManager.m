@@ -67,11 +67,9 @@ static NSString * const kActiveTimedBreakKey = @"SCActiveTimedBreak";
 static NSString * const kProtectedHoursEnabledKey = @"SCProtectedHoursEnabled";
 static NSString * const kProtectedHoursStartMinuteKey = @"SCProtectedHoursStartMinute";
 static NSString * const kProtectedHoursEndMinuteKey = @"SCProtectedHoursEndMinute";
+static NSString * const kEmergencyUnlockWaitMinutesKey = @"SCEmergencyUnlockWaitMinutes";
 static NSString * const kCommitmentEndDateKey = @"SCCommitmentEndDate";
 static NSString * const kIsCommittedKey = @"SCIsCommitted";
-static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
-static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnlockCreditsInitialized";
-static const NSInteger kDefaultEmergencyUnlockCredits = 5;
 static NSString * const kLastScheduleCommitOutcomeKey = @"SCLastScheduleCommitOutcome";
 static NSString * const kLastScheduleCommitFailureStageKey = @"SCLastScheduleCommitFailureStage";
 static NSString * const SCScheduleCommitErrorDomain = @"org.eyebeam.Fence.ScheduleCommit";
@@ -1681,6 +1679,37 @@ static NSError *SCScheduleCommitError(NSInteger code,
     }];
 }
 
+- (void)extendRecurringCommitmentByDays:(NSInteger)days
+                              completion:(void (^)(BOOL, NSError *))completion {
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil || days < 1 || days > 7) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(41, @"validate",
+            @"Choose an extension from one through seven days.", NO));
+        return;
+    }
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc extendRecurringCommitmentWithID:commitment[@"commitmentID"]
+                               generation:commitment[@"generation"]
+                                     days:days
+                                    reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSDate *lockEndsAt = [result[@"lock_ends_at"] isKindOfClass:[NSDate class]]
+                ? result[@"lock_ends_at"] : nil;
+            BOOL persisted = [result[@"store_persisted"] boolValue] && lockEndsAt != nil;
+            if (persisted) {
+                NSMutableDictionary *updated = [commitment mutableCopy];
+                updated[@"lockEndsAt"] = lockEndsAt;
+                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                [defaults setObject:[updated copy] forKey:kRecurringCommitmentKey];
+                [defaults removeObjectForKey:kActiveTimedBreakKey];
+                [defaults synchronize];
+                [self postChangeNotification];
+            }
+            if (completion != nil) completion(persisted, error);
+        });
+    }];
+}
+
 - (void)refreshRecurringRuntimeStateWithCompletion:
     (void (^)(BOOL, NSError *))completion {
     SCXPCClient *xpc = [SCXPCClient new];
@@ -2785,6 +2814,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
     [defaults removeObjectForKey:kProtectedHoursEnabledKey];
     [defaults removeObjectForKey:kProtectedHoursStartMinuteKey];
     [defaults removeObjectForKey:kProtectedHoursEndMinuteKey];
+    [defaults removeObjectForKey:kEmergencyUnlockWaitMinutesKey];
     for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
         if ([key hasPrefix:kWeekSchedulesPrefix] ||
             [key hasPrefix:kWeekCommitmentPrefix] ||
@@ -2841,12 +2871,33 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (void)setBreakCreditsPerDay:(NSInteger)allowance {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSInteger resolved = SCResolveBreakCreditAllowanceUpdate(
-        allowance, self.breakCreditsPerDay, self.hasRecurringCommitment);
+        allowance, self.breakCreditsPerDay, !self.canEditProtectionSettings);
+    if (resolved == self.breakCreditsPerDay) return;
     [defaults setInteger:resolved forKey:kBreakCreditsPerDayKey];
     NSInteger remaining = MIN(self.breakCreditsRemainingToday, resolved);
     [defaults setInteger:remaining forKey:kBreakCreditsRemainingKey];
     [defaults synchronize];
     [self postChangeNotification];
+}
+
+- (NSInteger)emergencyUnlockWaitMinutes {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kEmergencyUnlockWaitMinutesKey];
+    return value == nil ? SCEmergencyWaitDefaultMinutes :
+        SCClampEmergencyWaitMinutes([value integerValue]);
+}
+
+- (void)setEmergencyUnlockWaitMinutes:(NSInteger)minutes {
+    if (!self.canEditProtectionSettings) return;
+    NSInteger resolved = SCClampEmergencyWaitMinutes(minutes);
+    if (resolved == self.emergencyUnlockWaitMinutes) return;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setInteger:resolved forKey:kEmergencyUnlockWaitMinutesKey];
+    [defaults synchronize];
+    [self postChangeNotification];
+}
+
+- (BOOL)canEditProtectionSettings {
+    return !self.hasRecurringCommitment && !self.hasUnexpiredLegacyCommitment;
 }
 
 - (BOOL)protectedHoursEnabled {
@@ -2877,11 +2928,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (BOOL)canEditProtectedHours {
-    if (!self.hasRecurringCommitment) return YES;
-    SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
-        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
-    return !SCProtectedHoursEditLockIsActive(self.protectedHoursEnabled, range,
-                                             [NSDate date], [NSCalendar currentCalendar]);
+    return self.canEditProtectionSettings;
 }
 
 - (void)saveProtectedHoursEnabled:(BOOL)enabled
@@ -2901,7 +2948,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
                           endMinute:(NSInteger)endMinute
                          completion:(void (^)(BOOL, NSError *))completion {
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(startMinute, endMinute);
-    if (!self.hasRecurringCommitment) {
+    if (self.canEditProtectionSettings) {
         [self saveProtectedHoursEnabled:enabled
                             startMinute:range.startMinute
                               endMinute:range.endMinute];
@@ -2910,30 +2957,9 @@ static NSError *SCScheduleCommitError(NSInteger code,
     }
     if (!self.canEditProtectedHours) {
         if (completion != nil) completion(NO, SCScheduleCommitError(32, @"protected_hours",
-            @"Protected Hours cannot be changed from two hours before they start until they end.", YES));
+            @"Protection settings are locked until the current commitment ends.", YES));
         return;
     }
-    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
-    NSDictionary<NSString *, id> *protectedHours = @{
-        @"enabled": @(enabled),
-        @"startMinute": @(range.startMinute),
-        @"endMinute": @(range.endMinute),
-    };
-    SCXPCClient *xpc = [SCXPCClient new];
-    [xpc updateProtectedHoursForRecurringCommitmentID:commitment[@"commitmentID"]
-                                            generation:commitment[@"generation"]
-                                        protectedHours:protectedHours
-                                                 reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            BOOL persisted = [result[@"store_persisted"] boolValue];
-            if (persisted) {
-                [self saveProtectedHoursEnabled:enabled
-                                    startMinute:range.startMinute
-                                      endMinute:range.endMinute];
-            }
-            if (completion != nil) completion(persisted, error);
-        });
-    }];
 }
 
 - (BOOL)hasActiveTimedBreak {
@@ -3057,45 +3083,6 @@ static NSError *SCScheduleCommitError(NSInteger code,
             if (completion != nil) completion(ended, error);
         });
     }];
-}
-
-#pragma mark - Emergency Unlock Credits
-
-- (NSInteger)emergencyUnlockCreditsRemaining {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-
-    // Initialize credits on first access
-    if (![defaults boolForKey:kEmergencyUnlockCreditsInitializedKey]) {
-        [defaults setInteger:kDefaultEmergencyUnlockCredits forKey:kEmergencyUnlockCreditsKey];
-        [defaults setBool:YES forKey:kEmergencyUnlockCreditsInitializedKey];
-        [defaults synchronize];
-        return kDefaultEmergencyUnlockCredits;
-    }
-
-    return [defaults integerForKey:kEmergencyUnlockCreditsKey];
-}
-
-- (BOOL)useEmergencyUnlockCredit {
-    NSInteger remaining = [self emergencyUnlockCreditsRemaining];
-    if (remaining <= 0) {
-        return NO;
-    }
-
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setInteger:remaining - 1 forKey:kEmergencyUnlockCreditsKey];
-    [defaults synchronize];
-
-    NSLog(@"SCScheduleManager: Used emergency unlock credit. %ld remaining.", (long)(remaining - 1));
-    return YES;
-}
-
-- (void)resetEmergencyUnlockCredits {
-#ifdef DEBUG
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setInteger:kDefaultEmergencyUnlockCredits forKey:kEmergencyUnlockCreditsKey];
-    [defaults synchronize];
-    NSLog(@"SCScheduleManager: Reset emergency unlock credits to %ld (DEBUG)", (long)kDefaultEmergencyUnlockCredits);
-#endif
 }
 
 @end

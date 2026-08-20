@@ -76,7 +76,6 @@ static BOOL const kUseCalendarUI = YES;
 
 // UI Elements
 @property (nonatomic, strong) NSTextField *titleLabel;
-@property (nonatomic, strong) NSTextField *weekLabel;
 @property (nonatomic, strong) NSView *statusView;
 @property (nonatomic, strong) NSStackView *statusStackView;
 @property (nonatomic, strong) SCWeekGridView *weekGridView;
@@ -84,6 +83,7 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, strong) NSButton *addBundleButton;
 @property (nonatomic, strong) NSButton *breakButton;
 @property (nonatomic, strong) NSButton *emergencyUnlockButton;
+@property (nonatomic, strong) NSButton *extendCommitmentButton;
 @property (nonatomic, strong) NSButton *commitButton;
 @property (nonatomic, strong) NSTextField *commitmentLabel;
 
@@ -94,8 +94,6 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, copy, nullable) NSString *focusedBundleID;  // nil = All-Up state
 
 // Week navigation
-@property (nonatomic, strong) NSButton *prevWeekButton;
-@property (nonatomic, strong) NSButton *nextWeekButton;
 @property (nonatomic, assign) NSInteger currentWeekOffset; // 0 = this week, 1 = next week
 @property (nonatomic, assign) NSInteger editingWeekOffset; // Week offset when day editor was opened
 
@@ -124,7 +122,6 @@ static BOOL const kUseCalendarUI = YES;
 @implementation SCWeekScheduleWindowController
 
 static void SCEmitEmergencyUnlockResult(NSString *outcome,
-                                        NSInteger creditsRemaining,
                                         BOOL settingsCleared,
                                         BOOL hostsClean,
                                         BOOL pfClean,
@@ -134,7 +131,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         MAX(0, [[NSDate date] timeIntervalSinceDate:startedAt]) * 1000.0);
     NSMutableDictionary<NSString *, id> *fields = [@{
         @"outcome": outcome,
-        @"credits_remaining": @(MAX(0, creditsRemaining)),
         @"settings_cleared": @(settingsCleared),
         @"hosts_clean": @(hostsClean),
         @"pf_check": @(pfClean),
@@ -204,45 +200,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.titleLabel.drawsBackground = NO;
     self.titleLabel.autoresizingMask = NSViewMinYMargin; // Stay pinned to top
     [contentView addSubview:self.titleLabel];
-
-    // The schedule is a date-independent seven-day template. Keep the existing
-    // navigation controls allocated for layout compatibility, but hide them.
-    CGFloat navX = contentView.bounds.size.width - 390 - padding;
-
-    // Previous week button (This Week)
-    self.prevWeekButton = [[NSButton alloc] initWithFrame:NSMakeRect(navX, y, 90, 24)];
-    self.prevWeekButton.title = @"This Week";
-    self.prevWeekButton.bezelStyle = NSBezelStyleRounded;
-    self.prevWeekButton.font = [NSFont systemFontOfSize:11];
-    self.prevWeekButton.target = self;
-    self.prevWeekButton.action = @selector(navigateToPrevWeek:);
-    self.prevWeekButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
-    self.prevWeekButton.enabled = NO; // Disabled when on current week
-    self.prevWeekButton.hidden = YES;
-    [contentView addSubview:self.prevWeekButton];
-
-    // Week label (center of navigation)
-    self.weekLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(navX + 95, y, 200, 24)];
-    self.weekLabel.alignment = NSTextAlignmentCenter;
-    self.weekLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    self.weekLabel.textColor = [NSColor labelColor];
-    self.weekLabel.bezeled = NO;
-    self.weekLabel.editable = NO;
-    self.weekLabel.drawsBackground = NO;
-    self.weekLabel.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
-    [self updateWeekLabel];
-    [contentView addSubview:self.weekLabel];
-
-    // Next week button
-    self.nextWeekButton = [[NSButton alloc] initWithFrame:NSMakeRect(navX + 300, y, 90, 24)];
-    self.nextWeekButton.title = @"Next Week →";
-    self.nextWeekButton.bezelStyle = NSBezelStyleRounded;
-    self.nextWeekButton.font = [NSFont systemFontOfSize:11];
-    self.nextWeekButton.target = self;
-    self.nextWeekButton.action = @selector(navigateToNextWeek:);
-    self.nextWeekButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
-    self.nextWeekButton.hidden = YES;
-    [contentView addSubview:self.nextWeekButton];
 
     // Status view - use semi-transparent background to work with frosted glass
     y -= 66; // 50px height + 16px gap
@@ -335,7 +292,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     }
 
     // Break, emergency exit, and commitment controls.
-    self.breakButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 160 - 10 - 150, buttonY, 150, 30)];
+    self.breakButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 150 - 10 - 160 - 10 - 150, buttonY, 150, 30)];
     self.breakButton.title = @"Take Break (0)";
     self.breakButton.bezelStyle = NSBezelStyleRounded;
     self.breakButton.target = self;
@@ -345,13 +302,22 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [contentView addSubview:self.breakButton];
 
     // Emergency Unlock button (red, next to commit button)
-    self.emergencyUnlockButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 160, buttonY, 160, 30)];
+    self.emergencyUnlockButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 150 - 10 - 160, buttonY, 160, 30)];
     self.emergencyUnlockButton.bezelStyle = NSBezelStyleRounded;
     self.emergencyUnlockButton.target = self;
     self.emergencyUnlockButton.action = @selector(emergencyUnlockClicked:);
     self.emergencyUnlockButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin; // Stay at bottom-right
-    [self updateEmergencyButtonTitle:@"Emergency Unlock (5)"];
+    [self updateEmergencyButtonTitle:@"Emergency Unlock"];
     [contentView addSubview:self.emergencyUnlockButton];
+
+    self.extendCommitmentButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150 - 10 - 150, buttonY, 150, 30)];
+    self.extendCommitmentButton.title = @"Extend Commitment";
+    self.extendCommitmentButton.bezelStyle = NSBezelStyleRounded;
+    self.extendCommitmentButton.target = self;
+    self.extendCommitmentButton.action = @selector(extendCommitmentClicked:);
+    self.extendCommitmentButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+    self.extendCommitmentButton.hidden = YES;
+    [contentView addSubview:self.extendCommitmentButton];
 
     self.commitButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 150, buttonY, 150, 30)];
     self.commitButton.title = @"Commit";
@@ -544,10 +510,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [self updateCommitmentUI];
 
     // Update week label
-    [self updateWeekLabel];
 
     // Update navigation buttons
-    [self updateNavigationButtons];
 
     if (!kUseCalendarUI) {
         CGFloat contentHeight = 30 + manager.bundles.count * 60;
@@ -801,10 +765,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     BOOL hasRecurringCommitment = manager.hasRecurringCommitment;
 
-    NSInteger emergencyCredits = [manager emergencyUnlockCreditsRemaining];
-    [self updateEmergencyButtonTitle:[NSString stringWithFormat:@"Emergency Unlock (%ld)", (long)emergencyCredits]];
+    self.extendCommitmentButton.hidden = !hasRecurringCommitment;
+    self.extendCommitmentButton.enabled = hasRecurringCommitment;
+
+    [self updateEmergencyButtonTitle:@"Emergency Unlock"];
     self.emergencyUnlockButton.enabled =
-        (hasRecurringCommitment || manager.hasUnexpiredLegacyCommitment) && emergencyCredits > 0;
+        hasRecurringCommitment || manager.hasUnexpiredLegacyCommitment;
 
     NSInteger breakCredits = manager.breakCreditsRemainingToday;
     if (manager.hasActiveTimedBreak) {
@@ -867,11 +833,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     return NO;
 }
 
-- (void)updateWeekLabel {
-    self.currentWeekOffset = 0;
-    self.weekLabel.stringValue = @"Repeats every week";
-}
-
 #pragma mark - Actions
 
 - (void)presentRecurringMigrationChoiceIfNeeded {
@@ -931,22 +892,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [SCTimezoneInfoWindowController showAsSheetForWindow:self.window];
 }
 
-- (void)navigateToPrevWeek:(id)sender {
-    self.currentWeekOffset = 0;
-}
-
-- (void)navigateToNextWeek:(id)sender {
-    self.currentWeekOffset = 0;
-}
-
-- (void)updateNavigationButtons {
-    self.currentWeekOffset = 0;
-    self.prevWeekButton.enabled = NO;
-    self.nextWeekButton.enabled = NO;
-    self.prevWeekButton.hidden = YES;
-    self.nextWeekButton.hidden = YES;
-}
-
 - (void)commitClicked:(id)sender {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
@@ -989,6 +934,59 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
     // Trial still valid or license valid - show confirmation dialog
     [self showCommitConfirmationDialog];
+}
+
+- (void)extendCommitmentClicked:(id)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (!manager.hasRecurringCommitment) return;
+
+    NSDate *now = [NSDate date];
+    NSDate *base = [manager.recurringCommitmentLockEndDate compare:now] == NSOrderedDescending
+        ? manager.recurringCommitmentLockEndDate : now;
+    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSDate *maximum = [calendar dateByAddingUnit:NSCalendarUnitDay value:14 toDate:now options:0];
+    NSInteger maximumDays = 0;
+    for (NSInteger days = 1; days <= 7; days++) {
+        NSDate *candidate = [calendar dateByAddingUnit:NSCalendarUnitDay value:days toDate:base options:0];
+        if (candidate != nil && [candidate compare:maximum] != NSOrderedDescending) maximumDays = days;
+    }
+    if (maximumDays == 0) {
+        NSAlert *limitAlert = [[NSAlert alloc] init];
+        limitAlert.messageText = @"Maximum Commitment Reached";
+        limitAlert.informativeText = @"The commitment is already locked for the maximum 14 days from today.";
+        [limitAlert beginSheetModalForWindow:self.window completionHandler:nil];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Extend Commitment";
+    alert.informativeText = @"Choose how many days to add. Your weekly schedule will still repeat until you explicitly end the commitment.";
+    NSPopUpButton *durationPopUp = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 140, 26)
+                                                              pullsDown:NO];
+    for (NSInteger days = 1; days <= maximumDays; days++) {
+        [durationPopUp addItemWithTitle:[NSString stringWithFormat:@"%ld day%@", (long)days,
+                                          days == 1 ? @"" : @"s"]];
+    }
+    alert.accessoryView = durationPopUp;
+    [alert addButtonWithTitle:@"Extend"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+        NSInteger days = durationPopUp.indexOfSelectedItem + 1;
+        self.extendCommitmentButton.title = @"Extending…";
+        self.extendCommitmentButton.enabled = NO;
+        [manager extendRecurringCommitmentByDays:days completion:^(BOOL extended, NSError *error) {
+            [self reloadData];
+            [self.window makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+            if (extended) return;
+            NSAlert *failureAlert = [[NSAlert alloc] init];
+            failureAlert.messageText = @"Commitment Was Not Extended";
+            failureAlert.informativeText = error.localizedDescription ?: @"Fence could not extend the commitment.";
+            failureAlert.alertStyle = NSAlertStyleCritical;
+            [failureAlert beginSheetModalForWindow:self.window completionHandler:nil];
+        }];
+    }];
 }
 
 - (void)showCommitConfirmationDialog {
@@ -1220,7 +1218,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)emergencyUnlockClicked:(id)sender {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    NSInteger credits = [manager emergencyUnlockCreditsRemaining];
 
     if (self.emergencyExitWindowController != nil) {
         [self.emergencyExitWindowController.window makeKeyAndOrderFront:nil];
@@ -1236,22 +1233,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         return;
     }
 
-    if (credits <= 0) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"No Credits Remaining";
-        alert.informativeText = @"You have used all your emergency unlock credits.";
-        [alert runModal];
-        return;
-    }
-
     // Confirmation dialog
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Begin Emergency Exit?";
     alert.informativeText = [NSString stringWithFormat:
-        @"This starts a three-minute attention check. Fence must remain full screen, foreground, and focused for the entire timer. "
+        @"This starts a %ld-minute attention check. Fence must remain full screen, foreground, and focused for the entire timer. "
         @"One surprise prompt must be confirmed within three seconds or the timer restarts.\n\n"
-        @"Completing the timer ends all blocking and uses 1 of your %ld remaining emergency unlock%@. The credit is used only after cleanup succeeds.",
-        (long)credits, credits == 1 ? @"" : @"s"];
+        @"Completing the timer ends the commitment and removes all blocking.",
+        (long)manager.emergencyUnlockWaitMinutes];
     alert.alertStyle = NSAlertStyleWarning;
     [alert addButtonWithTitle:@"Begin"];
     [alert addButtonWithTitle:@"Cancel"];
@@ -1286,7 +1275,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)performEmergencyUnlock {
-    SCScheduleManager *manager = [SCScheduleManager sharedManager];
     NSDate *startedAt = [NSDate date];
 
     // Get path to emergency.sh in the app bundle or project directory
@@ -1305,7 +1293,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:scriptPath]) {
         SCEmitEmergencyUnlockResult(@"script_error",
-                                    [manager emergencyUnlockCreditsRemaining],
                                     NO, NO, NO, startedAt, @(ENOENT));
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Script Not Found";
@@ -1332,7 +1319,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
 
         SCEmitEmergencyUnlockResult(@"script_error",
-                                    [manager emergencyUnlockCreditsRemaining],
                                     NO, NO, NO, startedAt,
                                     [errorNumber isKindOfClass:[NSNumber class]] ? errorNumber : @(-1));
 
@@ -1355,21 +1341,13 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     BOOL pfClean = [verification containsString:@"pf=1"];
     if (!settingsCleared || !hostsClean || !pfClean) {
         SCEmitEmergencyUnlockResult(@"verify_failed",
-                                    [manager emergencyUnlockCreditsRemaining],
                                     settingsCleared, hostsClean, pfClean, startedAt, nil);
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Emergency Unlock Could Not Be Verified";
-        alert.informativeText = @"Fence did not consume an unlock credit because one or more blocking layers may still be active. Restart Fence and try again or contact support.";
+        alert.informativeText = @"One or more blocking layers may still be active. Restart Fence and try again or contact support.";
         alert.alertStyle = NSAlertStyleCritical;
         [alert runModal];
         return;
-    }
-
-    // Consume a credit only after the root-side teardown postconditions pass.
-    if (![manager useEmergencyUnlockCredit]) {
-        [SCSentry captureTelemetryEvent:@"emergency.failed"
-                                  level:SCTelemetryEventLevelError
-                                 fields:@{@"stage": @"credit", @"credits_remaining": @0, @"error_code": @1}];
     }
 
     // Clear commitment from NSUserDefaults (script clears daemon state, we clear app state)
@@ -1389,13 +1367,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [[NSNotificationCenter defaultCenter] postNotificationName:SCScheduleManagerDidChangeNotification object:nil];
 
     // Show success message
-    NSInteger remaining = [manager emergencyUnlockCreditsRemaining];
-    SCEmitEmergencyUnlockResult(@"success", remaining, YES, YES, YES, startedAt, nil);
+    SCEmitEmergencyUnlockResult(@"success", YES, YES, YES, startedAt, nil);
     NSAlert *successAlert = [[NSAlert alloc] init];
     successAlert.messageText = @"Emergency Unlock Complete";
-    successAlert.informativeText = [NSString stringWithFormat:
-        @"All blocking has been removed.\n\nYou have %ld emergency unlock%@ remaining.",
-        (long)remaining, remaining == 1 ? @"" : @"s"];
+    successAlert.informativeText = @"The commitment ended and all blocking was removed.";
     [successAlert runModal];
 }
 

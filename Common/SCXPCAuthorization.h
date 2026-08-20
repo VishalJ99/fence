@@ -16,12 +16,17 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)authorizationRightForCommand:(SEL)command;
     // For a given command selector, return the associated authorization right name.
 
+/// The distinct Fence-managed rights, independent of how many commands share them.
++ (NSArray<NSString *> *)managedAuthorizationRightNames;
+
+/// Returns YES when any installed Fence-managed rule is missing or stale.
++ (BOOL)authorizationRightsNeedRefresh;
+
 + (void)setupAuthorizationRights:(AuthorizationRef)authRef;
     // Set up the default authorization rights in the authorization database.
 
 + (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error;
-    // Rewrites Fence-managed authorization rights. Used after app updates to
-    // clear stale code requirements tied to older signed builds.
+    // Rewrites each distinct Fence-managed authorization right once.
 
 @end
 

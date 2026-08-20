@@ -8,7 +8,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Programmatic preference pane for break credits and Protected Hours.
+/// Programmatic preference pane for break credits, emergency wait, and Protected Hours.
 @interface PreferencesProtectionViewController : NSViewController <MASPreferencesViewController>
 @end
 

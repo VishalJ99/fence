@@ -122,6 +122,7 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
 + (void)enumerateRightsUsingBlock:(void (^)(NSString * authRightName, id authRightDefault, NSString * authRightDesc))block
     // Calls the supplied block with information about each known authorization right..
 {
+    NSMutableSet<NSString *> *seenRightNames = [NSMutableSet set];
     [self.commandInfo enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
         #pragma unused(key)
         #pragma unused(stop)
@@ -138,6 +139,8 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
 
         authRightName = [commandDict objectForKey:kCommandKeyAuthRightName];
         assert([authRightName isKindOfClass:[NSString class]]);
+        if ([seenRightNames containsObject:authRightName]) return;
+        [seenRightNames addObject:authRightName];
 
         authRightDefault = [commandDict objectForKey:kCommandKeyAuthRightDefault];
         assert(authRightDefault != nil);
@@ -147,6 +150,41 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
 
         block(authRightName, authRightDefault, authRightDesc);
     }];
+}
+
++ (NSArray<NSString *> *)managedAuthorizationRightNames {
+    NSMutableArray<NSString *> *rightNames = [NSMutableArray array];
+    [self enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
+        #pragma unused(authRightDefault)
+        #pragma unused(authRightDesc)
+        [rightNames addObject:authRightName];
+    }];
+    return [rightNames sortedArrayUsingSelector:@selector(compare:)];
+}
+
++ (BOOL)authorizationRightsNeedRefresh {
+    __block BOOL needsRefresh = NO;
+    [self enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
+        #pragma unused(authRightDesc)
+        if (needsRefresh) return;
+        CFDictionaryRef currentDefinition = NULL;
+        OSStatus status = AuthorizationRightGet([authRightName UTF8String], &currentDefinition);
+        if (status != errAuthorizationSuccess || currentDefinition == NULL) {
+            needsRefresh = YES;
+            if (currentDefinition != NULL) CFRelease(currentDefinition);
+            return;
+        }
+        NSDictionary *current = CFBridgingRelease(currentDefinition);
+        NSDictionary *desired = [authRightDefault isKindOfClass:[NSDictionary class]]
+            ? authRightDefault : @{};
+        for (NSString *key in desired) {
+            if (![current[key] isEqual:desired[key]]) {
+                needsRefresh = YES;
+                break;
+            }
+        }
+    }];
+    return needsRefresh;
 }
 
 + (void)setupAuthorizationRights:(AuthorizationRef)authRef
@@ -182,6 +220,33 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
 
 + (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error {
     assert(authRef != NULL);
+
+    NSArray<NSString *> *managedRights = [self managedAuthorizationRightNames];
+    NSMutableArray<NSString *> *removeRightNames = [NSMutableArray arrayWithCapacity:managedRights.count];
+    AuthorizationItem authorizationItems[managedRights.count];
+    for (NSUInteger index = 0; index < managedRights.count; index++) {
+        NSString *removeRightName = [@"config.remove." stringByAppendingString:managedRights[index]];
+        [removeRightNames addObject:removeRightName];
+        authorizationItems[index] = (AuthorizationItem){
+            [removeRightName UTF8String], 0, NULL, 0
+        };
+    }
+    AuthorizationRights removalRights = {
+        (UInt32)managedRights.count, authorizationItems
+    };
+    AuthorizationFlags authorizationFlags = kAuthorizationFlagDefaults |
+        kAuthorizationFlagExtendRights | kAuthorizationFlagInteractionAllowed;
+    OSStatus authorizationStatus = AuthorizationCopyRights(
+        authRef, &removalRights, kAuthorizationEmptyEnvironment,
+        authorizationFlags, NULL);
+    if (authorizationStatus != errAuthorizationSuccess) {
+        if (error) {
+            *error = [NSError errorWithDomain:NSOSStatusErrorDomain
+                                          code:authorizationStatus
+                                      userInfo:nil];
+        }
+        return NO;
+    }
 
     __block BOOL success = YES;
     __block NSError *lastError = nil;

@@ -39,17 +39,27 @@ typedef NSTimeInterval (^SCEmergencyExitCheckpointProvider)(void);
 FOUNDATION_EXPORT NSTimeInterval SCEmergencyExitCheckpointOffsetForUniforms(double firstUniform,
                                                                              double secondUniform);
 
+/// Duration-relative variant. At 180 seconds it is identical to the original
+/// N(90, 30) sample clamped to 45...177 seconds.
+FOUNDATION_EXPORT NSTimeInterval SCEmergencyExitCheckpointOffsetForUniformsAndDuration(
+    double firstUniform, double secondUniform, NSTimeInterval duration);
+
 /// Samples one checkpoint from N(90 seconds, 30 seconds), clamped to 45...177.
 FOUNDATION_EXPORT NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void);
+FOUNDATION_EXPORT NSTimeInterval SCEmergencyExitSampleCheckpointOffsetForDuration(
+    NSTimeInterval duration);
 
 @interface SCEmergencyExitAttempt : NSObject
 
 @property (nonatomic, readonly) SCEmergencyExitAttemptState state;
 @property (nonatomic, readonly) NSTimeInterval checkpointOffset;
+@property (nonatomic, readonly) NSTimeInterval attemptDuration;
 @property (nonatomic, readonly) NSUInteger attemptCount;
 
 - (instancetype)init NS_UNAVAILABLE;
-- (instancetype)initWithCheckpointProvider:(SCEmergencyExitCheckpointProvider)checkpointProvider
+- (instancetype)initWithCheckpointProvider:(SCEmergencyExitCheckpointProvider)checkpointProvider;
+- (instancetype)initWithDuration:(NSTimeInterval)duration
+               checkpointProvider:(SCEmergencyExitCheckpointProvider)checkpointProvider
     NS_DESIGNATED_INITIALIZER;
 
 /// Advances the state using an injected monotonic time and the three conditions
@@ -63,7 +73,7 @@ FOUNDATION_EXPORT NSTimeInterval SCEmergencyExitSampleCheckpointOffset(void);
 /// late and resets the attempt.
 - (SCEmergencyExitAttemptTransition)confirmCheckpointAtUptime:(NSTimeInterval)uptime;
 
-/// Whole seconds shown by the primary 3:00 countdown, rounded up.
+/// Whole seconds shown by the primary countdown, rounded up.
 - (NSInteger)wholeSecondsRemainingAtUptime:(NSTimeInterval)uptime;
 
 /// Whole seconds left to confirm a pending checkpoint, rounded up.

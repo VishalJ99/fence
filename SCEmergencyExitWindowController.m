@@ -6,6 +6,7 @@
 #import "SCEmergencyExitWindowController.h"
 
 #import "SCEmergencyExitAttempt.h"
+#import "Block Management/SCScheduleManager.h"
 
 @interface SCEmergencyExitWindowController ()
 
@@ -21,6 +22,7 @@
 @property (nonatomic, strong) NSButton *checkpointButton;
 @property (nonatomic) BOOL monitoring;
 @property (nonatomic) BOOL finishing;
+@property (nonatomic) NSTimeInterval attemptDuration;
 
 @end
 
@@ -48,8 +50,11 @@
     if (self) {
         _completionHandler = [completionHandler copy];
         _cancellationHandler = [cancellationHandler copy];
-        _attempt = [[SCEmergencyExitAttempt alloc] initWithCheckpointProvider:^NSTimeInterval{
-            return SCEmergencyExitSampleCheckpointOffset();
+        _attemptDuration = [SCScheduleManager sharedManager].emergencyUnlockWaitMinutes * 60.0;
+        NSTimeInterval duration = _attemptDuration;
+        _attempt = [[SCEmergencyExitAttempt alloc] initWithDuration:duration
+                                                checkpointProvider:^NSTimeInterval{
+            return SCEmergencyExitSampleCheckpointOffsetForDuration(duration);
         }];
         [self setupUI];
     }
@@ -85,12 +90,15 @@
     self.window.contentView = rootView;
 
     NSTextField *titleLabel = [self labelWithString:@"Emergency Exit" size:30 weight:NSFontWeightBold];
-    self.countdownLabel = [self labelWithString:@"3:00" size:72 weight:NSFontWeightBold];
+    self.countdownLabel = [self labelWithString:[self countdownStringForSeconds:self.attemptDuration]
+                                           size:72
+                                         weight:NSFontWeightBold];
     self.countdownLabel.font = [NSFont monospacedDigitSystemFontOfSize:72 weight:NSFontWeightBold];
     self.countdownLabel.accessibilityLabel = @"Emergency exit time remaining";
 
-    self.statusLabel = [self labelWithString:
-        @"Fence will enter full screen. The three-minute timer begins only while this window stays foreground and focused."
+    self.statusLabel = [self labelWithString:[NSString stringWithFormat:
+        @"Fence will enter full screen. The %@ timer begins only while this window stays foreground and focused.",
+        [self durationDescription]]
                                                size:16
                                              weight:NSFontWeightMedium];
     self.statusLabel.textColor = NSColor.secondaryLabelColor;
@@ -110,7 +118,7 @@
                                                 action:@selector(cancelClicked:)];
     cancelButton.bezelStyle = NSBezelStyleRounded;
     cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
-    cancelButton.accessibilityHelp = @"Cancels this emergency exit attempt without using a credit.";
+    cancelButton.accessibilityHelp = @"Cancels this emergency exit attempt.";
 
     self.normalStack = [NSStackView stackViewWithViews:@[
         titleLabel,
@@ -175,6 +183,17 @@
         [self.checkpointButton.widthAnchor constraintGreaterThanOrEqualToConstant:300],
         [self.checkpointButton.heightAnchor constraintEqualToConstant:64],
     ]];
+}
+
+- (NSString *)countdownStringForSeconds:(NSTimeInterval)seconds {
+    NSInteger wholeSeconds = MAX(0, (NSInteger)ceil(seconds));
+    return [NSString stringWithFormat:@"%ld:%02ld",
+        (long)(wholeSeconds / 60), (long)(wholeSeconds % 60)];
+}
+
+- (NSString *)durationDescription {
+    NSInteger minutes = MAX(1, (NSInteger)llround(self.attemptDuration / 60.0));
+    return [NSString stringWithFormat:@"%ld-minute", (long)minutes];
 }
 
 - (void)begin {
@@ -266,8 +285,7 @@
 - (void)renderAtUptime:(NSTimeInterval)uptime
              transition:(SCEmergencyExitAttemptTransition)transition {
     NSInteger remaining = [self.attempt wholeSecondsRemainingAtUptime:uptime];
-    self.countdownLabel.stringValue = [NSString stringWithFormat:@"%ld:%02ld",
-        (long)(remaining / 60), (long)(remaining % 60)];
+    self.countdownLabel.stringValue = [self countdownStringForSeconds:remaining];
 
     BOOL checkpointPending = self.attempt.state == SCEmergencyExitAttemptStateCheckpointPending;
     self.checkpointOverlay.hidden = !checkpointPending;
@@ -300,13 +318,19 @@
         case SCEmergencyExitAttemptTransitionReset:
             [self.window makeFirstResponder:nil];
             if (self.attempt.state == SCEmergencyExitAttemptStateWaitingForEligibility) {
-                self.statusLabel.stringValue = @"Attempt reset. Return to this full-screen, focused window to start again from 3:00.";
+                self.statusLabel.stringValue = [NSString stringWithFormat:
+                    @"Attempt reset. Return to this full-screen, focused window to start again from %@.",
+                    [self countdownStringForSeconds:self.attemptDuration]];
             } else {
-                self.statusLabel.stringValue = @"Attempt reset. Starting again from 3:00.";
+                self.statusLabel.stringValue = [NSString stringWithFormat:
+                    @"Attempt reset. Starting again from %@.",
+                    [self countdownStringForSeconds:self.attemptDuration]];
             }
             NSAccessibilityPostNotificationWithUserInfo(NSApp,
                 NSAccessibilityAnnouncementRequestedNotification,
-                @{ NSAccessibilityAnnouncementKey: @"Emergency exit attempt reset to three minutes.",
+                @{ NSAccessibilityAnnouncementKey: [NSString stringWithFormat:
+                       @"Emergency exit attempt reset to %ld minutes.",
+                       (long)MAX(1, (NSInteger)llround(self.attemptDuration / 60.0))],
                    NSAccessibilityPriorityKey: @(NSAccessibilityPriorityHigh) });
             break;
         case SCEmergencyExitAttemptTransitionNone:

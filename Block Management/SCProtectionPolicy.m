@@ -7,6 +7,9 @@
 
 NSInteger const SCBreakCreditDefaultAllowance = 3;
 NSInteger const SCBreakCreditMaximumAllowance = 10;
+NSInteger const SCEmergencyWaitDefaultMinutes = 3;
+NSInteger const SCEmergencyWaitMinimumMinutes = 1;
+NSInteger const SCEmergencyWaitMaximumMinutes = 10;
 
 NSInteger const SCProtectedHoursMinutesPerDay = 24 * 60;
 NSInteger const SCProtectedHoursSnapIntervalMinutes = 15;
@@ -22,7 +25,11 @@ NSInteger SCResolveBreakCreditAllowanceUpdate(NSInteger requestedAllowance,
                                                 BOOL hasSurvivingCommitment) {
     NSInteger requested = SCClampBreakCreditAllowance(requestedAllowance);
     NSInteger current = SCClampBreakCreditAllowance(currentAllowance);
-    return hasSurvivingCommitment ? MIN(requested, current) : requested;
+    return hasSurvivingCommitment ? current : requested;
+}
+
+NSInteger SCClampEmergencyWaitMinutes(NSInteger minutes) {
+    return MIN(MAX(minutes, SCEmergencyWaitMinimumMinutes), SCEmergencyWaitMaximumMinutes);
 }
 
 NSInteger SCReconcileBreakCredits(NSInteger allowance,

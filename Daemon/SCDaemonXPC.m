@@ -699,6 +699,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityRecurringScheduleStore,
               SCDaemonCapabilityRecurringScheduleTimer,
               SCDaemonCapabilityRecurringScheduleBreaks,
+              SCDaemonCapabilityRecurringCommitmentExtend,
           ]);
 }
 
@@ -1644,6 +1645,90 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         result[@"outcome"] = reconciled ? @"verified" : @"stored";
         reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
             subDescription:@"Recurring commitment ended but enforcement reconciliation did not verify"]);
+    }];
+}
+
+- (void)extendRecurringCommitmentWithID:(NSString *)commitmentID
+                              generation:(NSString *)generation
+                                    days:(NSInteger)days
+                                   reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO} mutableCopy];
+    if (!SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation) ||
+        self.clientUID == 0 || days < 1 || days > 7) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid commitment extension"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+    __block NSError *resultError = nil;
+    __block NSDate *newLockEndsAt = nil;
+    __block BOOL postWriteMatch = NO;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(oldRecurring, self.clientUID,
+                                                                     commitmentID, generation);
+        if (commitment == nil) {
+            resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment was not found"];
+        } else {
+            NSDate *now = [NSDate date];
+            NSDate *oldLockEndsAt = commitment[@"lockEndsAt"];
+            NSDate *base = [oldLockEndsAt compare:now] == NSOrderedDescending ? oldLockEndsAt : now;
+            NSCalendar *calendar = SCDaemonRecurringLocalCalendar();
+            newLockEndsAt = [calendar dateByAddingUnit:NSCalendarUnitDay value:days toDate:base options:0];
+            NSDate *maximumLockEndsAt = [calendar dateByAddingUnit:NSCalendarUnitDay value:14 toDate:now options:0];
+            if (newLockEndsAt == nil || maximumLockEndsAt == nil ||
+                [newLockEndsAt compare:maximumLockEndsAt] == NSOrderedDescending) {
+                resultError = [SCErr errorWithCode:403
+                                     subDescription:@"Commitment extension exceeds the 14-day remaining limit"];
+            } else {
+                NSMutableDictionary *updatedCommitment = [commitment mutableCopy];
+                updatedCommitment[@"lockEndsAt"] = newLockEndsAt;
+                NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+                replacement[commitmentID] = [updatedCommitment copy];
+                NSDictionary *oldBreaksValue = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
+                NSDictionary *oldBreaks = [oldBreaksValue isKindOfClass:[NSDictionary class]] ? oldBreaksValue : @{};
+                NSMutableDictionary *replacementBreaks = [oldBreaks mutableCopy];
+                [replacementBreaks removeObjectForKey:commitmentID];
+                [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                [settings setValue:replacementBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                resultError = [settings syncSettingsAndWait:5];
+                if (resultError != nil) {
+                    [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    [settings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                    [settings syncSettingsAndWait:5];
+                } else {
+                    NSDictionary *storedValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    NSDictionary *stored = [storedValue isKindOfClass:[NSDictionary class]]
+                        ? storedValue[commitmentID] : nil;
+                    postWriteMatch = [stored isEqual:updatedCommitment];
+                    if (!postWriteMatch) {
+                        resultError = [SCErr errorWithCode:500
+                                             subDescription:@"Commitment extension did not verify after persistence"];
+                        [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                        [settings setValue:oldBreaks forKey:SCDaemonActiveScheduleBreaksKey];
+                        [settings syncSettingsAndWait:5];
+                    }
+                }
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+    result[@"outcome"] = @"verified";
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @(postWriteMatch);
+    result[@"lock_ends_at"] = newLockEndsAt;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(__unused NSDictionary *schedulerResult) {
+        reply([result copy], nil);
     }];
 }
 

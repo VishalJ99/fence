@@ -49,16 +49,12 @@
 #import "SCLicenseWindowController.h"
 #import <Sparkle/Sparkle.h>
 
-static NSString * const kRepairMigrationPER352CreditsAppliedKey = @"SCRepairMigrationPER352CreditsApplied";
 static NSString * const kRepairMigrationPER352AuthRefreshBuildKey = @"SCRepairMigrationPER352AuthRefreshBuild";
-static NSString * const kEmergencyUnlockCreditsKey = @"SCEmergencyUnlockCredits";
-static NSString * const kEmergencyUnlockCreditsInitializedKey = @"SCEmergencyUnlockCreditsInitialized";
 static NSString * const kDaemonCompatibilityErrorDomain = @"org.eyebeam.Fence.DaemonCompatibility";
 static NSString * const kInstalledDaemonPath = @"/Library/PrivilegedHelperTools/org.eyebeam.selfcontrold";
 static NSString * const kBundledDaemonRelativePath = @"Contents/Library/LaunchServices/org.eyebeam.selfcontrold";
 static NSString * const kTelemetryConsistencyLastSignatureKey = @"SCTelemetryConsistencyLastSignature";
 static NSString * const kTelemetryConsistencyLastEmissionDateKey = @"SCTelemetryConsistencyLastEmissionDate";
-static const NSInteger kRepairMigrationEmergencyUnlockCredits = 5;
 static const NSTimeInterval kTelemetryConsistencySuppressionInterval = 7.0 * 24.0 * 60.0 * 60.0;
 
 typedef NS_ENUM(NSInteger, SCDaemonCompatibilityFailureCode) {
@@ -177,30 +173,23 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 - (void)runPostUpdateRepairMigrations {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-
-    if (![defaults boolForKey:kRepairMigrationPER352CreditsAppliedKey]) {
-        NSInteger existingCredits = [defaults integerForKey:kEmergencyUnlockCreditsKey];
-        BOOL creditsInitialized = [defaults boolForKey:kEmergencyUnlockCreditsInitializedKey];
-        if (!creditsInitialized || existingCredits < kRepairMigrationEmergencyUnlockCredits) {
-            [defaults setInteger:MAX(existingCredits, kRepairMigrationEmergencyUnlockCredits) forKey:kEmergencyUnlockCreditsKey];
-        }
-        [defaults setBool:YES forKey:kEmergencyUnlockCreditsInitializedKey];
-        [defaults setBool:YES forKey:kRepairMigrationPER352CreditsAppliedKey];
-        [defaults synchronize];
-        NSLog(@"AppController: PER-352 repair migration restored emergency credits to at least %ld", (long)kRepairMigrationEmergencyUnlockCredits);
-    }
+    if ([defaults stringForKey:kRepairMigrationPER352AuthRefreshBuildKey].length > 0) return;
 
     NSString *currentBuild = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
-    NSString *lastAuthRefreshBuild = [defaults stringForKey:kRepairMigrationPER352AuthRefreshBuildKey];
-    if (![lastAuthRefreshBuild isEqualToString:currentBuild]) {
-        NSError *authRepairError = nil;
-        if ([self.xpc refreshAuthorizationRights:&authRepairError]) {
-            [defaults setObject:currentBuild forKey:kRepairMigrationPER352AuthRefreshBuildKey];
-            [defaults synchronize];
-            NSLog(@"AppController: Refreshed Fence authorization rights for build %@", currentBuild);
-        } else {
-            NSLog(@"AppController: Failed to refresh Fence authorization rights: %@", authRepairError);
-        }
+    if (![self.xpc authorizationRightsNeedRefresh]) {
+        [defaults setObject:currentBuild forKey:kRepairMigrationPER352AuthRefreshBuildKey];
+        [defaults synchronize];
+        NSLog(@"AppController: PER-352 authorization rights already current");
+        return;
+    }
+
+    NSError *authRepairError = nil;
+    if ([self.xpc refreshAuthorizationRights:&authRepairError]) {
+        [defaults setObject:currentBuild forKey:kRepairMigrationPER352AuthRefreshBuildKey];
+        [defaults synchronize];
+        NSLog(@"AppController: Completed one-time PER-352 authorization repair");
+    } else {
+        NSLog(@"AppController: Failed one-time PER-352 authorization repair: %@", authRepairError);
     }
 }
 
@@ -592,10 +581,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(toggleDebugBlocking:)
                                                  name:@"SCDebugDisableBlockingRequested"
-                                               object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(resetEmergencyCredits:)
-                                                 name:@"SCDebugResetCreditsRequested"
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(triggerSafetyCheck:)
@@ -1872,14 +1857,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     resetCommitmentItem.target = self;
     [debugMenu addItem:resetCommitmentItem];
 
-    // Add "Reset Emergency Credits" item
-    NSMenuItem* resetCreditsItem = [[NSMenuItem alloc]
-        initWithTitle:@"Reset Emergency Credits"
-               action:@selector(resetEmergencyCredits:)
-        keyEquivalent:@""];
-    resetCreditsItem.target = self;
-    [debugMenu addItem:resetCreditsItem];
-
     // Add separator
     [debugMenu addItem:[NSMenuItem separatorItem]];
 
@@ -1993,18 +1970,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
         [doneAlert addButtonWithTitle:@"OK"];
         [doneAlert runModal];
     }
-}
-
-- (IBAction)resetEmergencyCredits:(id)sender {
-    SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    [manager resetEmergencyUnlockCredits];
-
-    NSInteger credits = [manager emergencyUnlockCreditsRemaining];
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Emergency Credits Reset";
-    alert.informativeText = [NSString stringWithFormat:@"Emergency unlock credits have been reset to %ld.\n\n(DEBUG ONLY)", (long)credits];
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem*)menuItem {

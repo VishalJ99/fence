@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)connectToHelperTool;
 - (void)forceDisconnect;
 - (void)installDaemon:(void(^)(NSError*))callback;
+- (BOOL)authorizationRightsNeedRefresh;
 - (BOOL)refreshAuthorizationRights:(NSError **)error;
 - (BOOL)refreshAuthorizationRightsAllowingInteraction:(BOOL)allowInteraction error:(NSError **)error;
 - (void)refreshConnectionAndRun:(void(^)(void))callback;
@@ -113,6 +114,11 @@ supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
                                   generation:(NSString *)generation
                                        reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                       NSError * _Nullable error))reply;
+- (void)extendRecurringCommitmentWithID:(NSString *)commitmentID
+                              generation:(NSString *)generation
+                                    days:(NSInteger)days
+                                   reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                  NSError * _Nullable error))reply;
 - (void)updateProtectedHoursForRecurringCommitmentID:(NSString *)commitmentID
                                            generation:(NSString *)generation
                                        protectedHours:(NSDictionary<NSString *, id> *)protectedHours

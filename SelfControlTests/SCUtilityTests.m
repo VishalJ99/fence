@@ -12,6 +12,7 @@
 #import "SCSettings.h"
 #import "SCBlockEntry.h"
 #import "SCXPCClient.h"
+#import "SCXPCAuthorization.h"
 #import "SCDaemonProtocol.h"
 #import "BlockManager.h"
 #import "HostFileBlocker.h"
@@ -521,6 +522,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleStore,
         SCDaemonCapabilityRecurringScheduleTimer,
         SCDaemonCapabilityRecurringScheduleBreaks,
+        SCDaemonCapabilityRecurringCommitmentExtend,
         @"future-safe-capability-v1",
     ];
 
@@ -547,6 +549,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleStore,
         SCDaemonCapabilityRecurringScheduleTimer,
         SCDaemonCapabilityRecurringScheduleBreaks,
+        SCDaemonCapabilityRecurringCommitmentExtend,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -558,11 +561,15 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
             return ![capability isEqualToString:SCDaemonCapabilityRecurringScheduleBreaks];
         }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRecurringCommitmentExtend];
+        }]],
     ];
     NSArray<NSString*>* expectedReasons = @[
         @"recurring-schedule-store-missing",
         @"recurring-schedule-timer-missing",
         @"recurring-schedule-breaks-missing",
+        @"recurring-commitment-extend-missing",
     ];
 
     for (NSUInteger index = 0; index < missingCapabilities.count; index++) {
@@ -617,8 +624,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         ],
         @"SCWeekSchedules_2026-07-06": @[@{@"start": @"private exact time"}],
         @"SCWeekCommitment_2026-07-06": [NSDate date],
-        @"SCEmergencyUnlockCredits": @4,
-        @"SCEmergencyUnlockCreditsInitialized": @YES,
+        @"SCEmergencyUnlockWaitMinutes": @4,
         @"FenceLicenseCode": @"FENCE-private@example.invalid-secret",
         @"FenceDeviceIdentifierFallback": @"private-device-id",
         @"FenceTrialExpiryDate": [NSDate date]
@@ -632,7 +638,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(sanitized[@"WeekScheduleKeyCount"], @1);
     XCTAssertEqualObjects(sanitized[@"WeekScheduleEntryCount"], @1);
     XCTAssertEqualObjects(sanitized[@"CommitmentWeekCount"], @1);
-    XCTAssertEqualObjects(sanitized[@"EmergencyUnlockCreditsCount"], @4);
+    XCTAssertEqualObjects(sanitized[@"SCEmergencyUnlockWaitMinutes"], @4);
     XCTAssertNil(sanitized[@"Blocklist"]);
     XCTAssertNil(sanitized[@"SCScheduleBundles"]);
     XCTAssertNil(sanitized[@"FenceLicenseCode"]);
@@ -775,7 +781,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(restored[@"SCScheduleBundles"], legacy[@"SCScheduleBundles"]);
     XCTAssertEqualObjects(restored[@"SCWeekSchedules_2026-07-06"], legacy[@"SCWeekSchedules_2026-07-06"]);
     XCTAssertEqualObjects(restored[@"SCWeekCommitment_2026-07-06"], legacy[@"SCWeekCommitment_2026-07-06"]);
-    XCTAssertEqualObjects(restored[@"SCEmergencyUnlockCredits"], @3);
+    XCTAssertNil(restored[@"SCEmergencyUnlockCredits"]);
     XCTAssertNil(restored[@"FenceLicenseCode"]);
     XCTAssertNil(restored[@"EnableErrorReporting"]);
     XCTAssertNil(restored[@"UnrelatedPreference"]);
@@ -1454,7 +1460,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                                       forEventName:@"schedule.commit_store_failed"]);
 
     NSDictionary *verifiedEmergencyUnlock = @{
-        @"outcome": @"success", @"credits_remaining": @4,
+        @"outcome": @"success",
         @"settings_cleared": @YES, @"hosts_clean": @YES, @"pf_check": @YES,
         @"duration_milliseconds": @1200,
     };
@@ -1465,6 +1471,16 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertNil([SCSentry sanitizedTelemetryFields:incompleteEmergencyUnlock
                                       forEventName:@"emergency.unlock_result"]);
     XCTAssertNil([SCSentry sanitizedTelemetryFields:@{} forEventName:@"unknown.event"]);
+}
+
+- (void)testXPCAuthorizationManagedRightsAreDeduplicated {
+    NSSet<NSString *> *rights = [NSSet setWithArray:SCXPCAuthorization.managedAuthorizationRightNames];
+    XCTAssertEqual(rights.count, 2u);
+    NSSet<NSString *> *expectedRights = [NSSet setWithArray:@[
+        @"org.eyebeam.SelfControl.startBlock",
+        @"org.eyebeam.SelfControl.modifyBlock",
+    ]];
+    XCTAssertEqualObjects(rights, expectedRights);
 }
 
 - (void)testXPCAuthorizationRejectionTelemetrySkipsCancellationAndDeduplicatesByCommand {

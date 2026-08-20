@@ -14,12 +14,14 @@
 @property (nonatomic, strong) NSStepper *creditsStepper;
 @property (nonatomic, strong) NSTextField *remainingCreditsLabel;
 @property (nonatomic, strong) NSTextField *creditConstraintLabel;
+@property (nonatomic, strong) NSTextField *emergencyWaitField;
+@property (nonatomic, strong) NSStepper *emergencyWaitStepper;
+@property (nonatomic, strong) NSTextField *emergencyWaitConstraintLabel;
 @property (nonatomic, strong) NSButton *protectedHoursToggle;
 @property (nonatomic, strong) NSDatePicker *protectedStartPicker;
 @property (nonatomic, strong) NSDatePicker *protectedEndPicker;
 @property (nonatomic, strong) NSTextField *protectedHoursStatusLabel;
 @property (nonatomic, assign) BOOL protectedHoursUpdateInFlight;
-@property (nonatomic, assign) BOOL protectedHoursConfirmationInFlight;
 @property (nonatomic, strong, nullable) NSTimer *stateRefreshTimer;
 
 @end
@@ -31,7 +33,7 @@
 }
 
 - (void)loadView {
-    NSView *rootView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 420)];
+    NSView *rootView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 540)];
 
     NSTextField *titleLabel = [NSTextField labelWithString:@"Protection"];
     titleLabel.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
@@ -42,10 +44,11 @@
     summaryLabel.font = [NSFont systemFontOfSize:12];
 
     NSBox *creditsBox = [self breakCreditsBox];
+    NSBox *emergencyWaitBox = [self emergencyWaitBox];
     NSBox *protectedHoursBox = [self protectedHoursBox];
 
     NSStackView *mainStack = [NSStackView stackViewWithViews:@[
-        titleLabel, summaryLabel, creditsBox, protectedHoursBox
+        titleLabel, summaryLabel, creditsBox, emergencyWaitBox, protectedHoursBox
     ]];
     mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     mainStack.alignment = NSLayoutAttributeLeading;
@@ -59,11 +62,64 @@
         [mainStack.topAnchor constraintEqualToAnchor:rootView.topAnchor constant:22],
         [creditsBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
         [creditsBox.heightAnchor constraintEqualToConstant:118],
+        [emergencyWaitBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
+        [emergencyWaitBox.heightAnchor constraintEqualToConstant:104],
         [protectedHoursBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
         [protectedHoursBox.heightAnchor constraintEqualToConstant:188],
     ]];
 
     self.view = rootView;
+}
+
+- (NSBox *)emergencyWaitBox {
+    NSBox *box = [[NSBox alloc] initWithFrame:NSZeroRect];
+    box.title = @"Emergency Unlock";
+    box.boxType = NSBoxPrimary;
+
+    NSTextField *waitLabel = [NSTextField labelWithString:@"Wait duration:"];
+    waitLabel.font = [NSFont systemFontOfSize:13];
+
+    self.emergencyWaitField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.emergencyWaitField.alignment = NSTextAlignmentRight;
+    self.emergencyWaitField.font = [NSFont monospacedDigitSystemFontOfSize:13
+                                                                   weight:NSFontWeightRegular];
+    self.emergencyWaitField.target = self;
+    self.emergencyWaitField.action = @selector(emergencyWaitChanged:);
+    self.emergencyWaitField.cell.sendsActionOnEndEditing = YES;
+    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+    formatter.allowsFloats = NO;
+    formatter.minimum = @(SCEmergencyWaitMinimumMinutes);
+    formatter.maximum = @(SCEmergencyWaitMaximumMinutes);
+    self.emergencyWaitField.formatter = formatter;
+
+    self.emergencyWaitStepper = [[NSStepper alloc] initWithFrame:NSZeroRect];
+    self.emergencyWaitStepper.minValue = SCEmergencyWaitMinimumMinutes;
+    self.emergencyWaitStepper.maxValue = SCEmergencyWaitMaximumMinutes;
+    self.emergencyWaitStepper.increment = 1;
+    self.emergencyWaitStepper.valueWraps = NO;
+    self.emergencyWaitStepper.autorepeat = YES;
+    self.emergencyWaitStepper.target = self;
+    self.emergencyWaitStepper.action = @selector(emergencyWaitChanged:);
+
+    NSTextField *minutesLabel = [NSTextField labelWithString:@"minutes"];
+    minutesLabel.textColor = NSColor.secondaryLabelColor;
+    NSStackView *waitRow = [NSStackView stackViewWithViews:@[
+        waitLabel, self.emergencyWaitField, self.emergencyWaitStepper, minutesLabel
+    ]];
+    waitRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    waitRow.alignment = NSLayoutAttributeCenterY;
+    waitRow.spacing = 8;
+    [self.emergencyWaitField.widthAnchor constraintEqualToConstant:52].active = YES;
+
+    self.emergencyWaitConstraintLabel = [NSTextField wrappingLabelWithString:@""];
+    self.emergencyWaitConstraintLabel.font = [NSFont systemFontOfSize:11];
+    self.emergencyWaitConstraintLabel.textColor = NSColor.secondaryLabelColor;
+
+    NSStackView *content = [NSStackView stackViewWithViews:@[
+        waitRow, self.emergencyWaitConstraintLabel
+    ]];
+    [self installContentStack:content inBox:box];
+    return box;
 }
 
 - (NSBox *)breakCreditsBox {
@@ -241,46 +297,45 @@
 - (void)refreshFromManager {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     NSInteger allowance = manager.breakCreditsPerDay;
-    BOOL commitmentSurvives = manager.hasRecurringCommitment;
+    BOOL canEditSettings = manager.canEditProtectionSettings;
     self.creditsField.integerValue = allowance;
     self.creditsStepper.integerValue = allowance;
-    self.creditsStepper.maxValue = commitmentSurvives ? allowance : 10;
+    self.creditsField.enabled = canEditSettings;
+    self.creditsStepper.enabled = canEditSettings;
+    self.creditsStepper.maxValue = SCBreakCreditMaximumAllowance;
     NSNumberFormatter *formatter = (NSNumberFormatter *)self.creditsField.formatter;
-    formatter.maximum = @(commitmentSurvives ? allowance : 10);
+    formatter.maximum = @(SCBreakCreditMaximumAllowance);
     self.remainingCreditsLabel.stringValue = [NSString stringWithFormat:
         @"%ld of %ld remaining today", (long)manager.breakCreditsRemainingToday, (long)allowance];
-    self.creditConstraintLabel.stringValue = commitmentSurvives
-        ? @"You can lower this allowance now; increases require ending the commitment."
+    self.creditConstraintLabel.stringValue = !canEditSettings
+        ? @"Locked until you end the current commitment."
         : @"Credits refill at local midnight and when a new commitment starts.";
+
+    NSInteger emergencyWaitMinutes = manager.emergencyUnlockWaitMinutes;
+    self.emergencyWaitField.integerValue = emergencyWaitMinutes;
+    self.emergencyWaitStepper.integerValue = emergencyWaitMinutes;
+    self.emergencyWaitField.enabled = canEditSettings;
+    self.emergencyWaitStepper.enabled = canEditSettings;
+    self.emergencyWaitConstraintLabel.stringValue = canEditSettings
+        ? @"The full-screen attention check must remain foreground and focused."
+        : @"Locked until you end the current commitment.";
 
     self.protectedHoursToggle.state = manager.protectedHoursEnabled
         ? NSControlStateValueOn : NSControlStateValueOff;
     self.protectedStartPicker.dateValue = [self dateForMinuteOfDay:manager.protectedHoursStartMinute];
     self.protectedEndPicker.dateValue = [self dateForMinuteOfDay:manager.protectedHoursEndMinute];
 
-    BOOL canEdit = manager.canEditProtectedHours &&
-        !self.protectedHoursUpdateInFlight && !self.protectedHoursConfirmationInFlight;
+    BOOL canEdit = canEditSettings && !self.protectedHoursUpdateInFlight;
     self.protectedHoursToggle.enabled = canEdit;
     // Times stay configurable while the feature is off, so enabling it never
     // traps the user in an unreviewed default range.
     BOOL canEditTimes = canEdit;
     self.protectedStartPicker.enabled = canEditTimes;
     self.protectedEndPicker.enabled = canEditTimes;
-    if (self.protectedHoursConfirmationInFlight) {
-        self.protectedHoursStatusLabel.stringValue = @"Confirm before saving…";
-    } else if (self.protectedHoursUpdateInFlight) {
+    if (self.protectedHoursUpdateInFlight) {
         self.protectedHoursStatusLabel.stringValue = @"Updating…";
-    } else if (!manager.canEditProtectedHours) {
-        SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
-            manager.protectedHoursStartMinute, manager.protectedHoursEndMinute);
-        NSInteger protectedDuration = range.startMinute < range.endMinute
-            ? range.endMinute - range.startMinute
-            : SCProtectedHoursMinutesPerDay - range.startMinute + range.endMinute;
-        BOOL lockedContinuously = protectedDuration + SCProtectedHoursEditLockLeadMinutes >=
-            SCProtectedHoursMinutesPerDay;
-        self.protectedHoursStatusLabel.stringValue = lockedContinuously
-            ? @"Locked until the current commitment ends."
-            : @"Locked from two hours before Protected Hours until they end.";
+    } else if (!canEditSettings) {
+        self.protectedHoursStatusLabel.stringValue = @"Locked until you end the current commitment.";
     } else if (manager.protectedHoursActiveNow) {
         self.protectedHoursStatusLabel.stringValue = @"Active now.";
     } else if (manager.protectedHoursEnabled) {
@@ -291,14 +346,24 @@
 }
 
 - (void)breakAllowanceChanged:(id)sender {
-    NSInteger requested = [sender integerValue];
-    [[SCScheduleManager sharedManager] setBreakCreditsPerDay:requested];
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.canEditProtectionSettings) {
+        [manager setBreakCreditsPerDay:[sender integerValue]];
+    }
+    [self refreshFromManager];
+}
+
+- (void)emergencyWaitChanged:(id)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.canEditProtectionSettings) {
+        [manager setEmergencyUnlockWaitMinutes:[sender integerValue]];
+    }
     [self refreshFromManager];
 }
 
 - (void)protectedHoursChanged:(id)sender {
     #pragma unused(sender)
-    if (self.protectedHoursUpdateInFlight || self.protectedHoursConfirmationInFlight) return;
+    if (self.protectedHoursUpdateInFlight) return;
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     if (!manager.canEditProtectedHours) {
         [self refreshFromManager];
@@ -309,13 +374,6 @@
     NSInteger startMinute = [self minuteOfDayForDate:self.protectedStartPicker.dateValue];
     NSInteger endMinute = [self minuteOfDayForDate:self.protectedEndPicker.dateValue];
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(startMinute, endMinute);
-    BOOL wouldImmediatelyLock = enabled && manager.hasRecurringCommitment &&
-        SCProtectedHoursEditLockIsActive(YES, range, [NSDate date], [NSCalendar currentCalendar]);
-    if (wouldImmediatelyLock) {
-        [self presentImmediateProtectedHoursLockWarningForStartMinute:range.startMinute
-                                                           endMinute:range.endMinute];
-        return;
-    }
     [self performProtectedHoursUpdateEnabled:enabled
                                  startMinute:range.startMinute
                                    endMinute:range.endMinute];
@@ -344,50 +402,6 @@
             if (!updated) [strongSelf presentProtectedHoursError:error];
         });
     }];
-}
-
-- (void)presentImmediateProtectedHoursLockWarningForStartMinute:(NSInteger)startMinute
-                                                       endMinute:(NSInteger)endMinute {
-    self.protectedHoursConfirmationInFlight = YES;
-    [self refreshFromManager];
-
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.timeStyle = NSDateFormatterShortStyle;
-    formatter.dateStyle = NSDateFormatterNoStyle;
-    NSString *endText = [formatter stringFromDate:[self dateForMinuteOfDay:endMinute]];
-    NSInteger protectedDuration = startMinute < endMinute
-        ? endMinute - startMinute
-        : SCProtectedHoursMinutesPerDay - startMinute + endMinute;
-    BOOL locksForEntireDay = protectedDuration + SCProtectedHoursEditLockLeadMinutes >=
-        SCProtectedHoursMinutesPerDay;
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.alertStyle = NSAlertStyleWarning;
-    alert.messageText = @"Protected Hours will lock";
-    alert.informativeText = locksForEntireDay
-        ? @"Saving this range will prevent further Protected Hours changes until you end the current commitment."
-        : [NSString stringWithFormat:
-            @"Saving this range will prevent further Protected Hours changes until %@.", endText];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert addButtonWithTitle:@"Save"];
-
-    __weak typeof(self) weakSelf = self;
-    void (^handleResponse)(NSModalResponse) = ^(NSModalResponse response) {
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf == nil) return;
-        strongSelf.protectedHoursConfirmationInFlight = NO;
-        if (response == NSAlertSecondButtonReturn) {
-            [strongSelf performProtectedHoursUpdateEnabled:YES
-                                               startMinute:startMinute
-                                                 endMinute:endMinute];
-        } else {
-            [strongSelf refreshFromManager];
-        }
-    };
-    if (self.view.window != nil) {
-        [alert beginSheetModalForWindow:self.view.window completionHandler:handleResponse];
-    } else {
-        handleResponse([alert runModal]);
-    }
 }
 
 - (NSInteger)minuteOfDayForDate:(NSDate *)date {

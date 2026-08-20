@@ -534,6 +534,7 @@
         SCDaemonCapabilityRecurringScheduleStore,
         SCDaemonCapabilityRecurringScheduleTimer,
         SCDaemonCapabilityRecurringScheduleBreaks,
+        SCDaemonCapabilityRecurringCommitmentExtend,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent

@@ -18,6 +18,31 @@
     XCTAssertEqualWithAccuracy(SCEmergencyExitCheckpointOffsetForUniforms(0.01, 0.5), 45.0, 0.0001);
 }
 
+- (void)testDurationRelativeSamplerPreservesThreeMinuteDistributionAndBounds {
+    XCTAssertEqualWithAccuracy(
+        SCEmergencyExitCheckpointOffsetForUniformsAndDuration(0.5, 0.25, 180.0),
+        SCEmergencyExitCheckpointOffsetForUniforms(0.5, 0.25), 0.0001);
+    XCTAssertEqualWithAccuracy(
+        SCEmergencyExitCheckpointOffsetForUniformsAndDuration(0.01, 0.5, 60.0),
+        45.0, 0.0001);
+    XCTAssertEqualWithAccuracy(
+        SCEmergencyExitCheckpointOffsetForUniformsAndDuration(0.01, 0.0, 600.0),
+        597.0, 0.0001);
+}
+
+- (void)testConfiguredDurationControlsCompletion {
+    SCEmergencyExitAttempt *attempt = [[SCEmergencyExitAttempt alloc]
+        initWithDuration:60.0 checkpointProvider:^NSTimeInterval{ return 45.0; }];
+    XCTAssertEqual([attempt updateAtUptime:10 applicationActive:YES windowKey:YES fullScreen:YES],
+                   SCEmergencyExitAttemptTransitionStarted);
+    XCTAssertEqual([attempt updateAtUptime:55 applicationActive:YES windowKey:YES fullScreen:YES],
+                   SCEmergencyExitAttemptTransitionCheckpointPresented);
+    XCTAssertEqual([attempt confirmCheckpointAtUptime:56],
+                   SCEmergencyExitAttemptTransitionCheckpointConfirmed);
+    XCTAssertEqual([attempt updateAtUptime:70 applicationActive:YES windowKey:YES fullScreen:YES],
+                   SCEmergencyExitAttemptTransitionCompleted);
+}
+
 - (void)testAttemptStartsOnlyWhenAllEligibilityConditionsAreTrueAndSamplesOnce {
     __block NSUInteger sampleCount = 0;
     SCEmergencyExitAttempt *attempt = [[SCEmergencyExitAttempt alloc]

@@ -39,12 +39,18 @@
     XCTAssertEqual(SCClampBreakCreditAllowance(11), 10);
 }
 
-- (void)testBreakAllowanceCanOnlyDecreaseDuringSurvivingCommitment {
+- (void)testBreakAllowanceIsFrozenDuringSurvivingCommitment {
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(7, 3, NO), 7);
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(7, 3, YES), 3);
-    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(2, 3, YES), 2);
-    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(-5, 3, YES), 0);
+    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(2, 3, YES), 3);
+    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(-5, 3, YES), 3);
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(20, 20, YES), 10);
+}
+
+- (void)testEmergencyWaitClampsToOneThroughTenMinutes {
+    XCTAssertEqual(SCClampEmergencyWaitMinutes(0), 1);
+    XCTAssertEqual(SCClampEmergencyWaitMinutes(3), 3);
+    XCTAssertEqual(SCClampEmergencyWaitMinutes(11), 10);
 }
 
 - (void)testSameLocalDayPreservesSpentCreditsAndClampsOnlyToReducedAllowance {

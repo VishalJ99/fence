@@ -399,6 +399,11 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     }
 }
 
+- (BOOL)authorizationRightsNeedRefresh {
+    [self setupAuthorization];
+    return [SCXPCAuthorization authorizationRightsNeedRefresh];
+}
+
 - (BOOL)refreshAuthorizationRights:(NSError **)error {
     return [self refreshAuthorizationRightsAllowingInteraction:NO error:error];
 }
@@ -414,34 +419,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
         return NO;
     }
 
-    if (allowInteraction) {
-        AuthorizationItem adminRight = {
-            kAuthorizationRightExecute, 0, NULL, 0
-        };
-        AuthorizationRights authRights = {
-            1, &adminRight
-        };
-        AuthorizationFlags flags = kAuthorizationFlagDefaults |
-        kAuthorizationFlagExtendRights |
-        kAuthorizationFlagInteractionAllowed;
-
-        OSStatus status = AuthorizationCopyRights(
-            self->_authRef,
-            &authRights,
-            kAuthorizationEmptyEnvironment,
-            flags,
-            NULL
-        );
-
-        if (status != errAuthorizationSuccess) {
-            NSError *authorizationError = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
-            [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:authorizationError];
-            if (error) {
-                *error = authorizationError;
-            }
-            return NO;
-        }
-    }
+    #pragma unused(allowInteraction)
 
     NSError *refreshError = nil;
     BOOL refreshed = [SCXPCAuthorization refreshAuthorizationRights:self->_authRef error:&refreshError];
@@ -657,6 +635,10 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
     }
     if (![capabilities containsObject:SCDaemonCapabilityRecurringScheduleBreaks]) {
         if (reason != NULL) *reason = @"recurring-schedule-breaks-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringCommitmentExtend]) {
+        if (reason != NULL) *reason = @"recurring-commitment-extend-missing";
         return NO;
     }
     if (reason != NULL) *reason = @"compatible";
@@ -980,6 +962,21 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
         [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
             reply(@{}, proxyError);
         }] endExpiredRecurringCommitmentWithID:commitmentID generation:generation reply:reply];
+    }];
+}
+
+- (void)extendRecurringCommitmentWithID:(NSString *)commitmentID
+                              generation:(NSString *)generation
+                                    days:(NSInteger)days
+                                   reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] extendRecurringCommitmentWithID:commitmentID
+                                 generation:generation
+                                       days:days
+                                      reply:reply];
     }];
 }
 
