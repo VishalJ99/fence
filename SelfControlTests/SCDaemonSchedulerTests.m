@@ -260,6 +260,98 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecurringCommitment(uid_t ow
                   @"The elapsed edit lock must not remove recurring enforcement occurrences");
 }
 
+- (void)testRecurringTimeZoneFieldsAcceptLegacyAndCompleteValidPairsOnly {
+    NSDate *startedAt = [self dateWithYear:2026 month:7 day:1 hour:9 minute:0];
+    NSDictionary *legacyCommitment = SCSchedulerTestRecurringCommitment(501, startedAt,
+        [startedAt dateByAddingTimeInterval:86400], @{
+            @"enabled": @NO, @"startMinute": @1380, @"endMinute": @300,
+        });
+    NSDictionary *(^storeForCommitment)(NSDictionary *) = ^NSDictionary *(NSDictionary *commitment) {
+        return @{SCSchedulerTestCommitmentID: commitment};
+    };
+
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(legacyCommitment) ownerUID:501].count, 1U,
+        @"Records shipped before the additive timezone fields must remain readable for startup pinning");
+
+    NSMutableDictionary *fixedCommitment = [legacyCommitment mutableCopy];
+    fixedCommitment[SCDaemonRecurringTimeZoneIdentifierKey] = @"Europe/London";
+    fixedCommitment[SCDaemonRecurringFollowsLocationTimeZoneKey] = @NO;
+    NSArray *validFixed = [SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(fixedCommitment) ownerUID:501];
+    XCTAssertEqual(validFixed.count, 1U);
+    XCTAssertEqualObjects(validFixed.firstObject[SCDaemonRecurringTimeZoneIdentifierKey],
+                          @"Europe/London");
+    XCTAssertEqualObjects(validFixed.firstObject[SCDaemonRecurringFollowsLocationTimeZoneKey], @NO);
+
+    NSMutableDictionary *automaticCommitment = [fixedCommitment mutableCopy];
+    automaticCommitment[SCDaemonRecurringFollowsLocationTimeZoneKey] = @YES;
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(automaticCommitment) ownerUID:501].count, 1U);
+
+    NSMutableDictionary *missingMode = [legacyCommitment mutableCopy];
+    missingMode[SCDaemonRecurringTimeZoneIdentifierKey] = @"Europe/London";
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(missingMode) ownerUID:501].count, 0U);
+
+    NSMutableDictionary *missingIdentifier = [legacyCommitment mutableCopy];
+    missingIdentifier[SCDaemonRecurringFollowsLocationTimeZoneKey] = @YES;
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(missingIdentifier) ownerUID:501].count, 0U);
+
+    NSMutableDictionary *invalidIdentifier = [fixedCommitment mutableCopy];
+    invalidIdentifier[SCDaemonRecurringTimeZoneIdentifierKey] = @"Mars/Olympus_Mons";
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(invalidIdentifier) ownerUID:501].count, 0U);
+
+    NSMutableDictionary *nonBooleanMode = [fixedCommitment mutableCopy];
+    nonBooleanMode[SCDaemonRecurringFollowsLocationTimeZoneKey] = @1;
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:
+        storeForCommitment(nonBooleanMode) ownerUID:501].count, 0U);
+}
+
+- (void)testStoredRecurringTimeZoneIgnoresChangedLiveFallback {
+    NSDate *startedAt = [self dateWithYear:2026 month:7 day:1 hour:9 minute:0];
+    NSMutableDictionary *commitment = [SCSchedulerTestRecurringCommitment(501, startedAt,
+        [startedAt dateByAddingTimeInterval:86400], @{
+            @"enabled": @NO, @"startMinute": @1380, @"endMinute": @300,
+        }) mutableCopy];
+    commitment[SCDaemonRecurringTimeZoneIdentifierKey] = @"Europe/London";
+    commitment[SCDaemonRecurringFollowsLocationTimeZoneKey] = @NO;
+
+    NSCalendar *withHonoluluFallback = [SCDaemonScheduler
+        calendarForRecurringCommitment:commitment
+                    fallbackTimeZone:[NSTimeZone timeZoneWithName:@"Pacific/Honolulu"]];
+    NSCalendar *withTokyoFallback = [SCDaemonScheduler
+        calendarForRecurringCommitment:commitment
+                    fallbackTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Tokyo"]];
+    XCTAssertEqualObjects(withHonoluluFallback.timeZone.name, @"Europe/London");
+    XCTAssertEqualObjects(withTokyoFallback.timeZone.name, @"Europe/London");
+
+    // 08:30 UTC is 09:30 in London during British Summer Time. A live
+    // Honolulu or Tokyo timezone would not select this Monday 09:00 segment.
+    NSDate *now = [self dateWithYear:2026 month:7 day:13 hour:8 minute:30];
+    NSArray *honoluluFallbackOccurrences = [SCDaemonScheduler
+        recurringOccurrenceRecordsAtDate:now commitments:@[commitment]
+                                calendar:withHonoluluFallback];
+    NSArray *tokyoFallbackOccurrences = [SCDaemonScheduler
+        recurringOccurrenceRecordsAtDate:now commitments:@[commitment]
+                                calendar:withTokyoFallback];
+    NSDictionary *honoluluFallbackDesired = [SCDaemonScheduler desiredScheduleRecordAtDate:now
+        records:honoluluFallbackOccurrences];
+    NSDictionary *tokyoFallbackDesired = [SCDaemonScheduler desiredScheduleRecordAtDate:now
+        records:tokyoFallbackOccurrences];
+    XCTAssertNotNil(honoluluFallbackDesired);
+    XCTAssertEqualObjects(honoluluFallbackDesired[@"approvedStartDate"],
+                          [self dateWithYear:2026 month:7 day:13 hour:8 minute:0]);
+    XCTAssertEqualObjects(honoluluFallbackDesired[@"approvedEndDate"],
+                          [self dateWithYear:2026 month:7 day:13 hour:9 minute:0]);
+    XCTAssertEqualObjects(tokyoFallbackDesired[@"approvedStartDate"],
+                          honoluluFallbackDesired[@"approvedStartDate"]);
+    XCTAssertEqualObjects(tokyoFallbackDesired[@"approvedEndDate"],
+                          honoluluFallbackDesired[@"approvedEndDate"]);
+}
+
 - (void)testProtectedHoursAndTimedBreakUseHalfOpenRuntimeTransitions {
     NSCalendar *calendar = [self utcGregorianCalendar];
     NSDate *startedAt = [self dateWithYear:2026 month:7 day:1 hour:9 minute:0];

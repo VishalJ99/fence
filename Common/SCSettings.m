@@ -449,6 +449,10 @@ static BOOL SCSettingsProtectedHoursAreValid(id candidate) {
             NSDate *startedAt = commitment[@"startedAt"];
             NSDate *lockEndsAt = commitment[@"lockEndsAt"];
             NSArray *segments = commitment[@"segments"];
+            id timeZoneIdentifier = commitment[@"timeZoneIdentifier"];
+            id followsLocationTimeZone = commitment[@"followsLocationTimeZone"];
+            BOOL hasTimeZone = timeZoneIdentifier != nil;
+            BOOL hasLocationMode = followsLocationTimeZone != nil;
             if (!SCSettingsUUIDString(commitmentKey) || commitment == nil ||
                 !SCSettingsIntegerNumberInRange(commitment[@"schemaVersion"], 1) ||
                 [commitment[@"schemaVersion"] integerValue] != 1 ||
@@ -461,6 +465,11 @@ static BOOL SCSettingsProtectedHoursAreValid(id candidate) {
                 !SCSettingsProtectedHoursAreValid(commitment[@"protectedHours"]) ||
                 ![commitment[@"blockSettings"] isKindOfClass:[NSDictionary class]] ||
                 ![segments isKindOfClass:[NSArray class]] || segments.count == 0 || segments.count > 512) return NO;
+            if (hasTimeZone != hasLocationMode ||
+                (hasTimeZone &&
+                 (![timeZoneIdentifier isKindOfClass:[NSString class]] ||
+                  [NSTimeZone timeZoneWithName:timeZoneIdentifier] == nil ||
+                  !SCSettingsNumberIsBoolean(followsLocationTimeZone)))) return NO;
             [owners addObject:owner];
             NSMutableSet<NSString *> *segmentIDs = [NSMutableSet set];
             NSInteger previousEnd = 0;

@@ -54,6 +54,10 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 /// Whether editing is locked (committed state)
 @property (nonatomic, assign) BOOL isCommitted;
 
+/// Root-owned timezone while committed. Nil keeps draft display on the live
+/// system timezone.
+@property (nonatomic, strong, nullable) NSTimeZone *displayTimeZone;
+
 /// Week offset: 0 = current week, 1 = next week
 @property (nonatomic, assign) NSInteger weekOffset;
 

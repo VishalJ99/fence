@@ -26,6 +26,7 @@
 @interface SCDaemonXPC ()
 
 @property (nonatomic, assign, readonly) uid_t clientUID;
+@property (nonatomic, assign, readonly) BOOL clientIsFenceApp;
 @property (nonatomic, strong, readonly) SCTelemetrySpool *telemetrySpool;
 
 - (void)buildSanitizedDaemonSnapshotForExpectedState:(nullable NSDictionary<NSString *, id> *)expectedState
@@ -155,20 +156,9 @@ static NSDictionary<NSString *, id> *SCDaemonValidatedRecurringSegment(id value)
     };
 }
 
-static NSCalendar *SCDaemonRecurringLocalCalendar(void) {
-    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
-    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    calendar.timeZone = [NSTimeZone localTimeZone];
-    calendar.firstWeekday = 2;
-    return calendar;
-}
-
-static BOOL SCDaemonProtectedHoursEditIsLocked(NSDictionary<NSString *, id> *commitment,
-                                                NSDate *date,
-                                                NSCalendar *calendar) {
-    return [SCDaemonScheduler protectedHoursEditLockIsActiveAtDate:date
-                                                         commitment:commitment
-                                                            calendar:calendar];
+static NSCalendar *SCDaemonRecurringCalendar(NSDictionary<NSString *, id> *commitment) {
+    return [SCDaemonScheduler calendarForRecurringCommitment:commitment
+                                            fallbackTimeZone:NSTimeZone.localTimeZone];
 }
 
 static NSDictionary<NSString *, id> *SCDaemonOwnedRecurringCommitment(id value,
@@ -507,10 +497,11 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
 
 @implementation SCDaemonXPC
 
-- (instancetype)initWithClientUID:(uid_t)clientUID {
+- (instancetype)initWithClientUID:(uid_t)clientUID clientIsFenceApp:(BOOL)clientIsFenceApp {
     self = [super init];
     if (self) {
         _clientUID = clientUID;
+        _clientIsFenceApp = clientIsFenceApp;
         _telemetrySpool = [[SCTelemetrySpool alloc] init];
     }
     return self;
@@ -700,6 +691,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityRecurringScheduleTimer,
               SCDaemonCapabilityRecurringScheduleBreaks,
               SCDaemonCapabilityRecurringCommitmentExtend,
+              SCDaemonCapabilityRecurringTimeZone,
           ]);
 }
 
@@ -1415,6 +1407,30 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                              authorization:(NSData *)authData
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self installRecurringCommitmentWithID:commitmentID
+                                 generation:generation
+                                   startedAt:startedAt
+                                  lockEndsAt:lockEndsAt
+                         timeZoneIdentifier:NSTimeZone.localTimeZone.name
+                    followsLocationTimeZone:NO
+                              protectedHours:protectedHours
+                               blockSettings:blockSettings
+                                    segments:segments
+                               authorization:authData
+                                       reply:reply];
+}
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                             authorization:(NSData *)authData
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     NSMutableDictionary<NSString *, id> *result = [@{
         @"schema_version": @1,
         @"outcome": @"failed",
@@ -1435,10 +1451,13 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     }
 
     NSDictionary *validatedHours = SCDaemonValidatedProtectedHours(protectedHours);
+    NSTimeZone *validatedTimeZone = [timeZoneIdentifier isKindOfClass:[NSString class]]
+        ? [NSTimeZone timeZoneWithName:timeZoneIdentifier] : nil;
     BOOL envelopeValid = self.clientUID != 0 && SCDaemonUUIDString(commitmentID) &&
         SCDaemonUUIDString(generation) && [startedAt isKindOfClass:[NSDate class]] &&
         [lockEndsAt isKindOfClass:[NSDate class]] && [lockEndsAt compare:startedAt] == NSOrderedDescending &&
-        validatedHours != nil && [blockSettings isKindOfClass:[NSDictionary class]] &&
+        (!followsLocationTimeZone || self.clientIsFenceApp) &&
+        validatedTimeZone != nil && validatedHours != nil && [blockSettings isKindOfClass:[NSDictionary class]] &&
         [segments isKindOfClass:[NSArray class]] && segments.count > 0 &&
         segments.count <= SCDaemonConsistencyMaximumSchedules;
     if (!envelopeValid) {
@@ -1484,6 +1503,8 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"controllingUID": @(self.clientUID),
         @"startedAt": startedAt,
         @"lockEndsAt": lockEndsAt,
+        SCDaemonRecurringTimeZoneIdentifierKey: validatedTimeZone.name,
+        SCDaemonRecurringFollowsLocationTimeZoneKey: @(followsLocationTimeZone),
         @"protectedHours": validatedHours,
         @"blockSettings": [blockSettings copy],
         @"segments": [validatedSegments copy],
@@ -1584,6 +1605,137 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     }];
 }
 
+- (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
+                                             generation:(NSString *)generation
+                                     timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                                  reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{
+        @"outcome": @"failed",
+        @"store_persisted": @NO,
+        @"post_write_match": @NO,
+        @"reconcile_succeeded": @NO,
+    } mutableCopy];
+    NSTimeZone *timeZone = [timeZoneIdentifier isKindOfClass:[NSString class]]
+        ? [NSTimeZone timeZoneWithName:timeZoneIdentifier] : nil;
+    if (!self.clientIsFenceApp || self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) ||
+        !SCDaemonUUIDString(generation) || timeZone == nil) {
+        reply([result copy], [SCErr errorWithCode:403
+            subDescription:@"Invalid recurring timezone update"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply([result copy], error); }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    __block NSError *resultError = nil;
+    __block BOOL postWriteMatch = NO;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(
+            oldRecurring, self.clientUID, commitmentID, generation);
+        if (commitment == nil) {
+            resultError = [SCErr errorWithCode:403
+                subDescription:@"Recurring commitment was not found"];
+        } else if (![commitment[SCDaemonRecurringFollowsLocationTimeZoneKey] boolValue]) {
+            resultError = [SCErr errorWithCode:403
+                subDescription:@"This commitment uses a fixed timezone"];
+        } else {
+            NSMutableDictionary *updatedCommitment = [commitment mutableCopy];
+            updatedCommitment[SCDaemonRecurringTimeZoneIdentifierKey] = timeZone.name;
+
+            BOOL blockRunning = [settings boolForKey:@"BlockIsRunning"];
+            NSString *activeSource = [settings valueForKey:@"ActiveBlockSource"];
+            NSNumber *activeOwner = [settings valueForKey:@"ActiveBlockControllingUID"];
+            BOOL ownsActiveRecurring = blockRunning &&
+                [activeSource isEqual:SCDaemonActiveBlockSourceSchedulerRecurring] &&
+                activeOwner.unsignedIntValue == self.clientUID;
+            if (ownsActiveRecurring) {
+                BOOL activeIdentityMatches =
+                    [[settings valueForKey:@"ActiveScheduleCommitmentID"] isEqual:commitmentID] &&
+                    [[settings valueForKey:@"ActiveScheduleGeneration"] isEqual:generation];
+                if (!activeIdentityMatches) {
+                    resultError = [SCErr errorWithCode:409
+                        subDescription:@"The active recurring policy could not be verified"];
+                } else {
+                    NSCalendar *calendar = SCDaemonRecurringCalendar(updatedCommitment);
+                    NSArray *occurrences = [SCDaemonScheduler
+                        recurringOccurrenceRecordsAtDate:[NSDate date]
+                                             commitments:@[[updatedCommitment copy]]
+                                                 calendar:calendar];
+                    NSDictionary *desired = [SCDaemonScheduler
+                        desiredScheduleRecordAtDate:[NSDate date] records:occurrences];
+                    NSDictionary *activeState = @{
+                        @"block_running": @(blockRunning),
+                        @"block_end_date": [settings valueForKey:@"BlockEndDate"] ?: NSNull.null,
+                        @"active_block_source": activeSource ?: @"unknown",
+                        @"active_schedule_id": [settings valueForKey:@"ActiveScheduleID"] ?: @"",
+                        @"active_commitment_id": [settings valueForKey:@"ActiveScheduleCommitmentID"] ?: @"",
+                        @"active_generation": [settings valueForKey:@"ActiveScheduleGeneration"] ?: @"",
+                        @"active_policy_revision": [settings valueForKey:@"ActiveSchedulePolicyRevision"] ?: @"",
+                        @"active_blocklist": [settings valueForKey:@"ActiveBlocklist"] ?: @[],
+                        @"active_is_allowlist": @([settings boolForKey:@"ActiveBlockAsWhitelist"]),
+                        @"active_owner_uid": activeOwner ?: @0,
+                    };
+                    if (desired != nil &&
+                        ![SCDaemonScheduler activeState:activeState matchesRecord:desired]) {
+                        resultError = [SCErr errorWithCode:409
+                            subDescription:@"Timezone update is waiting for a safe schedule boundary"];
+                    }
+                }
+            }
+
+            if (resultError == nil) {
+                if ([commitment[SCDaemonRecurringTimeZoneIdentifierKey] isEqual:timeZone.name]) {
+                    postWriteMatch = YES;
+                } else {
+                    NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+                    replacement[commitmentID] = [updatedCommitment copy];
+                    [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    resultError = [settings syncSettingsAndWait:5];
+                    if (resultError == nil) {
+                        NSDictionary *storedValue = [settings
+                            valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+                        NSDictionary *stored = [storedValue isKindOfClass:[NSDictionary class]]
+                            ? storedValue[commitmentID] : nil;
+                        postWriteMatch = [stored isEqual:updatedCommitment];
+                        if (!postWriteMatch) {
+                            resultError = [SCErr errorWithCode:500
+                                subDescription:@"Recurring timezone did not verify after persistence"];
+                        }
+                    }
+                    if (resultError != nil) {
+                        [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                        [settings syncSettingsAndWait:5];
+                    }
+                }
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @(postWriteMatch);
+    result[@"time_zone_identifier"] = timeZone.name;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"
+                                                    completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+            subDescription:@"Timezone saved but enforcement reconciliation did not verify"]);
+    }];
+}
+
 - (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
                                   generation:(NSString *)generation
                                        reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
@@ -1613,7 +1765,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
             resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment is still locked"];
         } else if ([SCDaemonScheduler protectedHoursAreActiveAtDate:now
                                                          commitment:commitment
-                                                            calendar:SCDaemonRecurringLocalCalendar()]) {
+                                                            calendar:SCDaemonRecurringCalendar(commitment)]) {
             resultError = [SCErr errorWithCode:403 subDescription:@"Protected Hours are active"];
         } else {
             NSDictionary *oldBreaksValue = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
@@ -1679,7 +1831,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
             NSDate *now = [NSDate date];
             NSDate *oldLockEndsAt = commitment[@"lockEndsAt"];
             NSDate *base = [oldLockEndsAt compare:now] == NSOrderedDescending ? oldLockEndsAt : now;
-            NSCalendar *calendar = SCDaemonRecurringLocalCalendar();
+            NSCalendar *calendar = SCDaemonRecurringCalendar(commitment);
             newLockEndsAt = [calendar dateByAddingUnit:NSCalendarUnitDay value:days toDate:base options:0];
             NSDate *maximumLockEndsAt = [calendar dateByAddingUnit:NSCalendarUnitDay value:14 toDate:now options:0];
             if (newLockEndsAt == nil || maximumLockEndsAt == nil ||
@@ -1759,37 +1911,13 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                                                      commitmentID, generation);
         if (commitment == nil) {
             resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment was not found"];
-        } else if (SCDaemonProtectedHoursEditIsLocked(commitment, [NSDate date],
-                                                       SCDaemonRecurringLocalCalendar())) {
-            resultError = [SCErr errorWithCode:403
-                                 subDescription:@"Protected Hours cannot be edited during the lock window"];
         } else {
-            NSMutableDictionary *updatedCommitment = [commitment mutableCopy];
-            updatedCommitment[@"protectedHours"] = validatedHours;
-            NSMutableDictionary *replacement = [oldRecurring mutableCopy];
-            replacement[commitmentID] = [updatedCommitment copy];
-            [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
-            resultError = [settings syncSettingsAndWait:5];
-            if (resultError != nil) {
-                [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
-                [settings syncSettingsAndWait:5];
-            }
+            resultError = [SCErr errorWithCode:403
+                                 subDescription:@"Protected Hours are locked until the recurring commitment ends"];
         }
     }
     [SCDaemonBlockMethods.daemonMethodLock unlock];
-    if (resultError != nil) {
-        reply([result copy], resultError);
-        return;
-    }
-    result[@"store_persisted"] = @YES;
-    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation" completion:^(NSDictionary *schedulerResult) {
-        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
-            [schedulerResult[@"status"] isEqual:@"deferred"];
-        result[@"reconcile_succeeded"] = @(reconciled);
-        result[@"outcome"] = reconciled ? @"verified" : @"stored";
-        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
-            subDescription:@"Protected Hours saved but reconciliation did not verify"]);
-    }];
+    reply([result copy], resultError);
 }
 
 - (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID
@@ -1838,7 +1966,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
             resultError = [SCErr errorWithCode:403 subDescription:@"A timed break is already active"];
         } else if ([SCDaemonScheduler protectedHoursAreActiveAtDate:now
                                                          commitment:commitment
-                                                            calendar:SCDaemonRecurringLocalCalendar()]) {
+                                                            calendar:SCDaemonRecurringCalendar(commitment)]) {
             resultError = [SCErr errorWithCode:403 subDescription:@"Protected Hours are active"];
         } else {
             NSDate *endsAt = [now dateByAddingTimeInterval:durationMinutes * 60.0];
@@ -1979,7 +2107,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     }
     BOOL protectedActive = [SCDaemonScheduler protectedHoursAreActiveAtDate:now
                                                                  commitment:commitment
-                                                                    calendar:SCDaemonRecurringLocalCalendar()];
+                                                                    calendar:SCDaemonRecurringCalendar(commitment)];
     NSDictionary *breaks = [settings valueForKey:SCDaemonActiveScheduleBreaksKey];
     NSDictionary *activeBreak = [SCDaemonScheduler activeBreakAtDate:now value:breaks
                                                              ownerUID:self.clientUID commitment:commitment];
@@ -1992,6 +2120,9 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"lock_ends_at": commitment[@"lockEndsAt"],
         @"lock_active": @(lockActive),
         @"protected_hours": commitment[@"protectedHours"],
+        @"time_zone_identifier": commitment[SCDaemonRecurringTimeZoneIdentifierKey] ?:
+            NSTimeZone.localTimeZone.name,
+        @"follows_location_time_zone": @([commitment[SCDaemonRecurringFollowsLocationTimeZoneKey] boolValue]),
         @"protected_hours_active": @(protectedActive),
         @"break_active": @(activeBreak != nil),
         @"can_end_expired": @(!lockActive && !protectedActive),

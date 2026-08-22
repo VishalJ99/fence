@@ -16,6 +16,8 @@ FOUNDATION_EXPORT NSString * const SCDaemonScheduleCommitmentIDKey;
 FOUNDATION_EXPORT NSString * const SCDaemonScheduleGenerationKey;
 FOUNDATION_EXPORT NSString * const SCDaemonSchedulePolicyRevisionKey;
 FOUNDATION_EXPORT NSString * const SCDaemonScheduleSourceBundleIDsKey;
+FOUNDATION_EXPORT NSString * const SCDaemonRecurringTimeZoneIdentifierKey;
+FOUNDATION_EXPORT NSString * const SCDaemonRecurringFollowsLocationTimeZoneKey;
 
 FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceManual;
 FOUNDATION_EXPORT NSString * const SCDaemonActiveBlockSourceTest;
@@ -67,6 +69,12 @@ typedef void (^SCDaemonSchedulerAnomalyHandler)(NSDictionary<NSString *, id> *fi
 /// Validates owner-scoped recurring commitment envelopes from the root store.
 + (NSArray<NSDictionary<NSString *, id> *> *)validRecurringCommitmentsFromValue:(id)value
                                                                         ownerUID:(uid_t)ownerUID;
+
+/// Returns a Monday-first Gregorian calendar rooted in the commitment's
+/// accepted timezone. Legacy records without timezone fields use the supplied
+/// fallback solely until the startup pinning migration persists them.
++ (NSCalendar *)calendarForRecurringCommitment:(nullable NSDictionary<NSString *, id> *)commitment
+                              fallbackTimeZone:(NSTimeZone *)fallbackTimeZone;
 
 /// Materializes the previous/current/next local-week occurrences used by the
 /// absolute-record selector. Supplying a calendar makes DST behavior directly

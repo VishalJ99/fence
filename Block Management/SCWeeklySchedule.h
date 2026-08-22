@@ -80,14 +80,21 @@ typedef NS_ENUM(NSInteger, SCDayOfWeek) {
 /// Checks if the bundle should be ALLOWED (not blocked) at current time
 - (BOOL)isAllowedNow;
 
+/// Calendar-aware variants used while a recurring commitment is pinned to a
+/// root-owned timezone. Draft callers can keep using the convenience methods.
+- (BOOL)isAllowedAtDate:(NSDate *)date calendar:(NSCalendar *)calendar;
+
 /// Checks if the bundle should be ALLOWED at a specific day and time
 - (BOOL)isAllowedOnDay:(SCDayOfWeek)day atMinutes:(NSInteger)minutesFromMidnight;
 
 /// Returns the next state change time (when allowed -> blocked or blocked -> allowed)
 - (nullable NSDate *)nextStateChangeDate;
+- (nullable NSDate *)nextStateChangeDateAfterDate:(NSDate *)date
+                                         calendar:(NSCalendar *)calendar;
 
 /// Returns human-readable status for current state
 - (NSString *)currentStatusString;
+- (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar;
 
 /// Total allowed minutes for a specific day
 - (NSInteger)totalAllowedMinutesForDay:(SCDayOfWeek)day;

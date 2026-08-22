@@ -21,6 +21,7 @@
 #import "Common/SCSentry.h"
 #import "SCMiscUtilities.h"
 #import "SCLicenseWindowController.h"
+#import "SCTravelTimezoneManager.h"
 #include <errno.h>
 
 #pragma mark - SCHoverableLinkButton (Private)
@@ -114,6 +115,7 @@ static BOOL const kUseCalendarUI = YES;
 // Periodic refresh timer for active break countdown and NOW/status updates
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @property (nonatomic, assign) NSUInteger refreshTickCount;
+@property (nonatomic, assign) NSInteger renderedCalendarDayKey;
 
 // Prevent the migration choice sheet from being presented more than once at a time.
 @property (nonatomic, assign) BOOL migrationChoiceAlertPresented;
@@ -468,6 +470,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)systemDidWake:(NSNotification *)note {
     // Refresh UI after wake from sleep - NOW line position and status may have changed
     dispatch_async(dispatch_get_main_queue(), ^{
+        [[SCTravelTimezoneManager sharedManager] startIfEnabled];
         [self reloadData];
         // Force calendar grid to redraw NOW line
         [self.calendarGridView setNeedsDisplay:YES];
@@ -477,6 +480,19 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)refreshTimerFired:(NSTimer *)timer {
     self.refreshTickCount++;
     [self updateCommitmentUI];
+    NSCalendar *displayCalendar = [NSCalendar currentCalendar];
+    if (self.calendarGridView.displayTimeZone != nil) {
+        displayCalendar.timeZone = self.calendarGridView.displayTimeZone;
+    }
+    NSDateComponents *day = [displayCalendar components:(NSCalendarUnitYear |
+                                                          NSCalendarUnitMonth |
+                                                          NSCalendarUnitDay)
+                                                fromDate:[NSDate date]];
+    NSInteger dayKey = day.year * 10000 + day.month * 100 + day.day;
+    if (dayKey != self.renderedCalendarDayKey) {
+        [self reloadData];
+        return;
+    }
     if (self.refreshTickCount % 300 == 0) {
         [self updateStatusLabel];
     }
@@ -510,6 +526,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         self.calendarGridView.schedules = scheduleDict;
         self.calendarGridView.focusedBundleID = self.focusedBundleID;
         self.calendarGridView.isCommitted = editingLocked;
+        self.calendarGridView.displayTimeZone = manager.hasRecurringCommitment
+            ? [NSTimeZone timeZoneWithName:manager.recurringTimeZoneIdentifier] : nil;
+        NSCalendar *displayCalendar = [NSCalendar currentCalendar];
+        if (self.calendarGridView.displayTimeZone != nil) {
+            displayCalendar.timeZone = self.calendarGridView.displayTimeZone;
+        }
+        NSDateComponents *day = [displayCalendar components:(NSCalendarUnitYear |
+                                                              NSCalendarUnitMonth |
+                                                              NSCalendarUnitDay)
+                                                    fromDate:[NSDate date]];
+        self.renderedCalendarDayKey = day.year * 10000 + day.month * 100 + day.day;
         self.calendarGridView.showOnlyRemainingDays = NO;
         self.calendarGridView.weekOffset = 0;
         [self.calendarGridView reloadData];
@@ -964,7 +991,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     NSDate *now = [NSDate date];
     NSDate *base = [manager.recurringCommitmentLockEndDate compare:now] == NSOrderedDescending
         ? manager.recurringCommitmentLockEndDate : now;
-    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSCalendar *calendar = [[NSCalendar alloc]
+        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.timeZone = [NSTimeZone timeZoneWithName:manager.recurringTimeZoneIdentifier] ?:
+        NSTimeZone.localTimeZone;
     NSDate *maximum = [calendar dateByAddingUnit:NSCalendarUnitDay value:14 toDate:now options:0];
     NSInteger maximumDays = 0;
     for (NSInteger days = 1; days <= 7; days++) {
@@ -1036,7 +1066,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
     }
 
-    alert.informativeText = @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. Editing and bundle changes stay locked until you end it; the selected period controls when End first becomes available.";
+    SCTravelTimezoneManager *travelManager = [SCTravelTimezoneManager sharedManager];
+    NSString *commitTimeZoneIdentifier = travelManager.isEnabled
+        ? travelManager.lastResolvedTimeZoneIdentifier : NSTimeZone.localTimeZone.name;
+    NSString *timezoneSummary = travelManager.isEnabled
+        ? [NSString stringWithFormat:@"Location Services will update its timezone while you travel (currently %@).",
+            commitTimeZoneIdentifier ?: @"still resolving"]
+        : [NSString stringWithFormat:@"It will stay on %@; plan destination-time blocks before committing.",
+            commitTimeZoneIdentifier ?: @"your current timezone"];
+    alert.informativeText = [NSString stringWithFormat:
+        @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. Editing and bundle changes stay locked until you end it; the selected period controls when End first becomes available. %@",
+        timezoneSummary];
 
     CGFloat accessoryHeight = bundlesWithNoAllowBlocks.count > 0 ? 78 : 30;
     NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, accessoryHeight)];
@@ -1076,12 +1116,28 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [self removeCmdQMonitor];
 
         if (returnCode == NSAlertFirstButtonReturn) {
+            SCTravelTimezoneManager *currentTravelManager = [SCTravelTimezoneManager sharedManager];
+            BOOL followsLocationTimeZone = currentTravelManager.isEnabled;
+            NSString *timeZoneIdentifier = followsLocationTimeZone
+                ? currentTravelManager.lastResolvedTimeZoneIdentifier : NSTimeZone.localTimeZone.name;
+            if (followsLocationTimeZone &&
+                (currentTravelManager.status != SCTravelTimezoneStatusReady ||
+                 [NSTimeZone timeZoneWithName:timeZoneIdentifier] == nil)) {
+                NSAlert *locationAlert = [[NSAlert alloc] init];
+                locationAlert.messageText = @"Timezone Still Resolving";
+                locationAlert.informativeText = @"Wait for Location Services to resolve your timezone, or turn automatic travel mode off before committing.";
+                [locationAlert beginSheetModalForWindow:self.window completionHandler:nil];
+                return;
+            }
             self.commitButton.title = @"Committing…";
             self.commitButton.enabled = NO;
             self.commitmentLabel.stringValue = @"Saving with the Fence helper";
             NSInteger days = durationPopUp.indexOfSelectedItem + 1;
             __weak typeof(self) weakSelf = self;
-            [manager commitRecurringScheduleForDays:days completion:^(BOOL verified, NSError *error) {
+            [manager commitRecurringScheduleForDays:days
+                                  timeZoneIdentifier:timeZoneIdentifier
+                             followsLocationTimeZone:followsLocationTimeZone
+                                         completion:^(BOOL verified, NSError *error) {
                 typeof(self) strongSelf = weakSelf;
                 if (strongSelf == nil) return;
 

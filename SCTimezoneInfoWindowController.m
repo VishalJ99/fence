@@ -4,6 +4,8 @@
 //
 
 #import "SCTimezoneInfoWindowController.h"
+#import "SCTravelTimezoneManager.h"
+#import "Block Management/SCScheduleManager.h"
 
 #pragma mark - SCTimezoneInfoContentView (Private)
 
@@ -56,6 +58,11 @@
 
 @interface SCTimezoneInfoWindowController ()
 @property (nonatomic, strong) NSButton *okButton;
+@property (nonatomic, strong) NSButton *travelModeCheckbox;
+@property (nonatomic, strong) NSTextField *activeTitleLabel;
+@property (nonatomic, strong) NSTextField *activeDetailLabel;
+@property (nonatomic, strong) NSTextField *locationStatusLabel;
+@property (nonatomic, strong) NSButton *openLocationSettingsButton;
 @property (nonatomic, strong) id clickOutsideMonitor;
 @end
 
@@ -63,19 +70,21 @@
 
 + (void)showAsSheetForWindow:(NSWindow *)parentWindow {
     SCTimezoneInfoWindowController *controller = [[SCTimezoneInfoWindowController alloc] init];
-    [parentWindow beginSheet:controller.window completionHandler:^(NSModalResponse returnCode) {
+    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
+    [[SCTravelTimezoneManager sharedManager] requestAuthorizationFromUserInteraction];
+    [parentWindow beginSheet:controller.window completionHandler:^(NSModalResponse __unused returnCode) {
         [controller removeClickOutsideMonitor];
     }];
     [controller setupClickOutsideMonitor];
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(0, 0, 400, 310);
+    NSRect frame = NSMakeRect(0, 0, 500, 470);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
-    window.title = @"Timezone Information";
+    window.title = @"Travelling";
 
     // Use custom content view that handles Cmd+Q
     SCTimezoneInfoContentView *customContentView = [[SCTimezoneInfoContentView alloc] initWithFrame:frame];
@@ -84,107 +93,231 @@
     self = [super initWithWindow:window];
     if (self) {
         [self setupUI];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+               selector:@selector(travelTimezoneDidChange:)
+                   name:SCTravelTimezoneManagerDidChangeNotification
+                 object:nil];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+               selector:@selector(travelTimezoneDidChange:)
+                   name:SCScheduleManagerDidChangeNotification
+                 object:nil];
+        [self refreshUI];
     }
     return self;
 }
 
 - (void)setupUI {
     NSView *contentView = self.window.contentView;
-    CGFloat padding = 20;
-    CGFloat y = contentView.bounds.size.height - padding;
 
-    // Title
-    y -= 28;
-    NSTextField *titleLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding, y, contentView.bounds.size.width - padding * 2, 24)];
-    titleLabel.stringValue = @"Planning to Travel?";
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 12.0;
+    [contentView addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:24.0],
+        [stack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-24.0],
+        [stack.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:22.0],
+        [stack.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-20.0],
+    ]];
+
+    NSTextField *titleLabel = [NSTextField labelWithString:@"Planning to travel?"];
     titleLabel.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
-    titleLabel.textColor = [NSColor labelColor];
-    titleLabel.bezeled = NO;
-    titleLabel.editable = NO;
-    titleLabel.drawsBackground = NO;
-    [contentView addSubview:titleLabel];
+    [stack addArrangedSubview:titleLabel];
 
-    // Explanation text
-    y -= 16;
-    NSString *infoText = @"Block schedules are locked to your Mac's current timezone at the moment you commit. "
-        @"This prevents bypassing blocks by changing your system timezone.\n\n"
-        @"If you're traveling to a different timezone, you have two options:";
-
-    NSTextField *explainLabel = [NSTextField wrappingLabelWithString:infoText];
-    explainLabel.frame = NSMakeRect(padding, y - 70, contentView.bounds.size.width - padding * 2, 70);
+    NSTextField *explainLabel = [NSTextField wrappingLabelWithString:
+        @"Fence can follow your timezone using approximate location, so changing your Mac's timezone cannot move you outside your committed blocks."];
     explainLabel.font = [NSFont systemFontOfSize:13];
-    explainLabel.textColor = [NSColor labelColor];
-    [contentView addSubview:explainLabel];
-    y -= 80;
+    [stack addArrangedSubview:explainLabel];
+    [explainLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
-    // Option 1
-    y -= 10;
-    NSTextField *option1Title = [[NSTextField alloc] initWithFrame:NSMakeRect(padding, y, contentView.bounds.size.width - padding * 2, 18)];
-    option1Title.stringValue = @"Option 1: Adjust your block times manually";
-    option1Title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    option1Title.textColor = [NSColor labelColor];
-    option1Title.bezeled = NO;
-    option1Title.editable = NO;
-    option1Title.drawsBackground = NO;
-    [contentView addSubview:option1Title];
+    self.travelModeCheckbox = [NSButton checkboxWithTitle:
+        @"Use Location Services to update my timezone while travelling"
+                                                  target:self
+                                                  action:@selector(travelModeChanged:)];
+    [stack addArrangedSubview:self.travelModeCheckbox];
+    [self.travelModeCheckbox.heightAnchor constraintGreaterThanOrEqualToConstant:40.0].active = YES;
 
-    y -= 20;
-    NSTextField *option1Detail = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 16, y, contentView.bounds.size.width - padding * 2 - 16, 18)];
-    option1Detail.stringValue = @"e.g., add +3 hours if the destination is 3 hours ahead";
-    option1Detail.font = [NSFont systemFontOfSize:12];
-    option1Detail.textColor = [NSColor secondaryLabelColor];
-    option1Detail.bezeled = NO;
-    option1Detail.editable = NO;
-    option1Detail.drawsBackground = NO;
-    [contentView addSubview:option1Detail];
+    self.activeTitleLabel = [NSTextField labelWithString:@""];
+    self.activeTitleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    [stack addArrangedSubview:self.activeTitleLabel];
 
-    // Option 2
-    y -= 28;
-    NSTextField *option2Title = [[NSTextField alloc] initWithFrame:NSMakeRect(padding, y, contentView.bounds.size.width - padding * 2, 18)];
-    option2Title.stringValue = @"Option 2: Change your Mac's timezone before committing";
-    option2Title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    option2Title.textColor = [NSColor labelColor];
-    option2Title.bezeled = NO;
-    option2Title.editable = NO;
-    option2Title.drawsBackground = NO;
-    [contentView addSubview:option2Title];
+    self.activeDetailLabel = [NSTextField wrappingLabelWithString:@""];
+    self.activeDetailLabel.font = [NSFont systemFontOfSize:12];
+    self.activeDetailLabel.textColor = [NSColor secondaryLabelColor];
+    [stack addArrangedSubview:self.activeDetailLabel];
+    [self.activeDetailLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
-    y -= 20;
-    NSTextField *option2Detail = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 16, y, contentView.bounds.size.width - padding * 2 - 16, 18)];
-    option2Detail.stringValue = @"Set it to your destination timezone in System Settings";
-    option2Detail.font = [NSFont systemFontOfSize:12];
-    option2Detail.textColor = [NSColor secondaryLabelColor];
-    option2Detail.bezeled = NO;
-    option2Detail.editable = NO;
-    option2Detail.drawsBackground = NO;
-    [contentView addSubview:option2Detail];
+    self.locationStatusLabel = [NSTextField wrappingLabelWithString:@""];
+    self.locationStatusLabel.font = [NSFont systemFontOfSize:12];
+    self.locationStatusLabel.textColor = [NSColor secondaryLabelColor];
+    [stack addArrangedSubview:self.locationStatusLabel];
+    [self.locationStatusLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
-    // Happy Travels sign-off
-    y -= 28;
-    NSTextField *signOff = [[NSTextField alloc] initWithFrame:NSMakeRect(padding, y, contentView.bounds.size.width - padding * 2, 18)];
-    signOff.stringValue = @"Happy Travels!";
-    signOff.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    signOff.textColor = [NSColor secondaryLabelColor];
-    signOff.bezeled = NO;
-    signOff.editable = NO;
-    signOff.drawsBackground = NO;
-    [contentView addSubview:signOff];
+    self.openLocationSettingsButton = [NSButton buttonWithTitle:@"Open Location Settings"
+                                                         target:self
+                                                         action:@selector(openLocationSettingsClicked:)];
+    self.openLocationSettingsButton.bezelStyle = NSBezelStyleRounded;
+    [stack addArrangedSubview:self.openLocationSettingsButton];
+    [self.openLocationSettingsButton.heightAnchor constraintGreaterThanOrEqualToConstant:40.0].active = YES;
 
-    // OK button at bottom
-    self.okButton = [[NSButton alloc] initWithFrame:NSMakeRect(contentView.bounds.size.width - padding - 80, padding, 80, 30)];
+    NSTextField *privacyLabel = [NSTextField wrappingLabelWithString:
+        @"Fence uses Apple's Location Services only to resolve a timezone. Fence does not store your coordinates or send them to Fence."];
+    privacyLabel.font = [NSFont systemFontOfSize:11];
+    privacyLabel.textColor = [NSColor tertiaryLabelColor];
+    [stack addArrangedSubview:privacyLabel];
+    [privacyLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+
+    NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
+    separator.boxType = NSBoxSeparator;
+    [stack addArrangedSubview:separator];
+    [separator.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+
+    NSTextField *manualTitle = [NSTextField labelWithString:@"Prefer not to use Location Services?"];
+    manualTitle.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    [stack addArrangedSubview:manualTitle];
+
+    NSTextField *manualDetail = [NSTextField wrappingLabelWithString:
+        @"Plan ahead before committing: shift your blocks to match your destination's local time. Without automatic travel mode, the schedule stays on the timezone used when you commit."];
+    manualDetail.font = [NSFont systemFontOfSize:12];
+    manualDetail.textColor = [NSColor secondaryLabelColor];
+    [stack addArrangedSubview:manualDetail];
+    [manualDetail.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+
+    NSView *buttonRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    buttonRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:buttonRow];
+    [buttonRow.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    [buttonRow.heightAnchor constraintEqualToConstant:40.0].active = YES;
+
+    self.okButton = [NSButton buttonWithTitle:@"Got It"
+                                       target:self
+                                       action:@selector(okClicked:)];
+    self.okButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.okButton.title = @"Got It";
     self.okButton.bezelStyle = NSBezelStyleRounded;
     self.okButton.keyEquivalent = @"\r"; // Enter key
-    self.okButton.target = self;
-    self.okButton.action = @selector(okClicked:);
-    [contentView addSubview:self.okButton];
+    [buttonRow addSubview:self.okButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.okButton.trailingAnchor constraintEqualToAnchor:buttonRow.trailingAnchor],
+        [self.okButton.topAnchor constraintEqualToAnchor:buttonRow.topAnchor],
+        [self.okButton.bottomAnchor constraintEqualToAnchor:buttonRow.bottomAnchor],
+        [self.okButton.widthAnchor constraintGreaterThanOrEqualToConstant:88.0],
+    ]];
+}
+
+- (void)refreshUI {
+    SCScheduleManager *scheduleManager = [SCScheduleManager sharedManager];
+    SCTravelTimezoneManager *travelManager = [SCTravelTimezoneManager sharedManager];
+    BOOL hasCommitment = scheduleManager.hasRecurringCommitment;
+    BOOL followsLocation = hasCommitment &&
+        scheduleManager.recurringCommitmentFollowsLocationTimeZone;
+
+    self.travelModeCheckbox.hidden = hasCommitment;
+    self.travelModeCheckbox.state = travelManager.isEnabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.activeTitleLabel.hidden = !hasCommitment;
+    self.activeDetailLabel.hidden = !hasCommitment;
+
+    if (hasCommitment) {
+        NSString *identifier = scheduleManager.recurringTimeZoneIdentifier;
+        if (followsLocation) {
+            self.activeTitleLabel.stringValue = @"Automatic timezone tracking is active";
+            self.activeDetailLabel.stringValue = identifier.length > 0
+                ? [NSString stringWithFormat:
+                    @"Your schedule currently uses %@. Travel mode is locked until you end this commitment.",
+                    identifier]
+                : @"Travel mode is locked until you end this commitment.";
+        } else {
+            self.activeTitleLabel.stringValue = @"This commitment stays on its starting timezone";
+            self.activeDetailLabel.stringValue = identifier.length > 0
+                ? [NSString stringWithFormat:
+                    @"Your schedule uses %@. Automatic travel mode cannot be turned on until you end this commitment.",
+                    identifier]
+                : @"Automatic travel mode cannot be turned on until you end this commitment.";
+        }
+    }
+
+    BOOL showLocationStatus = followsLocation || (!hasCommitment && travelManager.isEnabled);
+    self.locationStatusLabel.hidden = !showLocationStatus;
+    self.openLocationSettingsButton.hidden = YES;
+    self.openLocationSettingsButton.title = @"Open Location Settings";
+
+    if (showLocationStatus) {
+        NSString *identifier = travelManager.lastResolvedTimeZoneIdentifier;
+        switch (travelManager.status) {
+            case SCTravelTimezoneStatusReady:
+                if (followsLocation && identifier.length > 0 &&
+                    ![identifier isEqualToString:scheduleManager.recurringTimeZoneIdentifier]) {
+                    self.locationStatusLabel.stringValue = [NSString stringWithFormat:
+                        @"Location Services resolved %@. Fence is still using %@ until the helper can safely apply the update.",
+                        identifier, scheduleManager.recurringTimeZoneIdentifier];
+                } else {
+                    if (identifier.length > 0) {
+                        self.locationStatusLabel.stringValue = [NSString stringWithFormat:
+                            @"Location Services resolved your timezone as %@.", identifier];
+                    } else if (followsLocation) {
+                        self.locationStatusLabel.stringValue = [NSString stringWithFormat:
+                            @"Fence is using %@ while it waits for a fresh Location Services update.",
+                            scheduleManager.recurringTimeZoneIdentifier];
+                    } else {
+                        self.locationStatusLabel.stringValue = @"Fence needs a fresh Location Services update before it can commit.";
+                    }
+                }
+                break;
+            case SCTravelTimezoneStatusNeedsAuthorization:
+                self.locationStatusLabel.stringValue = @"Allow Location Services to let Fence resolve your timezone.";
+                self.openLocationSettingsButton.title = @"Allow Location Access";
+                self.openLocationSettingsButton.hidden = NO;
+                break;
+            case SCTravelTimezoneStatusUnavailable:
+                if (followsLocation) identifier = scheduleManager.recurringTimeZoneIdentifier;
+                self.locationStatusLabel.stringValue = identifier.length > 0
+                    ? [NSString stringWithFormat:
+                        @"Location Services is unavailable. Fence will keep using %@ until it can resolve another timezone.",
+                        identifier]
+                    : @"Location Services is unavailable. Turn it on so Fence can resolve your timezone.";
+                self.openLocationSettingsButton.hidden = NO;
+                break;
+            case SCTravelTimezoneStatusResolving:
+                self.locationStatusLabel.stringValue = @"Resolving your timezone…";
+                break;
+            case SCTravelTimezoneStatusDisabled:
+                self.locationStatusLabel.stringValue = @"";
+                break;
+        }
+    }
+}
+
+- (void)travelModeChanged:(NSButton *)sender {
+    SCTravelTimezoneManager *manager = [SCTravelTimezoneManager sharedManager];
+    [manager setEnabled:sender.state == NSControlStateValueOn];
+    [self refreshUI];
+}
+
+- (void)openLocationSettingsClicked:(id)sender {
+    SCTravelTimezoneManager *manager = [SCTravelTimezoneManager sharedManager];
+    if (manager.status == SCTravelTimezoneStatusNeedsAuthorization) {
+        [manager requestAuthorizationFromUserInteraction];
+        return;
+    }
+    NSURL *url = [NSURL URLWithString:
+        @"x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"];
+    if (url != nil) [[NSWorkspace sharedWorkspace] openURL:url];
+}
+
+- (void)travelTimezoneDidChange:(NSNotification *)notification {
+    [self refreshUI];
 }
 
 - (void)setupClickOutsideMonitor {
     __weak typeof(self) weakSelf = self;
     self.clickOutsideMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *event) {
         NSWindow *sheet = weakSelf.window;
-        NSPoint windowLocation = [event locationInWindow];
 
         // Check if click is outside the sheet
         if (event.window == sheet.sheetParent) {
@@ -210,6 +343,11 @@
     if (parent) {
         [parent endSheet:sheet];
     }
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self removeClickOutsideMonitor];
 }
 
 @end

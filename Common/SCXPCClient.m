@@ -620,7 +620,7 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
                    capabilities:(NSArray<NSString*>*)capabilities
 supportsRecurringSchedulesWithReason:(NSString**)reason {
-    if (protocolVersion < SCDaemonProtocolVersionRecurringScheduler) {
+    if (protocolVersion < SCDaemonProtocolVersionRecurringTimeZone) {
         if (reason != NULL) *reason = @"recurring-scheduler-protocol-too-old";
         return NO;
     }
@@ -639,6 +639,10 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
     }
     if (![capabilities containsObject:SCDaemonCapabilityRecurringCommitmentExtend]) {
         if (reason != NULL) *reason = @"recurring-commitment-extend-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringTimeZone]) {
+        if (reason != NULL) *reason = @"recurring-time-zone-missing";
         return NO;
     }
     if (reason != NULL) *reason = @"compatible";
@@ -917,6 +921,28 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                              blockSettings:(NSDictionary<NSString *,id> *)blockSettings
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self installRecurringCommitmentWithID:commitmentID
+                                 generation:generation
+                                   startedAt:startedAt
+                                  lockEndsAt:lockEndsAt
+                         timeZoneIdentifier:NSTimeZone.localTimeZone.name
+                    followsLocationTimeZone:NO
+                              protectedHours:protectedHours
+                               blockSettings:blockSettings
+                                    segments:segments
+                                       reply:reply];
+}
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
                                  NSString *marketingVersion, NSArray<NSString *> *capabilities,
                                  NSError *handshakeError) {
@@ -942,6 +968,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                      generation:generation
                                        startedAt:startedAt
                                       lockEndsAt:lockEndsAt
+                              timeZoneIdentifier:timeZoneIdentifier
+                         followsLocationTimeZone:followsLocationTimeZone
                                   protectedHours:protectedHours
                                    blockSettings:blockSettings
                                         segments:segments
@@ -951,6 +979,21 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                 reply([result isKindOfClass:[NSDictionary class]] ? result : @{}, error);
             }];
         }];
+    }];
+}
+
+- (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
+                                             generation:(NSString *)generation
+                                     timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                                  reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] updateLocationTimeZoneForRecurringCommitmentID:commitmentID
+                                                generation:generation
+                                        timeZoneIdentifier:timeZoneIdentifier
+                                                     reply:reply];
     }];
 }
 

@@ -127,11 +127,14 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
 @property (nonatomic, strong) id sessionObserver;
 @property (nonatomic, strong) id clockObserver;
 @property (nonatomic, strong) id timezoneObserver;
+@property (nonatomic) BOOL recurringTimezonePinPersistencePending;
 
 @property (nonatomic, strong) SCFileWatcher* hostsFileWatcher;
 @property (nonatomic, strong) id settingsLoadFailureObserver;
 
 - (void)recordSettingsLoadFailure:(NSDictionary<NSString *, id> *)fields;
+- (void)pinLegacyRecurringCommitmentTimeZonesIfNeeded;
+- (void)scheduleLegacyRecurringTimeZonePinPersistenceRetry;
 
 @end
 
@@ -216,6 +219,7 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
             [weakSelf recordSettingsLoadFailure:notification.userInfo];
         }];
     }
+    [self pinLegacyRecurringCommitmentTimeZonesIfNeeded];
     [self.listener resume];
 
     // if there's any evidence of a block (i.e. an official one running,
@@ -262,6 +266,64 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
             [SCDaemonBlockMethods checkBlockIntegrity];
         }
     }];
+}
+
+- (void)pinLegacyRecurringCommitmentTimeZonesIfNeeded {
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) return;
+    NSDictionary *oldValue = [settings valueForKey:@"ApprovedRecurringScheduleCommitments"];
+    NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+    if (oldRecurring.count == 0) return;
+
+    NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+    __block BOOL changed = NO;
+    [oldRecurring enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+        if (![key isKindOfClass:[NSString class]] || ![value isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *commitment = value;
+        if (commitment[SCDaemonRecurringTimeZoneIdentifierKey] != nil ||
+            commitment[SCDaemonRecurringFollowsLocationTimeZoneKey] != nil) return;
+        NSArray *valid = [SCDaemonScheduler validRecurringCommitmentsFromValue:@{key: commitment}
+                                                                      ownerUID:0];
+        if (valid.count != 1) return;
+        NSMutableDictionary *updated = [commitment mutableCopy];
+        updated[SCDaemonRecurringTimeZoneIdentifierKey] = NSTimeZone.localTimeZone.name;
+        updated[SCDaemonRecurringFollowsLocationTimeZoneKey] = @NO;
+        replacement[key] = [updated copy];
+        changed = YES;
+    }];
+    if (!changed) return;
+
+    [settings setValue:[replacement copy] forKey:@"ApprovedRecurringScheduleCommitments"];
+    NSError *error = [settings syncSettingsAndWait:5];
+    if (error != nil) {
+        // Keep the pinned replacement authoritative in memory so this daemon
+        // never falls back to the mutable system timezone. Retry persisting the
+        // current settings under the normal daemon mutation lock.
+        SCDaemonLogError(@"Could not pin legacy recurring commitment timezone", error);
+        self.recurringTimezonePinPersistencePending = YES;
+        [self scheduleLegacyRecurringTimeZonePinPersistenceRetry];
+    }
+}
+
+- (void)scheduleLegacyRecurringTimeZonePinPersistenceRetry {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf == nil || !strongSelf.recurringTimezonePinPersistencePending) return;
+        if (![SCDaemonBlockMethods lockOrTimeout:nil]) {
+            [strongSelf scheduleLegacyRecurringTimeZonePinPersistenceRetry];
+            return;
+        }
+        NSError *retryError = [[SCSettings sharedSettings] syncSettingsAndWait:5];
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        if (retryError == nil) {
+            strongSelf.recurringTimezonePinPersistencePending = NO;
+        } else {
+            SCDaemonLogError(@"Could not retry legacy recurring timezone pin persistence", retryError);
+            [strongSelf scheduleLegacyRecurringTimeZonePinPersistenceRetry];
+        }
+    });
 }
 
 - (void)startCheckupTimer {
@@ -459,13 +521,17 @@ static void SCDaemonRecordXPCConnectionRejection(uid_t uid,
         return NO;
     }
 
+    BOOL clientIsFenceApp = SCDaemonCodeSatisfiesRequirement(
+        guest, CFSTR("anchor apple generic and identifier \"org.eyebeam.Fence\""));
+
     CFRelease(guest);
     CFRelease(isSelfControlApp);
 
     // The same immutable audit token used for signature validation is also the
     // authority for per-user telemetry isolation. No XPC argument can select
     // or impersonate a different UID.
-    SCDaemonXPC* scdXPC = [[SCDaemonXPC alloc] initWithClientUID:clientUID];
+    SCDaemonXPC* scdXPC = [[SCDaemonXPC alloc] initWithClientUID:clientUID
+                                               clientIsFenceApp:clientIsFenceApp];
     newConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol: @protocol(SCDaemonProtocol)];
     newConnection.exportedObject = scdXPC;
 

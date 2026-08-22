@@ -21,7 +21,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionScheduleExecutionSource = 4,
     SCDaemonProtocolVersionRootScheduler = 5,
     SCDaemonProtocolVersionRecurringScheduler = 6,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringScheduler,
+    SCDaemonProtocolVersionRecurringTimeZone = 7,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringTimeZone,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -37,6 +38,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityRecurringScheduleTimer @"recurring-schedule-timer-v1"
 #define SCDaemonCapabilityRecurringScheduleBreaks @"recurring-schedule-breaks-v1"
 #define SCDaemonCapabilityRecurringCommitmentExtend @"recurring-commitment-extend-v1"
+#define SCDaemonCapabilityRecurringTimeZone @"recurring-time-zone-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -220,6 +222,30 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
                              authorization:(NSData *)authData
                                      reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                     NSError * _Nullable error))reply;
+
+/// Installs a recurring commitment whose local-wall-time interpretation is
+/// rooted in `timeZoneIdentifier`. Location-following permission is immutable
+/// for the commitment lifetime; coordinates never cross this interface.
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *, id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             authorization:(NSData *)authData
+                                     reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                    NSError * _Nullable error))reply;
+
+/// Updates only the timezone of an owner-matching location-following
+/// commitment. A fixed commitment cannot be converted after Commit.
+- (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
+                                             generation:(NSString *)generation
+                                     timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                                  reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                                 NSError * _Nullable error))reply;
 
 /// Ends only the caller's exact recurring commitment, and only after its edit
 /// lock has expired while Protected Hours is inactive.

@@ -181,14 +181,17 @@
 #pragma mark - Schedule Queries
 
 - (BOOL)isAllowedNow {
-    SCDayOfWeek today = [SCWeeklySchedule today];
-
     NSCalendar *calendar = [NSCalendar currentCalendar];
-    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute)
-                                               fromDate:[NSDate date]];
-    NSInteger minutesFromMidnight = components.hour * 60 + components.minute;
+    return [self isAllowedAtDate:[NSDate date] calendar:calendar];
+}
 
-    return [self isAllowedOnDay:today atMinutes:minutesFromMidnight];
+- (BOOL)isAllowedAtDate:(NSDate *)date calendar:(NSCalendar *)calendar {
+    NSDateComponents *components = [calendar
+        components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
+          fromDate:date];
+    SCDayOfWeek day = (SCDayOfWeek)(components.weekday - 1);
+    NSInteger minutesFromMidnight = components.hour * 60 + components.minute;
+    return [self isAllowedOnDay:day atMinutes:minutesFromMidnight];
 }
 
 - (BOOL)isAllowedOnDay:(SCDayOfWeek)day atMinutes:(NSInteger)minutesFromMidnight {
@@ -210,12 +213,17 @@
 }
 
 - (nullable NSDate *)nextStateChangeDate {
-    BOOL currentlyAllowed = [self isAllowedNow];
-    SCDayOfWeek today = [SCWeeklySchedule today];
-
     NSCalendar *calendar = [NSCalendar currentCalendar];
-    NSDateComponents *nowComponents = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute)
-                                                  fromDate:[NSDate date]];
+    return [self nextStateChangeDateAfterDate:[NSDate date] calendar:calendar];
+}
+
+- (nullable NSDate *)nextStateChangeDateAfterDate:(NSDate *)date
+                                         calendar:(NSCalendar *)calendar {
+    BOOL currentlyAllowed = [self isAllowedAtDate:date calendar:calendar];
+    NSDateComponents *nowComponents = [calendar
+        components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
+          fromDate:date];
+    SCDayOfWeek today = (SCDayOfWeek)(nowComponents.weekday - 1);
     NSInteger currentMinutes = nowComponents.hour * 60 + nowComponents.minute;
 
     // Search for next state change within the next 7 days
@@ -236,10 +244,9 @@
 
             if (allowedAtMinute != currentlyAllowed) {
                 // Found a state change
-                NSDate *todayDate = [NSDate date];
                 NSDate *targetDate = [calendar dateByAddingUnit:NSCalendarUnitDay
                                                           value:dayOffset
-                                                         toDate:todayDate
+                                                         toDate:date
                                                         options:0];
 
                 NSDateComponents *targetComponents = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay)
@@ -256,15 +263,18 @@
 }
 
 - (NSString *)currentStatusString {
-    // Returns just the "till X" part - caller adds "blocked"/"allowed"
-    NSDate *nextChange = [self nextStateChangeDate];
-    if (nextChange) {
-        NSCalendar *calendar = [NSCalendar currentCalendar];
+    return [self currentStatusStringAtDate:[NSDate date]
+                                   calendar:[NSCalendar currentCalendar]];
+}
 
+- (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar {
+    // Returns just the "till X" part - caller adds "blocked"/"allowed"
+    NSDate *nextChange = [self nextStateChangeDateAfterDate:date calendar:calendar];
+    if (nextChange) {
         // When currently allowed, show the last allowed minute (subtract 1 min)
         // nextStateChangeDate returns first minute of NEXT state, but users expect
         // "allowed till X" where X is the last allowed minute, not first blocked minute
-        if ([self isAllowedNow]) {
+        if ([self isAllowedAtDate:date calendar:calendar]) {
             nextChange = [calendar dateByAddingUnit:NSCalendarUnitMinute
                                               value:-1
                                              toDate:nextChange
@@ -272,9 +282,11 @@
         }
 
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.calendar = calendar;
+        formatter.timeZone = calendar.timeZone;
 
         // Check if next change is today - if so, just show time; otherwise include day
-        if ([calendar isDateInToday:nextChange]) {
+        if ([calendar isDate:nextChange inSameDayAsDate:date]) {
             formatter.dateFormat = @"h:mma";  // Just time: "5:00pm"
         } else {
             formatter.dateFormat = @"EEE h:mma";  // Day + time: "Mon 5:00pm"

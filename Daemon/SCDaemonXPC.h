@@ -14,7 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 // (see SCDaemonProtocol for all method prototypes)
 @interface SCDaemonXPC : NSObject <SCDaemonProtocol>
 
-- (instancetype)initWithClientUID:(uid_t)clientUID NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithClientUID:(uid_t)clientUID
+                  clientIsFenceApp:(BOOL)clientIsFenceApp NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
 @end

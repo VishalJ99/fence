@@ -13,3 +13,4 @@
 - `docs/dictionary/root-owned-schedule.md` — PER-383 term and lifecycle reference for immutable root commitment envelopes, daemon-timed V2 segments, and the bounded V1 drain path.
 - `decisions/agent/pending/PER-383-root-scheduler-authority-and-legacy-rollback.md` — pending maintainer review record for scheduler authority, commitment immutability, strictify coupling, and rollback boundaries.
 - `decisions/human/PER-444-github-release-assets-trial.md` — approved 3.4.12 trial contract for publishing signed ZIP/DMG artifacts on GitHub Releases while retaining Cloudflare Pages for appcasts and the website.
+- `decisions/human/PER-444-travel-timezone-contract.md` — approved recurring-commitment timezone ownership, Location Services travel mode, privacy, failure fallback, and rollback contract.

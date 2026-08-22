@@ -65,6 +65,8 @@ OSStatus const AUTH_CANCELLED_STATUS = -60006;
             @"SuppressLongBlockWarning": @NO,
             @"SuppressRestartFirefoxWarning": @NO,
             @"FirstBlockStarted": @NO,
+
+            @"SCTravelTimezoneEnabled": @NO,
             
             @"V4MigrationComplete": @NO
         };

@@ -47,6 +47,7 @@
 #import "SCLogger.h"
 #import "Common/SCLicenseManager.h"
 #import "SCLicenseWindowController.h"
+#import "SCTravelTimezoneManager.h"
 #import <Sparkle/Sparkle.h>
 
 static NSString * const kRepairMigrationPER352AuthRefreshBuildKey = @"SCRepairMigrationPER352AuthRefreshBuild";
@@ -617,6 +618,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                                                  name:SCTelemetryConsentDidChangeNotification
                                                object:nil];
     [self runPostUpdateRepairMigrations];
+    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
 
     // If we don't have a connection within 0.5 seconds, or the installed daemon
     // lacks the protocol/capabilities required by this app, repair it once.
@@ -706,6 +708,12 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     [settings_ synchronizeSettings];
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    // Re-check after the user returns from Location Services settings. This
+    // never prompts by itself; permission remains tied to explicit UI action.
+    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
@@ -819,6 +827,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                         NSLog(@"AppController: Recurring runtime refresh unavailable (domain=%@ code=%ld)",
                               refreshError.domain, (long)refreshError.code);
                     }
+                    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
                     [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
                 }];
                 return;

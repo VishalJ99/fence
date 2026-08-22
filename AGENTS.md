@@ -12,7 +12,7 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - **commit** — the app action that locks in a weekly blocking schedule; not a git commit.
 - **selfcontrold** — the privileged LaunchDaemon installed via `SMJobBless` that enforces blocks and persists state across reboots.
 - **Root-Owned Schedule / V2 schedule** — an authenticated immutable owner/absolute-week envelope in `ApprovedScheduleCommitments` plus zero or more segment records in root `ApprovedSchedules`, reconciled directly by `selfcontrold`; it has no per-segment user LaunchAgent.
-- **Recurring schedule / V3 recurring commitment** — one Monday-based seven-day template stored as an owner-scoped root commitment in `ApprovedRecurringScheduleCommitments`; `selfcontrold` materializes occurrences indefinitely until explicit End, while the commitment deadline controls only when End becomes available.
+- **Recurring schedule / V3 recurring commitment** — one Monday-based seven-day template stored as an owner-scoped root commitment in `ApprovedRecurringScheduleCommitments`; `selfcontrold` materializes occurrences indefinitely until explicit End, while the commitment deadline controls only when End becomes available. Its root record owns the named timezone and an immutable fixed-or-location-following travel mode; only the app handles transient coordinates.
 - **V1 schedule** — the legacy approval + user LaunchAgent + CLI path, retained only for bounded current/next-week rollback and drain; an unexpired V1 record is not replaced and blocks overlapping V2 admission, while legacy registration is likewise rejected across an unexpired V2 envelope.
 - **Break credits** — app-owned daily credits spent to request a daemon-owned 5, 15, or 30 minute pause of recurring schedule enforcement; ending early does not refund the credit.
 - **Protected Hours** — a recurring local-wall-time interval that prevents new breaks, overrides an active break, and prevents ordinary commitment ending.
@@ -55,5 +55,5 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - GUI smoke tests can be automated locally with `peekaboo` once the app is built and launchable.
 
 ## Decisions of record
-- Human decisions are recorded under `decisions/human/`; current records cover the Sentry-only diagnostic boundary, the PER-444 recurring-schedule contract, and the 3.4.12 GitHub Release asset trial.
+- Human decisions are recorded under `decisions/human/`; current records cover the Sentry-only diagnostic boundary, the PER-444 recurring-schedule and travel-timezone contracts, and the 3.4.12 GitHub Release asset trial.
 - Treat `SYSTEM_ARCHITECTURE.md`, `SETUP.md`, and `BUILD_MACOS26.md` as supporting technical context rather than substitutes for those decision records.

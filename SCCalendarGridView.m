@@ -168,6 +168,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 @property (nonatomic, copy, nullable) NSString *focusedBundleID;
 @property (nonatomic, assign) BOOL isCommitted;
 @property (nonatomic, assign) BOOL isToday;
+@property (nonatomic, strong, nullable) NSTimeZone *displayTimeZone;
 @property (nonatomic, assign) CGFloat timelineHeight;  // Height for 24 hours
 
 // Drag state
@@ -504,6 +505,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     // NOW line (if today)
     if (self.isToday) {
         NSCalendar *calendar = [NSCalendar currentCalendar];
+        if (self.displayTimeZone != nil) calendar.timeZone = self.displayTimeZone;
         NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:[NSDate date]];
         NSInteger nowMinutes = components.hour * 60 + components.minute;
         CGFloat nowY = [self yFromMinutes:nowMinutes];
@@ -1286,7 +1288,11 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     [self setupHourLabels];
 
     // Determine today's day
-    SCDayOfWeek today = [SCWeeklySchedule today];
+    NSCalendar *displayCalendar = [NSCalendar currentCalendar];
+    if (self.displayTimeZone != nil) displayCalendar.timeZone = self.displayTimeZone;
+    NSDateComponents *todayComponents = [displayCalendar
+        components:NSCalendarUnitWeekday fromDate:[NSDate date]];
+    SCDayOfWeek today = (SCDayOfWeek)(todayComponents.weekday - 1);
 
     // Create day labels and columns
     for (NSInteger i = 0; i < days.count; i++) {
@@ -1314,6 +1320,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         column.focusedBundleID = self.focusedBundleID;
         column.isCommitted = self.isCommitted;
         column.isToday = isToday;
+        column.displayTimeZone = self.displayTimeZone;
         column.timelineHeight = timelineHeight;
 
         // Set callbacks

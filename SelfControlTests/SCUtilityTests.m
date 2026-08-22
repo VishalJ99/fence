@@ -208,6 +208,8 @@ static NSDictionary<NSString *, id> *SCRecurringRuntimeState(
         @"generation": generation,
         @"started_at": startedAt,
         @"lock_ends_at": lockEndsAt,
+        @"time_zone_identifier": @"Europe/London",
+        @"follows_location_time_zone": @NO,
         @"protected_hours": @{
             @"enabled": @(protectedEnabled),
             @"startMinute": @(protectedStart),
@@ -264,6 +266,8 @@ static SCScheduleManager *SCInstallRecurringTelemetryFixture(NSUserDefaults *def
         @"generation": NSUUID.UUID.UUIDString,
         @"startedAt": startedAt,
         @"lockEndsAt": lockEndsAt,
+        @"timeZoneIdentifier": @"Europe/London",
+        @"followsLocationTimeZone": @NO,
     } forKey:@"SCRecurringCommitment"];
     [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
     [defaults setInteger:23 * 60 forKey:@"SCProtectedHoursStartMinute"];
@@ -523,6 +527,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleTimer,
         SCDaemonCapabilityRecurringScheduleBreaks,
         SCDaemonCapabilityRecurringCommitmentExtend,
+        SCDaemonCapabilityRecurringTimeZone,
         @"future-safe-capability-v1",
     ];
 
@@ -550,6 +555,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleTimer,
         SCDaemonCapabilityRecurringScheduleBreaks,
         SCDaemonCapabilityRecurringCommitmentExtend,
+        SCDaemonCapabilityRecurringTimeZone,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -564,16 +570,27 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
             return ![capability isEqualToString:SCDaemonCapabilityRecurringCommitmentExtend];
         }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityRecurringTimeZone];
+        }]],
     ];
     NSArray<NSString*>* expectedReasons = @[
         @"recurring-schedule-store-missing",
         @"recurring-schedule-timer-missing",
         @"recurring-schedule-breaks-missing",
         @"recurring-commitment-extend-missing",
+        @"recurring-time-zone-missing",
     ];
 
+    NSString *reason = nil;
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringScheduler
+                   capabilities:capabilities
+        supportsRecurringSchedulesWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-scheduler-protocol-too-old");
+
     for (NSUInteger index = 0; index < missingCapabilities.count; index++) {
-        NSString *reason = nil;
+        reason = nil;
         XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
                                                capabilities:missingCapabilities[index]
                           compatibleWithCurrentAppWithReason:&reason]);
@@ -1283,6 +1300,31 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(hidden[@"visible_count"], @0);
 }
 
+- (void)testWeeklyScheduleQueriesUseProvidedCommitmentTimeZone {
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString];
+    [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                         forDay:SCDayOfWeekMonday];
+
+    NSCalendar *utc = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    utc.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    NSDateComponents *components = [NSDateComponents new];
+    components.year = 2026;
+    components.month = 7;
+    components.day = 13;
+    components.hour = 8;
+    components.minute = 30;
+    NSDate *instant = [utc dateFromComponents:components];
+
+    NSCalendar *london = [utc copy];
+    london.timeZone = [NSTimeZone timeZoneWithName:@"Europe/London"];
+    NSCalendar *tokyo = [utc copy];
+    tokyo.timeZone = [NSTimeZone timeZoneWithName:@"Asia/Tokyo"];
+
+    XCTAssertTrue([schedule isAllowedAtDate:instant calendar:london]);
+    XCTAssertFalse([schedule isAllowedAtDate:instant calendar:tokyo]);
+    XCTAssertNotNil([schedule nextStateChangeDateAfterDate:instant calendar:london]);
+}
+
 - (void)testDiagnosticSnapshotCarriesExactLegacyApprovalDrift {
     NSDictionary<NSString *, NSNumber *> *appSnapshot = @{
         @"app_has_schedule_state": @YES,
@@ -1728,7 +1770,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"sourceBundleIDs": @[bundleID],
         @"policyRevision": policyRevision,
     };
-    NSDictionary *commitment = @{
+    NSDictionary *legacyCommitment = @{
         @"schemaVersion": @1,
         @"commitmentID": commitmentID,
         @"generation": generation,
@@ -1743,14 +1785,49 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"blockSettings": @{},
         @"segments": @[segment],
     };
+    NSMutableDictionary *commitmentWithTimeZone = [legacyCommitment mutableCopy];
+    commitmentWithTimeZone[@"timeZoneIdentifier"] = @"Europe/London";
+    commitmentWithTimeZone[@"followsLocationTimeZone"] = @NO;
+    NSDictionary *commitment = [commitmentWithTimeZone copy];
     NSMutableDictionary *settings = [@{
         @"SettingsVersionNumber": @7,
         @"LastSettingsUpdate": [NSDate date],
         @"BlockIsRunning": @NO,
-        @"ApprovedRecurringScheduleCommitments": @{commitmentID: commitment},
+        @"ApprovedRecurringScheduleCommitments": @{commitmentID: legacyCommitment},
         @"ActiveScheduleBreaks": @{},
     } mutableCopy];
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings],
+        @"Legacy records without either additive field remain readable until startup pinning");
+
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: commitment};
     XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *automaticCommitment = [commitment mutableCopy];
+    automaticCommitment[@"followsLocationTimeZone"] = @YES;
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: automaticCommitment};
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *missingMode = [legacyCommitment mutableCopy];
+    missingMode[@"timeZoneIdentifier"] = @"Europe/London";
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: missingMode};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *missingIdentifier = [legacyCommitment mutableCopy];
+    missingIdentifier[@"followsLocationTimeZone"] = @YES;
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: missingIdentifier};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *invalidIdentifier = [commitment mutableCopy];
+    invalidIdentifier[@"timeZoneIdentifier"] = @"Mars/Olympus_Mons";
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: invalidIdentifier};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *nonBooleanMode = [commitment mutableCopy];
+    nonBooleanMode[@"followsLocationTimeZone"] = @1;
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: nonBooleanMode};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    settings[@"ApprovedRecurringScheduleCommitments"] = @{commitmentID: commitment};
 
     NSDictionary *activeBreak = @{
         @"schemaVersion": @1,

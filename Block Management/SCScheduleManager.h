@@ -108,6 +108,13 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 @property (nonatomic, readonly) BOOL hasRecurringCommitment;
 @property (nonatomic, readonly) BOOL isRecurringCommitmentLockActive;
 @property (nonatomic, readonly, nullable) NSDate *recurringCommitmentLockEndDate;
+@property (nonatomic, readonly) NSString *recurringTimeZoneIdentifier;
+@property (nonatomic, readonly) BOOL recurringCommitmentFollowsLocationTimeZone;
+
+/// Applies a location-derived named timezone to a root commitment that opted
+/// into travel tracking before Commit. Coordinates never enter this layer.
+- (void)updateLocationTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                              completion:(void(^)(BOOL updated, NSError * _Nullable error))completion;
 
 /// Legacy V1/V2 absolute commitment data still within its finite window.
 @property (nonatomic, readonly) BOOL hasUnexpiredLegacyCommitment;
@@ -116,6 +123,14 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// days; editing stays locked until the commitment is explicitly ended.
 - (void)commitRecurringScheduleForDays:(NSInteger)days
                             completion:(void(^)(BOOL verified, NSError * _Nullable error))completion;
+
+/// App-selected wall-time authority for a new recurring commitment. The
+/// location coordinator resolves the identifier; this shared layer never
+/// receives coordinates or requests Location Services access.
+- (void)commitRecurringScheduleForDays:(NSInteger)days
+                     timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                              completion:(void(^)(BOOL verified, NSError * _Nullable error))completion;
 
 /// Adds 1...7 days to the later of the current deadline or now. The helper
 /// caps the remaining lock horizon at 14 days and returns the authoritative

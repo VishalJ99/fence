@@ -202,6 +202,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (void)saveRecurringSchedules;
 - (void)ensureRecurringScheduleMigration;
 - (nullable NSDictionary<NSString *, id> *)recurringCommitmentDictionary;
+- (NSCalendar *)recurringCalendar;
 - (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state;
 - (void)saveProtectedHoursEnabled:(BOOL)enabled
                        startMinute:(NSInteger)startMinute
@@ -1462,9 +1463,22 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
 - (void)commitRecurringScheduleForDays:(NSInteger)days
                             completion:(void (^)(BOOL, NSError *))completion {
+    [self commitRecurringScheduleForDays:days
+                       timeZoneIdentifier:NSTimeZone.localTimeZone.name
+                  followsLocationTimeZone:NO
+                                completion:completion];
+}
+
+- (void)commitRecurringScheduleForDays:(NSInteger)days
+                     timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                              completion:(void (^)(BOOL, NSError *))completion {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self commitRecurringScheduleForDays:days completion:completion];
+            [self commitRecurringScheduleForDays:days
+                               timeZoneIdentifier:timeZoneIdentifier
+                          followsLocationTimeZone:followsLocationTimeZone
+                                        completion:completion];
         });
         return;
     }
@@ -1576,11 +1590,22 @@ static NSError *SCScheduleCommitError(NSInteger code,
         @"startMinute": @(range.startMinute),
         @"endMinute": @(range.endMinute),
     };
+    NSTimeZone *commitmentTimeZone = [NSTimeZone timeZoneWithName:timeZoneIdentifier];
+    if (commitmentTimeZone == nil) {
+        finish(NO, SCScheduleCommitError(43, @"location",
+            @"Fence could not verify the timezone for this commitment.", NO));
+        return;
+    }
+    timeZoneIdentifier = commitmentTimeZone.name;
+
+    NSCalendar *commitmentCalendar = [[NSCalendar alloc]
+        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    commitmentCalendar.timeZone = commitmentTimeZone;
     NSDate *startedAt = [NSDate date];
-    NSDate *lockEndsAt = [[NSCalendar currentCalendar] dateByAddingUnit:NSCalendarUnitDay
-                                                                  value:days
-                                                                 toDate:startedAt
-                                                                options:0];
+    NSDate *lockEndsAt = [commitmentCalendar dateByAddingUnit:NSCalendarUnitDay
+                                                        value:days
+                                                       toDate:startedAt
+                                                      options:0];
     if (lockEndsAt == nil) {
         lockEndsAt = [startedAt dateByAddingTimeInterval:days * 24.0 * 60.0 * 60.0];
     }
@@ -1592,6 +1617,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
                                 generation:generation
                                   startedAt:startedAt
                                  lockEndsAt:lockEndsAt
+                        timeZoneIdentifier:timeZoneIdentifier
+                   followsLocationTimeZone:followsLocationTimeZone
                              protectedHours:protectedHours
                               blockSettings:blockSettings
                                    segments:segments
@@ -1624,6 +1651,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
                 @"generation": generation,
                 @"startedAt": startedAt,
                 @"lockEndsAt": lockEndsAt,
+                @"timeZoneIdentifier": timeZoneIdentifier,
+                @"followsLocationTimeZone": @(followsLocationTimeZone),
             };
             [defaults setObject:localCommitment forKey:kRecurringCommitmentKey];
             [defaults setObject:(reconcileSucceeded ? @"verified" : @"stored")
@@ -1756,6 +1785,11 @@ static NSError *SCScheduleCommitError(NSInteger code,
         ? state[@"started_at"] : nil;
     NSDate *lockEndsAt = [state[@"lock_ends_at"] isKindOfClass:[NSDate class]]
         ? state[@"lock_ends_at"] : nil;
+    NSString *timeZoneIdentifier = [state[@"time_zone_identifier"] isKindOfClass:[NSString class]]
+        ? state[@"time_zone_identifier"] : nil;
+    NSNumber *followsLocationTimeZone =
+        [state[@"follows_location_time_zone"] isKindOfClass:[NSNumber class]]
+            ? state[@"follows_location_time_zone"] : nil;
     NSDictionary *protectedHours = [state[@"protected_hours"] isKindOfClass:[NSDictionary class]]
         ? state[@"protected_hours"] : nil;
     NSNumber *protectedEnabled = [protectedHours[@"enabled"] isKindOfClass:[NSNumber class]]
@@ -1771,7 +1805,9 @@ static NSError *SCScheduleCommitError(NSInteger code,
         [[NSUUID alloc] initWithUUIDString:generation] != nil;
     BOOL datesValid = startedAt != nil && lockEndsAt != nil &&
         [lockEndsAt compare:startedAt] == NSOrderedDescending;
-    if (!identifiersValid || !datesValid || protectedEnabled == nil ||
+    BOOL timeZoneValid = [NSTimeZone timeZoneWithName:timeZoneIdentifier] != nil;
+    if (!identifiersValid || !datesValid || !timeZoneValid || followsLocationTimeZone == nil ||
+        protectedEnabled == nil ||
         protectedStart == nil || protectedEnd == nil || breakActiveValue == nil) {
         return NO;
     }
@@ -1788,6 +1824,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
         @"generation": generation,
         @"startedAt": startedAt,
         @"lockEndsAt": lockEndsAt,
+        @"timeZoneIdentifier": timeZoneIdentifier,
+        @"followsLocationTimeZone": @(followsLocationTimeZone.boolValue),
     };
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
         protectedStart.integerValue, protectedEnd.integerValue);
@@ -1834,6 +1872,65 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (BOOL)isRecurringCommitmentLockActive {
     NSDate *lockEnd = self.recurringCommitmentLockEndDate;
     return lockEnd != nil && [lockEnd timeIntervalSinceNow] > 0;
+}
+
+- (NSString *)recurringTimeZoneIdentifier {
+    NSString *identifier = [self.recurringCommitmentDictionary[@"timeZoneIdentifier"]
+        isKindOfClass:[NSString class]] ? self.recurringCommitmentDictionary[@"timeZoneIdentifier"] : nil;
+    return [NSTimeZone timeZoneWithName:identifier] != nil
+        ? identifier : NSTimeZone.localTimeZone.name;
+}
+
+- (BOOL)recurringCommitmentFollowsLocationTimeZone {
+    return [self.recurringCommitmentDictionary[@"followsLocationTimeZone"] boolValue];
+}
+
+- (NSCalendar *)recurringCalendar {
+    NSCalendar *calendar = [[NSCalendar alloc]
+        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    calendar.timeZone = [NSTimeZone timeZoneWithName:self.recurringTimeZoneIdentifier] ?:
+        NSTimeZone.localTimeZone;
+    calendar.firstWeekday = 2;
+    return calendar;
+}
+
+- (void)updateLocationTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                              completion:(void (^)(BOOL, NSError *))completion {
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    NSTimeZone *timeZone = [timeZoneIdentifier isKindOfClass:[NSString class]]
+        ? [NSTimeZone timeZoneWithName:timeZoneIdentifier] : nil;
+    if (commitment == nil || !self.recurringCommitmentFollowsLocationTimeZone || timeZone == nil) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(
+            42, @"validate", @"This commitment does not allow automatic timezone updates.", NO));
+        return;
+    }
+    if ([self.recurringTimeZoneIdentifier isEqualToString:timeZone.name]) {
+        if (completion != nil) completion(YES, nil);
+        return;
+    }
+
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc updateLocationTimeZoneForRecurringCommitmentID:commitment[@"commitmentID"]
+                                               generation:commitment[@"generation"]
+                                       timeZoneIdentifier:timeZone.name
+                                                    reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL persisted = [result[@"store_persisted"] boolValue] &&
+                [result[@"post_write_match"] boolValue] &&
+                [result[@"time_zone_identifier"] isEqual:timeZone.name];
+            if (persisted) {
+                NSMutableDictionary *updated = [commitment mutableCopy];
+                updated[@"timeZoneIdentifier"] = timeZone.name;
+                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                [defaults setObject:[updated copy] forKey:kRecurringCommitmentKey];
+                [defaults synchronize];
+                [self reconcileBreakCreditsForDate:[NSDate date] forceReset:NO];
+                [self postChangeNotification];
+            }
+            if (completion != nil) completion(persisted, error);
+        });
+    }];
 }
 
 - (BOOL)hasUnexpiredLegacyCommitment {
@@ -2480,7 +2577,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
         return self.hasRecurringCommitment ? @"continuously" : @"";
     }
 
-    NSString *baseStatus = [schedule currentStatusString];
+    NSCalendar *calendar = self.hasRecurringCommitment
+        ? self.recurringCalendar : [NSCalendar currentCalendar];
+    NSString *baseStatus = [schedule currentStatusStringAtDate:[NSDate date]
+                                                       calendar:calendar];
 
     // If no next state change (empty string), use commitment end date
     // This happens when bundle is blocked all week with no allowed windows
@@ -2493,7 +2593,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
 /// Formats a date as "till X" - shows just time if today, otherwise day + time
 - (NSString *)formatStatusStringForDate:(NSDate *)date {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSCalendar *calendar = self.hasRecurringCommitment
+        ? self.recurringCalendar : [NSCalendar currentCalendar];
+    formatter.calendar = calendar;
+    formatter.timeZone = calendar.timeZone;
 
     if ([calendar isDateInToday:date]) {
         formatter.dateFormat = @"h:mma";  // Just time: "11:59pm"
@@ -2508,7 +2611,9 @@ static NSError *SCScheduleCommitError(NSInteger code,
     if (!schedule) {
         return !self.hasRecurringCommitment;
     }
-    NSDateComponents *components = [[NSCalendar currentCalendar]
+    NSCalendar *calendar = self.hasRecurringCommitment
+        ? self.recurringCalendar : [NSCalendar currentCalendar];
+    NSDateComponents *components = [calendar
         components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
           fromDate:[NSDate date]];
     SCDayOfWeek day = (SCDayOfWeek)(components.weekday - 1);
@@ -2523,11 +2628,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date {
     if (!self.hasRecurringCommitment) return nil;
 
-    NSCalendar *calendar = [[NSCalendar alloc]
-        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
-    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    calendar.timeZone = [NSTimeZone localTimeZone];
-    calendar.firstWeekday = 2;
+    NSCalendar *calendar = self.recurringCalendar;
 
     SCProtectedHoursRange protectedRange = SCNormalizeProtectedHoursRange(
         self.protectedHoursStartMinute, self.protectedHoursEndMinute);
@@ -2852,7 +2953,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
         remaining,
         [defaults objectForKey:kBreakCreditsLastResetDayKey],
         date ?: [NSDate date],
-        [NSCalendar currentCalendar],
+        self.hasRecurringCommitment ? self.recurringCalendar : [NSCalendar currentCalendar],
         forceReset,
         &resolvedDay,
         &didReset);
@@ -2924,7 +3025,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
         self.protectedHoursStartMinute, self.protectedHoursEndMinute);
     return SCProtectedHoursAreActive(self.protectedHoursEnabled, range,
-                                     [NSDate date], [NSCalendar currentCalendar]);
+                                     [NSDate date], self.hasRecurringCommitment
+                                         ? self.recurringCalendar : [NSCalendar currentCalendar]);
 }
 
 - (BOOL)canEditProtectedHours {

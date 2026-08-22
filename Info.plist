@@ -53,6 +53,12 @@
 	<string>Free and open-source under the GPL.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Fence uses your approximate location to keep your committed schedule aligned with your timezone while travelling. Fence does not store your coordinates or send them to Fence.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Fence uses your approximate location to keep your committed schedule aligned with your timezone while travelling. Fence does not store your coordinates or send them to Fence.</string>
+	<key>NSLocationDefaultAccuracyReduced</key>
+	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>LSUIElement</key>

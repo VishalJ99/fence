@@ -13,6 +13,8 @@ NSString * const SCDaemonScheduleCommitmentIDKey = @"commitmentID";
 NSString * const SCDaemonScheduleGenerationKey = @"generation";
 NSString * const SCDaemonSchedulePolicyRevisionKey = @"policyRevision";
 NSString * const SCDaemonScheduleSourceBundleIDsKey = @"sourceBundleIDs";
+NSString * const SCDaemonRecurringTimeZoneIdentifierKey = @"timeZoneIdentifier";
+NSString * const SCDaemonRecurringFollowsLocationTimeZoneKey = @"followsLocationTimeZone";
 
 NSString * const SCDaemonActiveBlockSourceManual = @"manual";
 NSString * const SCDaemonActiveBlockSourceTest = @"test";
@@ -79,6 +81,16 @@ static BOOL SCDaemonSchedulerIntegerInRange(id value, NSInteger minimum, NSInteg
     return isfinite(number) && floor(number) == number && number >= minimum && number <= maximum;
 }
 
+static BOOL SCDaemonSchedulerBoolean(id value) {
+    return [value isKindOfClass:[NSNumber class]] &&
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+}
+
+static NSTimeZone *SCDaemonSchedulerTimeZoneFromIdentifier(id value) {
+    if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0) return nil;
+    return [NSTimeZone timeZoneWithName:(NSString *)value];
+}
+
 static BOOL SCDaemonSchedulerProtectedHoursAreValid(id value) {
     if (![value isKindOfClass:[NSDictionary class]]) return NO;
     NSDictionary *hours = value;
@@ -88,14 +100,6 @@ static BOOL SCDaemonSchedulerProtectedHoursAreValid(id value) {
     if (!SCDaemonSchedulerIntegerInRange(hours[@"startMinute"], 0, 1439) ||
         !SCDaemonSchedulerIntegerInRange(hours[@"endMinute"], 0, 1439)) return NO;
     return [hours[@"startMinute"] integerValue] != [hours[@"endMinute"] integerValue];
-}
-
-static NSCalendar *SCDaemonSchedulerLocalCalendar(void) {
-    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
-    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    calendar.timeZone = [NSTimeZone localTimeZone];
-    calendar.firstWeekday = 2;
-    return calendar;
 }
 
 static NSDate *SCDaemonSchedulerStartOfMondayWeek(NSDate *date, NSCalendar *calendar) {
@@ -185,6 +189,10 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         ? commitment[@"lockEndsAt"] : nil;
     NSArray *segments = [commitment[@"segments"] isKindOfClass:[NSArray class]]
         ? commitment[@"segments"] : nil;
+    id timeZoneIdentifier = commitment[SCDaemonRecurringTimeZoneIdentifierKey];
+    id followsLocation = commitment[SCDaemonRecurringFollowsLocationTimeZoneKey];
+    BOOL hasTimeZone = timeZoneIdentifier != nil;
+    BOOL hasLocationMode = followsLocation != nil;
     if (!SCDaemonSchedulerUUIDString(commitmentID) ||
         ![commitment[@"commitmentID"] isEqual:commitmentID] ||
         !SCDaemonSchedulerUUIDString(commitment[@"generation"]) ||
@@ -195,6 +203,11 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         !SCDaemonSchedulerProtectedHoursAreValid(commitment[@"protectedHours"]) ||
         ![commitment[@"blockSettings"] isKindOfClass:[NSDictionary class]] ||
         segments == nil || segments.count == 0 || segments.count > 512) return NO;
+    // Both fields are absent only for a shipped legacy record waiting for the
+    // startup pinning migration. Partial or malformed extensions are unsafe.
+    if (hasTimeZone != hasLocationMode ||
+        (hasTimeZone && (SCDaemonSchedulerTimeZoneFromIdentifier(timeZoneIdentifier) == nil ||
+                         !SCDaemonSchedulerBoolean(followsLocation)))) return NO;
 
     NSMutableSet<NSString *> *segmentIDs = [NSMutableSet set];
     NSInteger previousEnd = 0;
@@ -270,6 +283,18 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         return [left[@"commitmentID"] compare:right[@"commitmentID"]];
     }];
     return commitments;
+}
+
++ (NSCalendar *)calendarForRecurringCommitment:(NSDictionary<NSString *,id> *)commitment
+                              fallbackTimeZone:(NSTimeZone *)fallbackTimeZone {
+    NSTimeZone *timeZone = SCDaemonSchedulerTimeZoneFromIdentifier(
+        commitment[SCDaemonRecurringTimeZoneIdentifierKey]) ?: fallbackTimeZone;
+    NSCalendar *calendar = [[NSCalendar alloc]
+        initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    calendar.timeZone = timeZone ?: NSTimeZone.localTimeZone;
+    calendar.firstWeekday = 2;
+    return calendar;
 }
 
 + (NSArray<NSDictionary<NSString *,id> *> *)recurringOccurrenceRecordsAtDate:(NSDate *)now
@@ -592,7 +617,8 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         validRecurringCommitmentsFromValue:state[@"approved_recurring_commitments"]
                                   ownerUID:selectedOwner];
     NSDictionary *recurringCommitment = recurringCommitments.firstObject;
-    NSCalendar *calendar = SCDaemonSchedulerLocalCalendar();
+    NSCalendar *calendar = [SCDaemonScheduler calendarForRecurringCommitment:recurringCommitment
+                                                            fallbackTimeZone:NSTimeZone.localTimeZone];
     NSArray *recurringRecords = [SCDaemonScheduler recurringOccurrenceRecordsAtDate:now
                                                                          commitments:recurringCommitments
                                                                              calendar:calendar];

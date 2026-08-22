@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B44400000000000000000003 /* SCTravelTimezoneManager.m in Sources */ = {isa = PBXBuildFile; fileRef = B44400000000000000000002 /* SCTravelTimezoneManager.m */; };
+		B44400000000000000000004 /* SCTravelTimezoneManager.m in Sources */ = {isa = PBXBuildFile; fileRef = B44400000000000000000002 /* SCTravelTimezoneManager.m */; };
+		B44400000000000000000006 /* CoreLocation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B44400000000000000000005 /* CoreLocation.framework */; };
+		B44400000000000000000007 /* CoreLocation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B44400000000000000000005 /* CoreLocation.framework */; };
+		B44400000000000000000009 /* SCTravelTimezoneManagerTests.m in Sources */ = {isa = PBXBuildFile; fileRef = B44400000000000000000008 /* SCTravelTimezoneManagerTests.m */; };
 		A44400000000000000000003 /* PreferencesProtectionViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A44400000000000000000002 /* PreferencesProtectionViewController.m */; };
 		F44400000000000000000010 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
 		F44400000000000000000011 /* SCProtectionPolicy.m in Sources */ = {isa = PBXBuildFile; fileRef = F44400000000000000000002 /* SCProtectionPolicy.m */; };
@@ -622,6 +627,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B44400000000000000000001 /* SCTravelTimezoneManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCTravelTimezoneManager.h; sourceTree = "<group>"; };
+		B44400000000000000000002 /* SCTravelTimezoneManager.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTravelTimezoneManager.m; sourceTree = "<group>"; };
+		B44400000000000000000005 /* CoreLocation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreLocation.framework; path = /System/Library/Frameworks/CoreLocation.framework; sourceTree = "<absolute>"; };
+		B44400000000000000000008 /* SCTravelTimezoneManagerTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCTravelTimezoneManagerTests.m; sourceTree = "<group>"; };
 		A44400000000000000000001 /* PreferencesProtectionViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PreferencesProtectionViewController.h; sourceTree = "<group>"; };
 		A44400000000000000000002 /* PreferencesProtectionViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PreferencesProtectionViewController.m; sourceTree = "<group>"; };
 		F44400000000000000000001 /* SCProtectionPolicy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCProtectionPolicy.h; sourceTree = "<group>"; };
@@ -1647,6 +1656,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B44400000000000000000006 /* CoreLocation.framework in Frameworks */,
 				CB32D2AE21902D9D00B8CD68 /* IOKit.framework in Frameworks */,
 				CB81AB2525B7EFA4006956F7 /* Sparkle.framework in Frameworks */,
 				8D11072F0486CEB800E47090 /* Cocoa.framework in Frameworks */,
@@ -1660,6 +1670,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B44400000000000000000007 /* CoreLocation.framework in Frameworks */,
 				8CA8987104D2956493D6AF6B /* Pods_SelfControl_SelfControlTests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1718,6 +1729,7 @@
 		1058C7A0FEA54F0111CA2CBB /* Linked Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				B44400000000000000000005 /* CoreLocation.framework */,
 				1058C7A1FEA54F0111CA2CBB /* Cocoa.framework */,
 				CB587E4F0F50FE8800C66A09 /* SystemConfiguration.framework */,
 				CB9E901D0F397FFA006DE6E4 /* Security.framework */,
@@ -1753,6 +1765,8 @@
 		29B97314FDCFA39411CA2CEA /* SelfControl */ = {
 			isa = PBXGroup;
 			children = (
+				B44400000000000000000001 /* SCTravelTimezoneManager.h */,
+				B44400000000000000000002 /* SCTravelTimezoneManager.m */,
 				22320A1F2F0E98BF00912FF3 /* SCTimezoneInfoWindowController.h */,
 				22320A202F0E98BF00912FF3 /* SCTimezoneInfoWindowController.m */,
 				229A86A42F0B1D0A00F5D2B7 /* SelfControlRelease.entitlements */,
@@ -1846,6 +1860,7 @@
 		CB0EEF5E20FD8CE00024D27B /* SelfControlTests */ = {
 			isa = PBXGroup;
 			children = (
+				B44400000000000000000008 /* SCTravelTimezoneManagerTests.m */,
 				F44400000000000000000005 /* SCProtectionPolicyTests.m */,
 				F44400000000000000000006 /* SCRecurringScheduleCompilerTests.m */,
 				E44400000000000000000005 /* SCEmergencyExitAttemptTests.m */,
@@ -4027,6 +4042,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B44400000000000000000003 /* SCTravelTimezoneManager.m in Sources */,
 				A44400000000000000000003 /* PreferencesProtectionViewController.m in Sources */,
 				F44400000000000000000010 /* SCProtectionPolicy.m in Sources */,
 				F44400000000000000000020 /* SCRecurringScheduleCompiler.m in Sources */,
@@ -4090,6 +4106,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B44400000000000000000009 /* SCTravelTimezoneManagerTests.m in Sources */,
+				B44400000000000000000004 /* SCTravelTimezoneManager.m in Sources */,
 				F44400000000000000000040 /* NSString+IPAddress.m in Sources */,
 				F44400000000000000000011 /* SCProtectionPolicy.m in Sources */,
 				F44400000000000000000021 /* SCRecurringScheduleCompiler.m in Sources */,
