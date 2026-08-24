@@ -450,6 +450,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)showWeekScheduleWindowRequested:(NSNotification*)note {
     self.currentWeekOffset = 0;
+    [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
     [self.window makeKeyAndOrderFront:nil];
     [self reloadData];
     [self presentRecurringMigrationChoiceIfNeeded];
@@ -457,6 +458,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)showWindow:(id)sender {
     self.currentWeekOffset = 0;
+    [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
     [super showWindow:sender];
     [self reloadData];
     [self presentRecurringMigrationChoiceIfNeeded];
@@ -470,7 +472,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)systemDidWake:(NSNotification *)note {
     // Refresh UI after wake from sleep - NOW line position and status may have changed
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[SCTravelTimezoneManager sharedManager] startIfEnabled];
         [self reloadData];
         // Force calendar grid to redraw NOW line
         [self.calendarGridView setNeedsDisplay:YES];
@@ -1042,6 +1043,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)showCommitConfirmationDialog {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    SCTravelTimezoneManager *travelManager = [SCTravelTimezoneManager sharedManager];
+    if (travelManager.isEnabled &&
+        (travelManager.status != SCTravelTimezoneStatusReady ||
+         travelManager.lastResolvedTimeZoneIdentifier == nil)) {
+        // Opening the weekly UI normally supplies the Commit-time result.
+        // Retry here only when no fresh accepted result is available.
+        [travelManager requestTimeZoneRefreshIfNeeded];
+    }
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Start Recurring Commitment?";
@@ -1066,11 +1075,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
     }
 
-    SCTravelTimezoneManager *travelManager = [SCTravelTimezoneManager sharedManager];
     NSString *commitTimeZoneIdentifier = travelManager.isEnabled
         ? travelManager.lastResolvedTimeZoneIdentifier : NSTimeZone.localTimeZone.name;
     NSString *timezoneSummary = travelManager.isEnabled
-        ? [NSString stringWithFormat:@"Location Services will update its timezone while you travel (currently %@).",
+        ? [NSString stringWithFormat:@"Fence checks its timezone at Commit, startup, wake, and schedule open (currently %@).",
             commitTimeZoneIdentifier ?: @"still resolving"]
         : [NSString stringWithFormat:@"It will stay on %@; plan destination-time blocks before committing.",
             commitTimeZoneIdentifier ?: @"your current timezone"];
@@ -1123,9 +1131,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
             if (followsLocationTimeZone &&
                 (currentTravelManager.status != SCTravelTimezoneStatusReady ||
                  [NSTimeZone timeZoneWithName:timeZoneIdentifier] == nil)) {
+                [currentTravelManager requestTimeZoneRefreshIfNeeded];
                 NSAlert *locationAlert = [[NSAlert alloc] init];
                 locationAlert.messageText = @"Timezone Still Resolving";
-                locationAlert.informativeText = @"Wait for Location Services to resolve your timezone, or turn automatic travel mode off before committing.";
+                locationAlert.informativeText = @"Fence requested a fresh timezone. Wait for Location Services to finish, then click Commit again; or turn automatic travel mode off before committing.";
                 [locationAlert beginSheetModalForWindow:self.window completionHandler:nil];
                 return;
             }

@@ -35,9 +35,14 @@ typedef NS_ENUM(NSInteger, SCTravelTimezoneStatus) {
 /// commitment exists because its travel mode is immutable until it ends.
 - (void)setEnabled:(BOOL)enabled;
 
-/// Starts standard coarse location updates when the preference or the active
-/// recurring commitment requires them.
-- (void)startIfEnabled;
+/// Requests one coarse location update when the preference or the active
+/// recurring commitment requires it. Fence never keeps a continuous location
+/// subscription running.
+- (void)requestTimeZoneRefreshIfNeeded;
+
+/// Retries a timezone already accepted from a one-shot request after the
+/// active block reaches a safe boundary. This never requests location.
+- (void)retryPendingDaemonTimeZoneUpdateIfNeeded;
 
 /// Requests permission only from an explicit user interaction, never from
 /// background launch-at-login startup.

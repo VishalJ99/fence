@@ -5,7 +5,27 @@
 @interface SCTravelTimezoneManager (Testing)
 - (BOOL)isUsableLocation:(nullable CLLocation *)location;
 - (void)acceptTimeZoneIdentifier:(NSString *)identifier;
+- (void)beginOneShotLocationRequest;
+@property (nonatomic, strong, nullable) CLLocationManager *locationManager;
+@property (nonatomic) BOOL locationRequestInFlight;
 @property (nonatomic, strong, nullable) NSDate *currentSessionResolutionDate;
+@end
+
+@interface SCRecordingLocationManager : CLLocationManager
+@property (nonatomic) NSInteger requestLocationCount;
+@property (nonatomic) NSInteger startUpdatingLocationCount;
+@end
+
+@implementation SCRecordingLocationManager
+
+- (void)requestLocation {
+    self.requestLocationCount += 1;
+}
+
+- (void)startUpdatingLocation {
+    self.startUpdatingLocationCount += 1;
+}
+
 @end
 
 @interface SCTravelTimezoneManagerTests : XCTestCase
@@ -72,6 +92,19 @@
     } else {
         [defaults removeObjectForKey:legacyKey];
     }
+}
+
+- (void)testOneShotRefreshNeverStartsContinuousLocationUpdates {
+    SCTravelTimezoneManager *manager = [[SCTravelTimezoneManager alloc] init];
+    SCRecordingLocationManager *locationManager = [[SCRecordingLocationManager alloc] init];
+    manager.locationManager = locationManager;
+
+    [manager beginOneShotLocationRequest];
+
+    XCTAssertTrue(manager.locationRequestInFlight);
+    XCTAssertEqual(manager.status, SCTravelTimezoneStatusResolving);
+    XCTAssertEqual(locationManager.requestLocationCount, 1);
+    XCTAssertEqual(locationManager.startUpdatingLocationCount, 0);
 }
 
 @end

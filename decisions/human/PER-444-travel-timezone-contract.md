@@ -14,14 +14,17 @@ system timezone.
 4. With automatic travel on, the Fence app requests approximate Location
    Services access, resolves a transient coordinate to a named timezone, and
    sends only that timezone identifier to `selfcontrold`.
-5. Location denial, an unavailable or simulated fix, reverse-geocoding failure,
+5. Fence requests one location at Commit, app startup, wake from sleep, and
+   explicit opening of the weekly schedule UI. It does not continuously track
+   location and does not poll Location Services on a timer.
+6. Location denial, an unavailable or simulated fix, reverse-geocoding failure,
    transport failure, or persistence failure leaves the last root-accepted
    timezone unchanged. Fence never falls back to IP geolocation or to a newly
    changed system timezone during an active commitment.
-6. Fence does not persist, log, upload, or send coordinates over its XPC
+7. Fence does not persist, log, upload, or send coordinates over its XPC
    boundary. Apple Location Services and reverse geocoding remain platform
    services outside Fence's storage and telemetry.
-7. Existing recurring commitments are pinned once, at helper upgrade, to the
+8. Existing recurring commitments are pinned once, at helper upgrade, to the
    then-current timezone with automatic travel off.
 
 The absolute system clock is assumed to remain correct. This decision protects
@@ -40,7 +43,8 @@ calendar-day commitment extensions, and daily break-credit rollover.
 - The change is an additive extension of the recurring schema so older helpers
   can continue reading the root settings during rollback.
 - No coordinate history, offline timezone database, IP lookup, continuous
-  location telemetry, or speculative attestation layer is introduced.
+  location monitoring, timer-based location polling, or speculative
+  attestation layer is introduced.
 
 ## Consequences
 
@@ -49,6 +53,13 @@ calendar-day commitment extensions, and daily break-credit rollover.
 - A normal VPN cannot substitute its exit region because Fence does not use IP
   geolocation. A VPN may make lookup unavailable, in which case the previous
   accepted timezone remains authoritative.
+- If a Mac crosses a timezone while staying awake and the weekly UI remains
+  closed, Fence keeps the previous root timezone until the next approved
+  one-shot trigger.
+- If the daemon must defer a freshly resolved timezone until an active block
+  ends, the app keeps that accepted identifier only in memory and retries on
+  the existing block-teardown event. It does not request location again or run
+  a retry timer.
 - Automatic travel is convenience against ordinary configuration changes, not
   cryptographic proof of physical presence against an administrator modifying
   Fence or macOS.

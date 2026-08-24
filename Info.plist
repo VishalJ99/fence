@@ -54,9 +54,9 @@
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSLocationUsageDescription</key>
-	<string>Fence uses your approximate location to keep your committed schedule aligned with your timezone while travelling. Fence does not store your coordinates or send them to Fence.</string>
+	<string>Fence checks approximate location at Commit, startup, wake, or schedule open to resolve your timezone. It does not store coordinates or send them to Fence servers.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Fence uses your approximate location to keep your committed schedule aligned with your timezone while travelling. Fence does not store your coordinates or send them to Fence.</string>
+	<string>Fence checks approximate location at Commit, startup, wake, or schedule open to resolve your timezone. It does not store coordinates or send them to Fence servers.</string>
 	<key>NSLocationDefaultAccuracyReduced</key>
 	<true/>
 	<key>NSPrincipalClass</key>

@@ -64,13 +64,13 @@
 @property (nonatomic, strong) NSTextField *locationStatusLabel;
 @property (nonatomic, strong) NSButton *openLocationSettingsButton;
 @property (nonatomic, strong) id clickOutsideMonitor;
+@property (nonatomic) BOOL refreshAfterOpeningLocationSettings;
 @end
 
 @implementation SCTimezoneInfoWindowController
 
 + (void)showAsSheetForWindow:(NSWindow *)parentWindow {
     SCTimezoneInfoWindowController *controller = [[SCTimezoneInfoWindowController alloc] init];
-    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
     [[SCTravelTimezoneManager sharedManager] requestAuthorizationFromUserInteraction];
     [parentWindow beginSheet:controller.window completionHandler:^(NSModalResponse __unused returnCode) {
         [controller removeClickOutsideMonitor];
@@ -103,6 +103,11 @@
                selector:@selector(travelTimezoneDidChange:)
                    name:SCScheduleManagerDidChangeNotification
                  object:nil];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+               selector:@selector(applicationDidBecomeActiveAfterOpeningLocationSettings:)
+                   name:NSApplicationDidBecomeActiveNotification
+                 object:nil];
         [self refreshUI];
     }
     return self;
@@ -130,13 +135,13 @@
     [stack addArrangedSubview:titleLabel];
 
     NSTextField *explainLabel = [NSTextField wrappingLabelWithString:
-        @"Fence can follow your timezone using approximate location, so changing your Mac's timezone cannot move you outside your committed blocks."];
+        @"Fence checks approximate location once at startup, wake, Commit, and when you open the schedule. It does not track location continuously, and changing your Mac's timezone cannot move your committed blocks."];
     explainLabel.font = [NSFont systemFontOfSize:13];
     [stack addArrangedSubview:explainLabel];
     [explainLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
     self.travelModeCheckbox = [NSButton checkboxWithTitle:
-        @"Use Location Services to update my timezone while travelling"
+        @"Automatically refresh my timezone at key moments"
                                                   target:self
                                                   action:@selector(travelModeChanged:)];
     [stack addArrangedSubview:self.travelModeCheckbox];
@@ -166,7 +171,7 @@
     [self.openLocationSettingsButton.heightAnchor constraintGreaterThanOrEqualToConstant:40.0].active = YES;
 
     NSTextField *privacyLabel = [NSTextField wrappingLabelWithString:
-        @"Fence uses Apple's Location Services only to resolve a timezone. Fence does not store your coordinates or send them to Fence."];
+        @"Fence uses Apple's Location Services only to resolve a timezone. It does not store coordinates or send them to Fence servers."];
     privacyLabel.font = [NSFont systemFontOfSize:11];
     privacyLabel.textColor = [NSColor tertiaryLabelColor];
     [stack addArrangedSubview:privacyLabel];
@@ -226,7 +231,7 @@
     if (hasCommitment) {
         NSString *identifier = scheduleManager.recurringTimeZoneIdentifier;
         if (followsLocation) {
-            self.activeTitleLabel.stringValue = @"Automatic timezone tracking is active";
+            self.activeTitleLabel.stringValue = @"Automatic timezone refresh is active";
             self.activeDetailLabel.stringValue = identifier.length > 0
                 ? [NSString stringWithFormat:
                     @"Your schedule currently uses %@. Travel mode is locked until you end this commitment.",
@@ -307,7 +312,16 @@
     }
     NSURL *url = [NSURL URLWithString:
         @"x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"];
-    if (url != nil) [[NSWorkspace sharedWorkspace] openURL:url];
+    if (url != nil) {
+        self.refreshAfterOpeningLocationSettings = YES;
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
+}
+
+- (void)applicationDidBecomeActiveAfterOpeningLocationSettings:(NSNotification *)notification {
+    if (!self.refreshAfterOpeningLocationSettings) return;
+    self.refreshAfterOpeningLocationSettings = NO;
+    [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
 }
 
 - (void)travelTimezoneDidChange:(NSNotification *)notification {

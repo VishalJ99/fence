@@ -22,6 +22,8 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
 @property (nonatomic, copy, nullable) NSString *currentSessionTimeZoneIdentifier;
 @property (nonatomic, strong, nullable) NSDate *currentSessionResolutionDate;
 @property (nonatomic, copy, nullable) NSString *pendingDaemonTimeZoneIdentifier;
+@property (nonatomic) BOOL locationRequestInFlight;
+- (void)beginOneShotLocationRequest;
 - (void)attemptDaemonUpdateForTimeZoneIdentifier:(NSString *)identifier;
 @end
 
@@ -78,27 +80,30 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         setBool:enabled forKey:SCTravelTimezoneEnabledDefaultsKey];
 
     if (enabled) {
-        [self startIfEnabled];
+        [self requestTimeZoneRefreshIfNeeded];
         [self requestAuthorizationFromUserInteraction];
     } else {
         [self.locationManager stopUpdatingLocation];
         [self.geocoder cancelGeocode];
+        self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusDisabled;
         [self postChangeNotification];
     }
 }
 
-- (void)startIfEnabled {
+- (void)requestTimeZoneRefreshIfNeeded {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self startIfEnabled];
+            [self requestTimeZoneRefreshIfNeeded];
         });
         return;
     }
 
     if (![self shouldTrackLocation]) {
         [self.locationManager stopUpdatingLocation];
+        [self.geocoder cancelGeocode];
+        self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusDisabled;
         [self postChangeNotification];
@@ -106,7 +111,9 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     }
 
     if (![CLLocationManager locationServicesEnabled]) {
+        [self.locationManager stopUpdatingLocation];
         [self.geocoder cancelGeocode];
+        self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusUnavailable;
         [self postChangeNotification];
@@ -117,7 +124,9 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     CLAuthorizationStatus authorization = self.locationManager.authorizationStatus;
     if (authorization == kCLAuthorizationStatusDenied ||
         authorization == kCLAuthorizationStatusRestricted) {
+        [self.locationManager stopUpdatingLocation];
         [self.geocoder cancelGeocode];
+        self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusUnavailable;
         [self postChangeNotification];
@@ -125,18 +134,25 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     }
 
     if (authorization == kCLAuthorizationStatusNotDetermined) {
+        [self.locationManager stopUpdatingLocation];
+        [self.geocoder cancelGeocode];
+        self.locationRequestInFlight = NO;
+        self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusNeedsAuthorization;
         [self postChangeNotification];
         return;
     }
 
-    // A new automatic commitment must have a recent fix from this app
-    // session. Returning from sleep or Settings restarts the resolving state
-    // once that acceptance has aged out.
-    self.status = self.lastResolvedTimeZoneIdentifier != nil
-        ? SCTravelTimezoneStatusReady : SCTravelTimezoneStatusResolving;
+    if (self.locationRequestInFlight || self.geocoder.isGeocoding) return;
+
+    [self beginOneShotLocationRequest];
+}
+
+- (void)beginOneShotLocationRequest {
+    self.locationRequestInFlight = YES;
+    self.status = SCTravelTimezoneStatusResolving;
     [self postChangeNotification];
-    [self.locationManager startUpdatingLocation];
+    [self.locationManager requestLocation];
 }
 
 - (void)requestAuthorizationFromUserInteraction {
@@ -167,18 +183,30 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     CLLocationManager *manager = [[CLLocationManager alloc] init];
     manager.delegate = self;
     manager.desiredAccuracy = kCLLocationAccuracyReduced;
-    manager.distanceFilter = kCLDistanceFilterNone;
     self.locationManager = manager;
 }
 
 - (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
-    [self startIfEnabled];
+    [self requestTimeZoneRefreshIfNeeded];
 }
 
 - (void)locationManager:(CLLocationManager *)manager
       didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    CLLocation *location = locations.lastObject;
-    if (![self isUsableLocation:location] || self.geocoder.isGeocoding) return;
+    self.locationRequestInFlight = NO;
+    CLLocation *location = nil;
+    for (CLLocation *candidate in locations.reverseObjectEnumerator) {
+        if ([self isUsableLocation:candidate]) {
+            location = candidate;
+            break;
+        }
+    }
+    if (location == nil || self.geocoder.isGeocoding) {
+        self.pendingDaemonTimeZoneIdentifier = nil;
+        self.status = [self shouldTrackLocation]
+            ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+        [self postChangeNotification];
+        return;
+    }
 
     __weak typeof(self) weakSelf = self;
     [self.geocoder reverseGeocodeLocation:location
@@ -190,22 +218,33 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         BOOL stillAuthorized = authorization == kCLAuthorizationStatusAuthorized;
         if (![strongSelf shouldTrackLocation] || error != nil ||
             ![CLLocationManager locationServicesEnabled] || !stillAuthorized ||
-            ![strongSelf isUsableLocation:location]) return;
+            ![strongSelf isUsableLocation:location]) {
+            strongSelf.pendingDaemonTimeZoneIdentifier = nil;
+            strongSelf.status = [strongSelf shouldTrackLocation]
+                ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+            [strongSelf postChangeNotification];
+            return;
+        }
 
         NSString *identifier = placemarks.firstObject.timeZone.name;
-        if (identifier.length == 0 || [NSTimeZone timeZoneWithName:identifier] == nil) return;
+        if (identifier.length == 0 || [NSTimeZone timeZoneWithName:identifier] == nil) {
+            strongSelf.pendingDaemonTimeZoneIdentifier = nil;
+            strongSelf.status = SCTravelTimezoneStatusUnavailable;
+            [strongSelf postChangeNotification];
+            return;
+        }
         [strongSelf acceptTimeZoneIdentifier:identifier];
     }];
 }
 
 - (void)locationManager:(CLLocationManager *)manager
         didFailWithError:(NSError *)error {
-    if (error.code == kCLErrorDenied) {
-        [self.geocoder cancelGeocode];
-        self.pendingDaemonTimeZoneIdentifier = nil;
-        self.status = SCTravelTimezoneStatusUnavailable;
-        [self postChangeNotification];
-    }
+    self.locationRequestInFlight = NO;
+    [self.geocoder cancelGeocode];
+    self.pendingDaemonTimeZoneIdentifier = nil;
+    self.status = [self shouldTrackLocation]
+        ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+    [self postChangeNotification];
 }
 
 - (BOOL)isUsableLocation:(nullable CLLocation *)location {
@@ -242,7 +281,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
 - (void)attemptDaemonUpdateForTimeZoneIdentifier:(NSString *)identifier {
     SCScheduleManager *scheduleManager = [SCScheduleManager sharedManager];
     if (self.status != SCTravelTimezoneStatusReady ||
-        ![self.lastResolvedTimeZoneIdentifier isEqualToString:identifier] ||
+        ![self.currentSessionTimeZoneIdentifier isEqualToString:identifier] ||
         ![self shouldTrackLocation] ||
         !scheduleManager.hasRecurringCommitment ||
         !scheduleManager.recurringCommitmentFollowsLocationTimeZone ||
@@ -264,22 +303,36 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
             return;
         }
 
-        if (!updated && error.code == 409) {
-            // The helper rejected an active-to-active policy change. Keep the
-            // root timezone unchanged and retry at a scheduler-sized interval;
-            // stationary Macs are not guaranteed another location callback.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{
-                typeof(self) retrySelf = weakSelf;
-                if (retrySelf == nil ||
-                    ![retrySelf.pendingDaemonTimeZoneIdentifier isEqualToString:identifier]) return;
-                [retrySelf attemptDaemonUpdateForTimeZoneIdentifier:identifier];
-            });
-        } else {
+        if (updated || error.code != 409) {
             strongSelf.pendingDaemonTimeZoneIdentifier = nil;
         }
         [strongSelf postChangeNotification];
     }];
+}
+
+- (void)retryPendingDaemonTimeZoneUpdateIfNeeded {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self retryPendingDaemonTimeZoneUpdateIfNeeded];
+        });
+        return;
+    }
+
+    NSString *identifier = self.pendingDaemonTimeZoneIdentifier;
+    if (identifier.length == 0) return;
+
+    CLAuthorizationStatus authorization = self.locationManager.authorizationStatus;
+    if (![CLLocationManager locationServicesEnabled] ||
+        authorization != kCLAuthorizationStatusAuthorized ||
+        ![self shouldTrackLocation]) {
+        self.pendingDaemonTimeZoneIdentifier = nil;
+        self.status = [self shouldTrackLocation]
+            ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+        [self postChangeNotification];
+        return;
+    }
+
+    [self attemptDaemonUpdateForTimeZoneIdentifier:identifier];
 }
 
 - (void)postChangeNotification {

@@ -47,10 +47,19 @@ the Mac's system timezone are ignored by the active recurring commitment.
 The user may enable automatic timezone tracking from the **Traveling?** flow
 before committing. The logged-in Fence app then:
 
-1. requests approximate Location Services access;
+1. requests one approximate location at Commit, app startup, wake from sleep,
+   or explicit opening of the weekly schedule;
 2. obtains a transient coordinate;
 3. resolves it to a named timezone; and
 4. sends only the timezone identifier to `selfcontrold`.
+
+Fence does not keep continuous location updates running and does not poll
+Location Services on a timer. If the Mac crosses a timezone while it stays
+awake and the weekly UI remains closed, the previous root-owned timezone
+remains in use until the next one-shot trigger. If an active block makes a
+timezone change temporarily unsafe, Fence retries the already accepted
+timezone on the existing block-teardown event without requesting location
+again.
 
 Core Location and geocoding remain app-side. Fence does not persist, log,
 upload, or send coordinates across XPC. The root daemon does not request

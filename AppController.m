@@ -475,6 +475,14 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [SCSentry addBreadcrumb: @"Received configuration changed notification" category: @"app"];
     // if our configuration changed, we should assume the settings may have changed
     [[SCSettings sharedSettings] reloadSettings];
+
+    // A recurring block teardown is the safe boundary for a timezone change
+    // that the daemon previously deferred. Retry the accepted timezone only;
+    // this path never asks Location Services for another fix.
+    if (![SCBlockUtilities modernBlockIsRunning]) {
+        [[SCTravelTimezoneManager sharedManager]
+            retryPendingDaemonTimeZoneUpdateIfNeeded];
+    }
     
     // clean out empty strings from the defaults blocklist (they can end up there occasionally due to UI glitches etc)
     // note we don't screw with the actively running blocklist - that should've been cleaned before it started anyway
@@ -540,6 +548,15 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
 	[NSApplication sharedApplication].delegate = self;
+
+    // The app controller exists for the full login session, unlike the weekly
+    // window controller. Own the location refresh wake trigger here so it also
+    // fires before the schedule UI has ever been opened.
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserver:self
+           selector:@selector(systemDidWakeForTravelTimezone:)
+               name:NSWorkspaceDidWakeNotification
+             object:nil];
 
     // Initialize Sparkle updater for automatic updates
     self.updaterController = [[SPUStandardUpdaterController alloc] initWithStartingUpdater:YES
@@ -618,7 +635,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                                                  name:SCTelemetryConsentDidChangeNotification
                                                object:nil];
     [self runPostUpdateRepairMigrations];
-    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
+    [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
 
     // If we don't have a connection within 0.5 seconds, or the installed daemon
     // lacks the protocol/capabilities required by this app, repair it once.
@@ -710,10 +727,8 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [settings_ synchronizeSettings];
 }
 
-- (void)applicationDidBecomeActive:(NSNotification *)notification {
-    // Re-check after the user returns from Location Services settings. This
-    // never prompts by itself; permission remains tied to explicit UI action.
-    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
+- (void)systemDidWakeForTravelTimezone:(NSNotification *)notification {
+    [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
@@ -827,7 +842,17 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                         NSLog(@"AppController: Recurring runtime refresh unavailable (domain=%@ code=%ld)",
                               refreshError.domain, (long)refreshError.code);
                     }
-                    [[SCTravelTimezoneManager sharedManager] startIfEnabled];
+                    SCTravelTimezoneManager *travelManager =
+                        [SCTravelTimezoneManager sharedManager];
+                    SCScheduleManager *scheduleManager = [SCScheduleManager sharedManager];
+                    if (travelManager.status == SCTravelTimezoneStatusDisabled &&
+                        scheduleManager.hasRecurringCommitment &&
+                        scheduleManager.recurringCommitmentFollowsLocationTimeZone) {
+                        // Startup already requested once when local state knew
+                        // travel mode was active. Request here only when the
+                        // daemon has just recovered an otherwise-missing mode.
+                        [travelManager requestTimeZoneRefreshIfNeeded];
+                    }
                     [self runTelemetryConsistencyCheckWithDaemonProtocol:protocolVersion];
                 }];
                 return;
@@ -1455,7 +1480,8 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 												  object: nil];
 	[[NSDistributedNotificationCenter defaultCenter] removeObserver: self
 															   name: @"SCConfigurationChangedNotification"
-															 object: nil];
+														 object: nil];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
 }
 
 - (id)initialWindow {
