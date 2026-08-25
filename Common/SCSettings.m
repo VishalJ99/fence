@@ -198,6 +198,9 @@ static BOOL SCSettingsProtectedHoursAreValid(id candidate) {
         @"ApprovedRecurringScheduleCommitments": @{},
         // Temporary scheduler pauses keyed by recurring commitment ID.
         @"ActiveScheduleBreaks": @{},
+        // Per-UID timezone identifiers accepted from app-side Core Location.
+        // Dates are daemon-stamped; coordinates never enter this store.
+        @"TrustedTravelTimeZones": @{},
 
         // block settings
         // the user sets these in defaults, then when a block is started they're copied over to settings
@@ -519,6 +522,28 @@ static BOOL SCSettingsProtectedHoursAreValid(id candidate) {
                 ![activeBreak[@"controllingUID"] isEqual:commitment[@"controllingUID"]] ||
                 ![startedAt isKindOfClass:[NSDate class]] || ![endsAt isKindOfClass:[NSDate class]] ||
                 [endsAt compare:startedAt] != NSOrderedDescending) return NO;
+        }
+    }
+
+    id trustedTimeZonesValue = settings[@"TrustedTravelTimeZones"];
+    if (trustedTimeZonesValue != nil) {
+        if (![trustedTimeZonesValue isKindOfClass:[NSDictionary class]] ||
+            [trustedTimeZonesValue count] > 512) return NO;
+        for (id ownerKey in trustedTimeZonesValue) {
+            NSDictionary *record = [trustedTimeZonesValue[ownerKey] isKindOfClass:[NSDictionary class]]
+                ? trustedTimeZonesValue[ownerKey] : nil;
+            NSNumber *owner = record[@"controllingUID"];
+            NSString *canonicalOwnerKey = SCSettingsIntegerNumberInRange(owner, UINT_MAX)
+                ? [NSString stringWithFormat:@"%u", owner.unsignedIntValue] : nil;
+            id identifier = record[@"timeZoneIdentifier"];
+            if (![ownerKey isKindOfClass:[NSString class]] || record == nil ||
+                !SCSettingsIntegerNumberInRange(record[@"schemaVersion"], 1) ||
+                [record[@"schemaVersion"] integerValue] != 1 ||
+                owner.unsignedIntValue == 0 ||
+                ![ownerKey isEqual:canonicalOwnerKey] ||
+                ![identifier isKindOfClass:[NSString class]] ||
+                [NSTimeZone timeZoneWithName:identifier] == nil ||
+                ![record[@"resolvedAt"] isKindOfClass:[NSDate class]]) return NO;
         }
     }
 

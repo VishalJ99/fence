@@ -126,6 +126,11 @@ supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
                                      timeZoneIdentifier:(NSString *)timeZoneIdentifier
                                                   reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                                  NSError * _Nullable error))reply;
+- (void)storeTrustedTravelTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
+- (void)getTrustedTravelTimeZone:
+    (void(^)(NSDictionary<NSString *, id> *state, NSError * _Nullable error))reply;
 - (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID
                                   generation:(NSString *)generation
                                        reply:(void(^)(NSDictionary<NSString *, id> *result,

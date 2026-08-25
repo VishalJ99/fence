@@ -620,7 +620,7 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
                    capabilities:(NSArray<NSString*>*)capabilities
 supportsRecurringSchedulesWithReason:(NSString**)reason {
-    if (protocolVersion < SCDaemonProtocolVersionRecurringTimeZone) {
+    if (protocolVersion < SCDaemonProtocolVersionTrustedTravelTimeZone) {
         if (reason != NULL) *reason = @"recurring-scheduler-protocol-too-old";
         return NO;
     }
@@ -643,6 +643,10 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
     }
     if (![capabilities containsObject:SCDaemonCapabilityRecurringTimeZone]) {
         if (reason != NULL) *reason = @"recurring-time-zone-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityTrustedTravelTimeZone]) {
+        if (reason != NULL) *reason = @"trusted-travel-time-zone-missing";
         return NO;
     }
     if (reason != NULL) *reason = @"compatible";
@@ -994,6 +998,26 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                                 generation:generation
                                         timeZoneIdentifier:timeZoneIdentifier
                                                      reply:reply];
+    }];
+}
+
+- (void)storeTrustedTravelTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] storeTrustedTravelTimeZoneIdentifier:timeZoneIdentifier reply:reply];
+    }];
+}
+
+- (void)getTrustedTravelTimeZone:
+    (void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error != nil) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+            reply(@{}, proxyError);
+        }] getTrustedTravelTimeZoneWithReply:reply];
     }];
 }
 

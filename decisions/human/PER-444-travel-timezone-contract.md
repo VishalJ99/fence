@@ -17,14 +17,19 @@ system timezone.
 5. Fence requests one location at Commit, app startup, wake from sleep, and
    explicit opening of the weekly schedule UI. It does not continuously track
    location and does not poll Location Services on a timer.
-6. Location denial, an unavailable or simulated fix, reverse-geocoding failure,
-   transport failure, or persistence failure leaves the last root-accepted
-   timezone unchanged. Fence never falls back to IP geolocation or to a newly
-   changed system timezone during an active commitment.
-7. Fence does not persist, log, upload, or send coordinates over its XPC
+6. A fresh accepted result is preferred for a new automatic commitment. If a
+   one-shot request instead fails transiently because no usable fix, network,
+   or reverse-geocoding result is available, Commit may use the last timezone
+   previously persisted by the root helper for that user, regardless of age.
+   If there is no such timezone, Commit is refused.
+7. Location Services disabled, undetermined, denied, or restricted never uses
+   the stored fallback for a new commitment. The user must enable access or
+   turn automatic travel off. An in-flight request must finish rather than
+   falling back early.
+8. Fence does not persist, log, upload, or send coordinates over its XPC
    boundary. Apple Location Services and reverse geocoding remain platform
    services outside Fence's storage and telemetry.
-8. Existing recurring commitments are pinned once, at helper upgrade, to the
+9. Existing recurring commitments are pinned once, at helper upgrade, to the
    then-current timezone with automatic travel off.
 
 The absolute system clock is assumed to remain correct. This decision protects
@@ -35,13 +40,18 @@ calendar-day commitment extensions, and daily break-credit rollover.
 
 - Core Location runs only in the logged-in Fence app. The root daemon receives
   no coordinates and requests no Location Services permission.
-- A new automatic commitment accepts only a fresh timezone resolved in the
-  current app session; writable app preferences are never a commit authority.
+- The helper stores one last location-resolved timezone identifier and
+  daemon-stamped date per authenticated UID. It stores no coordinates. A new
+  automatic commitment accepts either a fresh current-session result or that
+  root-owned value after a transient resolution failure; writable app
+  preferences are never a commit authority. The stored date is informational
+  only and is never used as a freshness or eligibility cutoff.
 - Automatic timezone mutations require the exact root commitment identity,
   owner, generation, an enabled location-following mode, and a valid named
   timezone.
-- The change is an additive extension of the recurring schema so older helpers
-  can continue reading the root settings during rollback.
+- The trusted fallback is a separate additive top-level root-settings cache.
+  Protocol v8 advertises it explicitly; older helpers ignore and preserve the
+  unknown key while continuing to read existing recurring commitments.
 - No coordinate history, offline timezone database, IP lookup, continuous
   location monitoring, timer-based location polling, or speculative
   attestation layer is introduced.
@@ -51,8 +61,9 @@ calendar-day commitment extensions, and daily break-credit rollover.
 - Changing Time Zone in System Settings no longer moves an active recurring
   schedule.
 - A normal VPN cannot substitute its exit region because Fence does not use IP
-  geolocation. A VPN may make lookup unavailable, in which case the previous
-  accepted timezone remains authoritative.
+  geolocation. A VPN may make lookup unavailable; a new Commit may then use the
+  last root-trusted timezone, while an active commitment keeps its existing
+  root-owned timezone.
 - If a Mac crosses a timezone while staying awake and the weekly UI remains
   closed, Fence keeps the previous root timezone until the next approved
   one-shot trigger.
@@ -66,6 +77,7 @@ calendar-day commitment extensions, and daily break-credit rollover.
 
 ## Rollback
 
-Older helpers ignore the additive timezone fields and retain their previous
-local-time behavior. Do not remove the legacy-field acceptance path until the
-rollback window for the recurring scheduler has closed.
+A v7 helper continues enforcing existing commitments with their root-owned
+timezone fields, but it cannot read or write the offline fallback cache. The
+current app therefore requires the v8 capability before new recurring
+operations. App and helper must be rolled back together if v8 is removed.

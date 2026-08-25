@@ -22,7 +22,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionRootScheduler = 5,
     SCDaemonProtocolVersionRecurringScheduler = 6,
     SCDaemonProtocolVersionRecurringTimeZone = 7,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringTimeZone,
+    SCDaemonProtocolVersionTrustedTravelTimeZone = 8,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionTrustedTravelTimeZone,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -39,6 +40,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityRecurringScheduleBreaks @"recurring-schedule-breaks-v1"
 #define SCDaemonCapabilityRecurringCommitmentExtend @"recurring-commitment-extend-v1"
 #define SCDaemonCapabilityRecurringTimeZone @"recurring-time-zone-v1"
+#define SCDaemonCapabilityTrustedTravelTimeZone @"trusted-travel-time-zone-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -54,6 +56,13 @@ NS_INLINE BOOL SCDaemonClientMayStrictifyActiveBlock(uid_t clientUID,
 NS_INLINE BOOL SCDaemonClientOwnsSchedule(uid_t clientUID, NSNumber * _Nullable scheduleOwner) {
     return [scheduleOwner isKindOfClass:[NSNumber class]] &&
         scheduleOwner.longLongValue >= 0 && scheduleOwner.unsignedIntValue == clientUID;
+}
+
+/// The travel cache is available only to the signed GUI app and is always
+/// scoped to the non-root UID authenticated by the XPC connection.
+NS_INLINE BOOL SCDaemonClientMayAccessTrustedTravelTimeZone(uid_t clientUID,
+                                                            BOOL clientIsFenceApp) {
+    return clientUID != 0 && clientIsFenceApp;
 }
 
 /// An idempotent strictify request still has to exercise the physical layers.
@@ -246,6 +255,16 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
                                      timeZoneIdentifier:(NSString *)timeZoneIdentifier
                                                   reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                                  NSError * _Nullable error))reply;
+
+/// Stores a successfully location-resolved timezone for the signed app's UID.
+/// The daemon stamps the resolution date; coordinates never cross XPC.
+- (void)storeTrustedTravelTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                       reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                      NSError * _Nullable error))reply;
+
+/// Returns only the signed app user's last root-trusted timezone, if one exists.
+- (void)getTrustedTravelTimeZoneWithReply:
+    (void(^)(NSDictionary<NSString *, id> *state, NSError * _Nullable error))reply;
 
 /// Ends only the caller's exact recurring commitment, and only after its edit
 /// lock has expired while Protected Hours is inactive.

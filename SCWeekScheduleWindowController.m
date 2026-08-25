@@ -1044,12 +1044,30 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)showCommitConfirmationDialog {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     SCTravelTimezoneManager *travelManager = [SCTravelTimezoneManager sharedManager];
-    if (travelManager.isEnabled &&
-        (travelManager.status != SCTravelTimezoneStatusReady ||
-         travelManager.lastResolvedTimeZoneIdentifier == nil)) {
+    NSString *commitTimeZoneIdentifier = travelManager.isEnabled
+        ? travelManager.timeZoneIdentifierForCommit : NSTimeZone.localTimeZone.name;
+    BOOL followsLocationTimeZoneForCommit = travelManager.isEnabled;
+    BOOL usesTrustedTimeZoneForCommit = travelManager.usesTrustedTimeZoneForCommit;
+    if (travelManager.isEnabled && commitTimeZoneIdentifier == nil) {
         // Opening the weekly UI normally supplies the Commit-time result.
         // Retry here only when no fresh accepted result is available.
         [travelManager requestTimeZoneRefreshIfNeeded];
+    }
+    if (travelManager.isEnabled && commitTimeZoneIdentifier == nil) {
+        NSAlert *locationAlert = [[NSAlert alloc] init];
+        if (travelManager.status == SCTravelTimezoneStatusResolving) {
+            locationAlert.messageText = @"Timezone Still Resolving";
+            locationAlert.informativeText = @"Fence is waiting for Location Services to finish. Try Commit again in a moment, or turn automatic travel off before committing.";
+        } else if (travelManager.failureReason == SCTravelTimezoneFailureReasonPermission ||
+                   travelManager.status == SCTravelTimezoneStatusNeedsAuthorization) {
+            locationAlert.messageText = @"Location Access Required";
+            locationAlert.informativeText = @"Location access is off. Allow Location Services or turn automatic travel off before committing.";
+        } else {
+            locationAlert.messageText = @"Timezone Unavailable";
+            locationAlert.informativeText = @"Fence couldn't determine your timezone and has no previously verified timezone. Connect to a network, try again where Location Services is available, or turn automatic travel off.";
+        }
+        [locationAlert beginSheetModalForWindow:self.window completionHandler:nil];
+        return;
     }
 
     NSAlert *alert = [[NSAlert alloc] init];
@@ -1075,13 +1093,20 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
     }
 
-    NSString *commitTimeZoneIdentifier = travelManager.isEnabled
-        ? travelManager.lastResolvedTimeZoneIdentifier : NSTimeZone.localTimeZone.name;
-    NSString *timezoneSummary = travelManager.isEnabled
-        ? [NSString stringWithFormat:@"Fence checks its timezone at Commit, startup, wake, and schedule open (currently %@).",
-            commitTimeZoneIdentifier ?: @"still resolving"]
-        : [NSString stringWithFormat:@"It will stay on %@; plan destination-time blocks before committing.",
+    NSString *timezoneSummary = nil;
+    if (travelManager.isEnabled && travelManager.usesTrustedTimeZoneForCommit) {
+        timezoneSummary = [NSString stringWithFormat:
+            @"Current location is unavailable. Fence will use your last verified timezone: %@.",
+            commitTimeZoneIdentifier];
+    } else if (travelManager.isEnabled) {
+        timezoneSummary = [NSString stringWithFormat:
+            @"Fence checks its timezone at Commit, startup, wake, and schedule open (currently %@).",
+            commitTimeZoneIdentifier];
+    } else {
+        timezoneSummary = [NSString stringWithFormat:
+            @"It will stay on %@; plan destination-time blocks before committing.",
             commitTimeZoneIdentifier ?: @"your current timezone"];
+    }
     alert.informativeText = [NSString stringWithFormat:
         @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. Editing and bundle changes stay locked until you end it; the selected period controls when End first becomes available. %@",
         timezoneSummary];
@@ -1126,18 +1151,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         if (returnCode == NSAlertFirstButtonReturn) {
             SCTravelTimezoneManager *currentTravelManager = [SCTravelTimezoneManager sharedManager];
             BOOL followsLocationTimeZone = currentTravelManager.isEnabled;
-            NSString *timeZoneIdentifier = followsLocationTimeZone
-                ? currentTravelManager.lastResolvedTimeZoneIdentifier : NSTimeZone.localTimeZone.name;
-            if (followsLocationTimeZone &&
-                (currentTravelManager.status != SCTravelTimezoneStatusReady ||
-                 [NSTimeZone timeZoneWithName:timeZoneIdentifier] == nil)) {
-                [currentTravelManager requestTimeZoneRefreshIfNeeded];
-                NSAlert *locationAlert = [[NSAlert alloc] init];
-                locationAlert.messageText = @"Timezone Still Resolving";
-                locationAlert.informativeText = @"Fence requested a fresh timezone. Wait for Location Services to finish, then click Commit again; or turn automatic travel mode off before committing.";
-                [locationAlert beginSheetModalForWindow:self.window completionHandler:nil];
+            NSString *currentCandidate = followsLocationTimeZone
+                ? currentTravelManager.timeZoneIdentifierForCommit : NSTimeZone.localTimeZone.name;
+            BOOL selectionChanged = followsLocationTimeZone != followsLocationTimeZoneForCommit ||
+                ![currentCandidate isEqual:commitTimeZoneIdentifier] ||
+                (followsLocationTimeZone &&
+                 currentTravelManager.usesTrustedTimeZoneForCommit != usesTrustedTimeZoneForCommit);
+            if (selectionChanged || currentCandidate == nil) {
+                [self showCommitConfirmationDialog];
                 return;
             }
+            NSString *timeZoneIdentifier = commitTimeZoneIdentifier;
             self.commitButton.title = @"Committing…";
             self.commitButton.enabled = NO;
             self.commitmentLabel.stringValue = @"Saving with the Fence helper";

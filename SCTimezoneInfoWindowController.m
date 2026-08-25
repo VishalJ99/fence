@@ -280,13 +280,31 @@
                 self.openLocationSettingsButton.hidden = NO;
                 break;
             case SCTravelTimezoneStatusUnavailable:
-                if (followsLocation) identifier = scheduleManager.recurringTimeZoneIdentifier;
-                self.locationStatusLabel.stringValue = identifier.length > 0
-                    ? [NSString stringWithFormat:
-                        @"Location Services is unavailable. Fence will keep using %@ until it can resolve another timezone.",
-                        identifier]
-                    : @"Location Services is unavailable. Turn it on so Fence can resolve your timezone.";
-                self.openLocationSettingsButton.hidden = NO;
+                if (followsLocation) {
+                    identifier = scheduleManager.recurringTimeZoneIdentifier;
+                    self.locationStatusLabel.stringValue = identifier.length > 0
+                        ? [NSString stringWithFormat:
+                            @"Location Services is unavailable. Fence will keep using %@ until it can resolve another timezone.",
+                            identifier]
+                        : @"Location Services is unavailable. Fence will retry at the next approved check.";
+                    self.openLocationSettingsButton.hidden =
+                        travelManager.failureReason != SCTravelTimezoneFailureReasonPermission;
+                } else if (travelManager.failureReason == SCTravelTimezoneFailureReasonTransient &&
+                           travelManager.timeZoneIdentifierForCommit.length > 0) {
+                    NSString *candidate = travelManager.timeZoneIdentifierForCommit;
+                    self.locationStatusLabel.stringValue = travelManager.usesTrustedTimeZoneForCommit
+                        ? [NSString stringWithFormat:
+                            @"Current location is unavailable. Fence can use your last verified timezone, %@, when you Commit.",
+                            candidate]
+                        : [NSString stringWithFormat:
+                            @"The latest location check failed, but Fence can still use its recent verified timezone, %@, when you Commit.",
+                            candidate];
+                } else if (travelManager.failureReason == SCTravelTimezoneFailureReasonTransient) {
+                    self.locationStatusLabel.stringValue = @"Fence couldn't determine your timezone and has no previously verified timezone.";
+                } else {
+                    self.locationStatusLabel.stringValue = @"Location Services is unavailable. Turn it on so Fence can resolve your timezone.";
+                    self.openLocationSettingsButton.hidden = NO;
+                }
                 break;
             case SCTravelTimezoneStatusResolving:
                 self.locationStatusLabel.stringValue = @"Resolving your timezone…";

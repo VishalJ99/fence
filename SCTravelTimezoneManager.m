@@ -6,6 +6,7 @@
 #import "SCTravelTimezoneManager.h"
 
 #import "Block Management/SCScheduleManager.h"
+#import "SCXPCClient.h"
 
 NSNotificationName const SCTravelTimezoneManagerDidChangeNotification =
     @"SCTravelTimezoneManagerDidChangeNotification";
@@ -19,12 +20,25 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
 @property (nonatomic, strong, nullable) CLLocationManager *locationManager;
 @property (nonatomic, strong) CLGeocoder *geocoder;
 @property (nonatomic, readwrite) SCTravelTimezoneStatus status;
+@property (nonatomic, readwrite) SCTravelTimezoneFailureReason failureReason;
 @property (nonatomic, copy, nullable) NSString *currentSessionTimeZoneIdentifier;
 @property (nonatomic, strong, nullable) NSDate *currentSessionResolutionDate;
+@property (nonatomic, copy, readwrite, nullable) NSString *lastTrustedTimeZoneIdentifier;
+@property (nonatomic, strong, readwrite, nullable) NSDate *lastTrustedTimeZoneResolutionDate;
 @property (nonatomic, copy, nullable) NSString *pendingDaemonTimeZoneIdentifier;
 @property (nonatomic) BOOL locationRequestInFlight;
+// Root-cache operations share one XPC client. Writes run in order, and a read
+// invalidated by a newer write is retried after that write finishes.
+@property (nonatomic) BOOL trustedTimeZoneLoadInFlight;
+@property (nonatomic) BOOL trustedTimeZoneStoreInFlight;
+@property (nonatomic) BOOL trustedTimeZoneReloadAfterStore;
+@property (nonatomic) NSUInteger trustedTimeZoneGeneration;
+@property (nonatomic, copy, nullable) NSString *queuedTrustedTimeZoneIdentifier;
+@property (nonatomic, strong, nullable) SCXPCClient *trustedTimeZoneXPCClient;
 - (void)beginOneShotLocationRequest;
 - (void)attemptDaemonUpdateForTimeZoneIdentifier:(NSString *)identifier;
+- (void)refreshTrustedTimeZone;
+- (void)persistTrustedTimeZoneIdentifier:(NSString *)identifier;
 @end
 
 @implementation SCTravelTimezoneManager
@@ -45,6 +59,12 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         _status = self.isEnabled
             ? SCTravelTimezoneStatusNeedsAuthorization
             : SCTravelTimezoneStatusDisabled;
+        _failureReason = self.isEnabled
+            ? SCTravelTimezoneFailureReasonPermission
+            : SCTravelTimezoneFailureReasonNone;
+#if !defined(TESTING)
+        [self refreshTrustedTimeZone];
+#endif
     }
     return self;
 }
@@ -61,6 +81,30 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         return nil;
     }
     return self.currentSessionTimeZoneIdentifier;
+}
+
+- (NSString *)timeZoneIdentifierForCommit {
+    NSString *freshIdentifier = self.lastResolvedTimeZoneIdentifier;
+    BOOL mayUseFreshResult = self.status == SCTravelTimezoneStatusReady ||
+        (self.status == SCTravelTimezoneStatusUnavailable &&
+         self.failureReason == SCTravelTimezoneFailureReasonTransient);
+    if (mayUseFreshResult &&
+        [NSTimeZone timeZoneWithName:freshIdentifier] != nil) {
+        return freshIdentifier;
+    }
+    if (self.status == SCTravelTimezoneStatusUnavailable &&
+        self.failureReason == SCTravelTimezoneFailureReasonTransient &&
+        [NSTimeZone timeZoneWithName:self.lastTrustedTimeZoneIdentifier] != nil) {
+        return self.lastTrustedTimeZoneIdentifier;
+    }
+    return nil;
+}
+
+- (BOOL)usesTrustedTimeZoneForCommit {
+    return self.status == SCTravelTimezoneStatusUnavailable &&
+        self.failureReason == SCTravelTimezoneFailureReasonTransient &&
+        self.lastResolvedTimeZoneIdentifier == nil &&
+        self.timeZoneIdentifierForCommit != nil;
 }
 
 - (void)setEnabled:(BOOL)enabled {
@@ -88,6 +132,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusDisabled;
+        self.failureReason = SCTravelTimezoneFailureReasonNone;
         [self postChangeNotification];
     }
 }
@@ -106,9 +151,12 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusDisabled;
+        self.failureReason = SCTravelTimezoneFailureReasonNone;
         [self postChangeNotification];
         return;
     }
+
+    [self refreshTrustedTimeZone];
 
     if (![CLLocationManager locationServicesEnabled]) {
         [self.locationManager stopUpdatingLocation];
@@ -116,6 +164,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusUnavailable;
+        self.failureReason = SCTravelTimezoneFailureReasonPermission;
         [self postChangeNotification];
         return;
     }
@@ -129,6 +178,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusUnavailable;
+        self.failureReason = SCTravelTimezoneFailureReasonPermission;
         [self postChangeNotification];
         return;
     }
@@ -139,6 +189,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.locationRequestInFlight = NO;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = SCTravelTimezoneStatusNeedsAuthorization;
+        self.failureReason = SCTravelTimezoneFailureReasonPermission;
         [self postChangeNotification];
         return;
     }
@@ -151,6 +202,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
 - (void)beginOneShotLocationRequest {
     self.locationRequestInFlight = YES;
     self.status = SCTravelTimezoneStatusResolving;
+    self.failureReason = SCTravelTimezoneFailureReasonNone;
     [self postChangeNotification];
     [self.locationManager requestLocation];
 }
@@ -204,6 +256,8 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = [self shouldTrackLocation]
             ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+        self.failureReason = [self shouldTrackLocation]
+            ? SCTravelTimezoneFailureReasonTransient : SCTravelTimezoneFailureReasonNone;
         [self postChangeNotification];
         return;
     }
@@ -216,12 +270,21 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         if (strongSelf == nil) return;
         CLAuthorizationStatus authorization = strongSelf.locationManager.authorizationStatus;
         BOOL stillAuthorized = authorization == kCLAuthorizationStatusAuthorized;
-        if (![strongSelf shouldTrackLocation] || error != nil ||
-            ![CLLocationManager locationServicesEnabled] || !stillAuthorized ||
+        BOOL shouldTrack = [strongSelf shouldTrackLocation];
+        BOOL permissionError = [error.domain isEqualToString:kCLErrorDomain] &&
+            error.code == kCLErrorDenied;
+        BOOL permissionUnavailable = ![CLLocationManager locationServicesEnabled] ||
+            !stillAuthorized || permissionError;
+        if (!shouldTrack || error != nil || permissionUnavailable ||
             ![strongSelf isUsableLocation:location]) {
             strongSelf.pendingDaemonTimeZoneIdentifier = nil;
-            strongSelf.status = [strongSelf shouldTrackLocation]
+            strongSelf.status = shouldTrack
                 ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+            strongSelf.failureReason = !shouldTrack
+                ? SCTravelTimezoneFailureReasonNone
+                : (permissionUnavailable
+                    ? SCTravelTimezoneFailureReasonPermission
+                    : SCTravelTimezoneFailureReasonTransient);
             [strongSelf postChangeNotification];
             return;
         }
@@ -230,6 +293,7 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         if (identifier.length == 0 || [NSTimeZone timeZoneWithName:identifier] == nil) {
             strongSelf.pendingDaemonTimeZoneIdentifier = nil;
             strongSelf.status = SCTravelTimezoneStatusUnavailable;
+            strongSelf.failureReason = SCTravelTimezoneFailureReasonTransient;
             [strongSelf postChangeNotification];
             return;
         }
@@ -244,6 +308,11 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     self.pendingDaemonTimeZoneIdentifier = nil;
     self.status = [self shouldTrackLocation]
         ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+    self.failureReason = ![self shouldTrackLocation]
+        ? SCTravelTimezoneFailureReasonNone
+        : ([error.domain isEqualToString:kCLErrorDomain] && error.code == kCLErrorDenied
+            ? SCTravelTimezoneFailureReasonPermission
+            : SCTravelTimezoneFailureReasonTransient);
     [self postChangeNotification];
 }
 
@@ -265,7 +334,9 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
     self.currentSessionResolutionDate = [NSDate date];
 
     self.status = SCTravelTimezoneStatusReady;
+    self.failureReason = SCTravelTimezoneFailureReasonNone;
     [self postChangeNotification];
+    [self persistTrustedTimeZoneIdentifier:identifier];
 
     SCScheduleManager *scheduleManager = [SCScheduleManager sharedManager];
     if (!scheduleManager.hasRecurringCommitment ||
@@ -328,11 +399,104 @@ static NSTimeInterval const SCTravelTimezoneMaximumLocationAge = 30.0 * 60.0;
         self.pendingDaemonTimeZoneIdentifier = nil;
         self.status = [self shouldTrackLocation]
             ? SCTravelTimezoneStatusUnavailable : SCTravelTimezoneStatusDisabled;
+        self.failureReason = [self shouldTrackLocation]
+            ? SCTravelTimezoneFailureReasonPermission : SCTravelTimezoneFailureReasonNone;
         [self postChangeNotification];
         return;
     }
 
     [self attemptDaemonUpdateForTimeZoneIdentifier:identifier];
+}
+
+- (void)refreshTrustedTimeZone {
+    if (self.trustedTimeZoneStoreInFlight) {
+        self.trustedTimeZoneReloadAfterStore = YES;
+        return;
+    }
+    if (self.trustedTimeZoneLoadInFlight) return;
+    self.trustedTimeZoneLoadInFlight = YES;
+    NSUInteger generation = self.trustedTimeZoneGeneration;
+    if (self.trustedTimeZoneXPCClient == nil) {
+        self.trustedTimeZoneXPCClient = [SCXPCClient new];
+    }
+    SCXPCClient *xpc = self.trustedTimeZoneXPCClient;
+    __weak typeof(self) weakSelf = self;
+    [xpc getTrustedTravelTimeZone:^(NSDictionary<NSString *,id> *state, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (strongSelf == nil) return;
+            strongSelf.trustedTimeZoneLoadInFlight = NO;
+            if (generation != strongSelf.trustedTimeZoneGeneration) {
+                if (strongSelf.trustedTimeZoneStoreInFlight) {
+                    strongSelf.trustedTimeZoneReloadAfterStore = YES;
+                } else {
+                    [strongSelf refreshTrustedTimeZone];
+                }
+                return;
+            }
+            if (error != nil) return;
+
+            NSString *identifier = state[@"time_zone_identifier"];
+            NSDate *resolvedAt = state[@"resolved_at"];
+            if ([state[@"has_trusted_time_zone"] boolValue] &&
+                [NSTimeZone timeZoneWithName:identifier] != nil &&
+                [resolvedAt isKindOfClass:[NSDate class]]) {
+                strongSelf.lastTrustedTimeZoneIdentifier = identifier;
+                strongSelf.lastTrustedTimeZoneResolutionDate = resolvedAt;
+            } else {
+                strongSelf.lastTrustedTimeZoneIdentifier = nil;
+                strongSelf.lastTrustedTimeZoneResolutionDate = nil;
+            }
+            [strongSelf postChangeNotification];
+        });
+    }];
+}
+
+- (void)persistTrustedTimeZoneIdentifier:(NSString *)identifier {
+#if defined(TESTING)
+    return;
+#else
+    if (self.trustedTimeZoneStoreInFlight) {
+        self.queuedTrustedTimeZoneIdentifier = identifier;
+        return;
+    }
+    self.trustedTimeZoneStoreInFlight = YES;
+    self.trustedTimeZoneGeneration += 1;
+    NSUInteger generation = self.trustedTimeZoneGeneration;
+    if (self.trustedTimeZoneXPCClient == nil) {
+        self.trustedTimeZoneXPCClient = [SCXPCClient new];
+    }
+    SCXPCClient *xpc = self.trustedTimeZoneXPCClient;
+    __weak typeof(self) weakSelf = self;
+    [xpc storeTrustedTravelTimeZoneIdentifier:identifier
+                                        reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (strongSelf == nil) return;
+            strongSelf.trustedTimeZoneStoreInFlight = NO;
+            if (generation == strongSelf.trustedTimeZoneGeneration && error == nil &&
+                [result[@"stored"] boolValue]) {
+                NSString *storedIdentifier = result[@"time_zone_identifier"];
+                NSDate *resolvedAt = result[@"resolved_at"];
+                if ([NSTimeZone timeZoneWithName:storedIdentifier] != nil &&
+                    [resolvedAt isKindOfClass:[NSDate class]]) {
+                    strongSelf.lastTrustedTimeZoneIdentifier = storedIdentifier;
+                    strongSelf.lastTrustedTimeZoneResolutionDate = resolvedAt;
+                    [strongSelf postChangeNotification];
+                }
+            }
+
+            NSString *queuedIdentifier = strongSelf.queuedTrustedTimeZoneIdentifier;
+            strongSelf.queuedTrustedTimeZoneIdentifier = nil;
+            if (queuedIdentifier.length > 0) {
+                [strongSelf persistTrustedTimeZoneIdentifier:queuedIdentifier];
+            } else if (strongSelf.trustedTimeZoneReloadAfterStore) {
+                strongSelf.trustedTimeZoneReloadAfterStore = NO;
+                [strongSelf refreshTrustedTimeZone];
+            }
+        });
+    }];
+#endif
 }
 
 - (void)postChangeNotification {

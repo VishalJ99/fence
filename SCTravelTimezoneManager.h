@@ -19,6 +19,12 @@ typedef NS_ENUM(NSInteger, SCTravelTimezoneStatus) {
     SCTravelTimezoneStatusUnavailable,
 };
 
+typedef NS_ENUM(NSInteger, SCTravelTimezoneFailureReason) {
+    SCTravelTimezoneFailureReasonNone = 0,
+    SCTravelTimezoneFailureReasonPermission,
+    SCTravelTimezoneFailureReasonTransient,
+};
+
 /// Resolves coarse Core Location updates to timezone identifiers. Coordinates
 /// are used only for reverse geocoding and are never persisted by Fence.
 @interface SCTravelTimezoneManager : NSObject
@@ -27,9 +33,20 @@ typedef NS_ENUM(NSInteger, SCTravelTimezoneStatus) {
 
 @property (nonatomic, readonly, getter=isEnabled) BOOL enabled;
 @property (nonatomic, readonly) SCTravelTimezoneStatus status;
+@property (nonatomic, readonly) SCTravelTimezoneFailureReason failureReason;
 /// The timezone accepted from Core Location during this app session. Fence
 /// never restores this value from writable preferences when creating a commit.
 @property (nonatomic, readonly, nullable) NSString *lastResolvedTimeZoneIdentifier;
+/// The last location-derived timezone persisted by the root helper for this
+/// user. Coordinates are never stored, and the app cannot seed this value.
+@property (nonatomic, readonly, nullable) NSString *lastTrustedTimeZoneIdentifier;
+@property (nonatomic, readonly, nullable) NSDate *lastTrustedTimeZoneResolutionDate;
+
+/// Returns the fresh session result, or the root-trusted fallback only after a
+/// transient resolution failure. Permission failures and in-flight requests
+/// return nil.
+- (nullable NSString *)timeZoneIdentifierForCommit;
+- (BOOL)usesTrustedTimeZoneForCommit;
 
 /// Changes the pre-commit preference. Calls are ignored while a recurring
 /// commitment exists because its travel mode is immutable until it ends.

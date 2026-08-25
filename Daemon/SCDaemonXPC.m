@@ -80,6 +80,7 @@ static const NSUInteger SCDaemonConsistencyMaximumEntries = 4096;
 static NSString * const SCDaemonApprovedScheduleCommitmentsKey = @"ApprovedScheduleCommitments";
 static NSString * const SCDaemonApprovedRecurringCommitmentsKey = @"ApprovedRecurringScheduleCommitments";
 static NSString * const SCDaemonActiveScheduleBreaksKey = @"ActiveScheduleBreaks";
+static NSString * const SCDaemonTrustedTravelTimeZonesKey = @"TrustedTravelTimeZones";
 
 static NSObject *SCDaemonScheduleStoreLock(void) {
     static NSObject *lock;
@@ -692,6 +693,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityRecurringScheduleBreaks,
               SCDaemonCapabilityRecurringCommitmentExtend,
               SCDaemonCapabilityRecurringTimeZone,
+              SCDaemonCapabilityTrustedTravelTimeZone,
           ]);
 }
 
@@ -1734,6 +1736,110 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
             subDescription:@"Timezone saved but enforcement reconciliation did not verify"]);
     }];
+}
+
+- (void)storeTrustedTravelTimeZoneIdentifier:(NSString *)timeZoneIdentifier
+                                       reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSTimeZone *timeZone = [timeZoneIdentifier isKindOfClass:[NSString class]]
+        ? [NSTimeZone timeZoneWithName:timeZoneIdentifier] : nil;
+    if (!SCDaemonClientMayAccessTrustedTravelTimeZone(self.clientUID, self.clientIsFenceApp) ||
+        timeZone == nil) {
+        reply(@{}, [SCErr errorWithCode:403 subDescription:@"Invalid trusted timezone update"]);
+        return;
+    }
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) { reply(@{}, error); }]) return;
+
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        reply(@{}, [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    NSDate *resolvedAt = [NSDate date];
+    NSString *ownerKey = [NSString stringWithFormat:@"%u", self.clientUID];
+    NSDictionary *record = @{
+        @"schemaVersion": @1,
+        @"controllingUID": @(self.clientUID),
+        @"timeZoneIdentifier": timeZone.name,
+        @"resolvedAt": resolvedAt,
+    };
+    __block NSError *resultError = nil;
+    __block BOOL postWriteMatch = NO;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonTrustedTravelTimeZonesKey];
+        NSDictionary *oldRecords = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        if (oldRecords.count >= 512 && oldRecords[ownerKey] == nil) {
+            resultError = [SCErr errorWithCode:403
+                subDescription:@"Trusted timezone store is full"];
+        } else {
+            NSMutableDictionary *replacement = [oldRecords mutableCopy];
+            replacement[ownerKey] = record;
+            [settings setValue:[replacement copy] forKey:SCDaemonTrustedTravelTimeZonesKey];
+            resultError = [settings syncSettingsAndWait:5];
+            if (resultError == nil) {
+                NSDictionary *storedValue = [settings valueForKey:SCDaemonTrustedTravelTimeZonesKey];
+                postWriteMatch = [storedValue[ownerKey] isEqual:record];
+                if (!postWriteMatch) {
+                    resultError = [SCErr errorWithCode:500
+                        subDescription:@"Trusted timezone did not verify after persistence"];
+                }
+            }
+        }
+        if (resultError != nil) {
+            [settings setValue:oldRecords forKey:SCDaemonTrustedTravelTimeZonesKey];
+            [settings syncSettingsAndWait:5];
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply(@{}, resultError);
+        return;
+    }
+    reply(@{
+        @"stored": @YES,
+        @"post_write_match": @(postWriteMatch),
+        @"time_zone_identifier": timeZone.name,
+        @"resolved_at": resolvedAt,
+    }, nil);
+}
+
+- (void)getTrustedTravelTimeZoneWithReply:
+    (void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    if (!SCDaemonClientMayAccessTrustedTravelTimeZone(self.clientUID, self.clientIsFenceApp)) {
+        reply(@{}, [SCErr errorWithCode:403 subDescription:@"Invalid trusted timezone owner"]);
+        return;
+    }
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        reply(@{}, [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    NSString *ownerKey = [NSString stringWithFormat:@"%u", self.clientUID];
+    __block NSDictionary *record = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *recordsValue = [settings valueForKey:SCDaemonTrustedTravelTimeZonesKey];
+        record = [recordsValue[ownerKey] isKindOfClass:[NSDictionary class]]
+            ? [recordsValue[ownerKey] copy] : nil;
+    }
+    NSString *identifier = record[@"timeZoneIdentifier"];
+    NSDate *resolvedAt = record[@"resolvedAt"];
+    if (record == nil) {
+        reply(@{@"has_trusted_time_zone": @NO}, nil);
+        return;
+    }
+    if (![record[@"controllingUID"] isEqual:@(self.clientUID)] ||
+        [NSTimeZone timeZoneWithName:identifier] == nil ||
+        ![resolvedAt isKindOfClass:[NSDate class]]) {
+        reply(@{}, [SCErr errorWithCode:500 subDescription:@"Trusted timezone record is invalid"]);
+        return;
+    }
+    reply(@{
+        @"has_trusted_time_zone": @YES,
+        @"time_zone_identifier": identifier,
+        @"resolved_at": resolvedAt,
+    }, nil);
 }
 
 - (void)endExpiredRecurringCommitmentWithID:(NSString *)commitmentID

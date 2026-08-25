@@ -63,14 +63,21 @@ again.
 
 Core Location and geocoding remain app-side. Fence does not persist, log,
 upload, or send coordinates across XPC. The root daemon does not request
-Location Services access, and Fence does not fall back to IP geolocation. A
-new automatic commitment requires a fresh result from the current app session;
-a saved preference cannot supply its timezone.
+Location Services access, and Fence does not fall back to IP geolocation.
+
+For each user, the helper stores only the last valid named timezone accepted
+from the signed Fence app and the daemon-stamped date it was recorded. A fresh
+current-session result is always preferred. If the one-shot request fails
+transiently because no usable fix, network, or reverse-geocoding result is
+available, a new Commit may use that root-owned last verified timezone
+regardless of age. It refuses Commit if none exists. A writable app preference
+cannot supply this value. The recorded date is informational only.
 
 ## Failure Behavior
 
 The last timezone accepted and persisted by `selfcontrold` remains
-authoritative. Fence keeps that timezone when any update fails, including:
+authoritative for an active commitment. Fence keeps that timezone when any
+update fails, including:
 
 - denied or unavailable Location Services;
 - an invalid or simulated location fix;
@@ -82,13 +89,20 @@ There is no manual timezone override during an active commitment. An unavailable
 location update therefore cannot silently adopt a changed system timezone or
 weaken the current schedule.
 
+Before a new automatic commitment, Location Services disabled, undetermined,
+denied, or restricted is not treated as an offline fallback condition. The
+user must enable access or turn automatic travel off. Fence also waits for an
+in-flight request rather than selecting the stored fallback early.
+
 ## Upgrade and Rollback
 
 At helper upgrade, an existing V3 commitment without timezone fields is pinned
 once to the then-current named timezone with location following off. The
-timezone fields are additive so an older helper can still read the root record
-during the rollback window; the older helper retains its previous local-time
-behavior.
+commitment timezone fields and the separate top-level trusted fallback cache
+are additive, so a v7 helper continues enforcing existing root-owned
+commitment timezones and preserves the unknown cache key. It cannot provide
+offline fallback, and the current app gates new recurring operations on the v8
+capability. App and helper must be rolled back together if v8 is removed.
 
 V1/V2 storage and admission rules are unchanged by the V3 travel feature.
 

@@ -536,6 +536,7 @@
         SCDaemonCapabilityRecurringScheduleBreaks,
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
+        SCDaemonCapabilityTrustedTravelTimeZone,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
@@ -616,6 +617,13 @@
     XCTAssertTrue(SCDaemonClientMayStrictifyActiveBlock(501, @0, 501));
     XCTAssertFalse(SCDaemonClientMayStrictifyActiveBlock(501, nil, 502));
     XCTAssertFalse(SCDaemonClientMayStrictifyActiveBlock(0, nil, 0));
+}
+
+- (void)testTrustedTravelTimeZoneAccessRequiresSignedAppAndNonRootUID {
+    XCTAssertTrue(SCDaemonClientMayAccessTrustedTravelTimeZone(501, YES));
+    XCTAssertFalse(SCDaemonClientMayAccessTrustedTravelTimeZone(501, NO));
+    XCTAssertFalse(SCDaemonClientMayAccessTrustedTravelTimeZone(0, YES));
+    XCTAssertFalse(SCDaemonClientMayAccessTrustedTravelTimeZone(0, NO));
 }
 
 - (void)testActiveStrictifyReappliesIdempotentAndRetryUnionRequests {

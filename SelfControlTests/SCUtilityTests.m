@@ -528,6 +528,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleBreaks,
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
+        SCDaemonCapabilityTrustedTravelTimeZone,
         @"future-safe-capability-v1",
     ];
 
@@ -556,6 +557,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringScheduleBreaks,
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
+        SCDaemonCapabilityTrustedTravelTimeZone,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -573,6 +575,9 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
             return ![capability isEqualToString:SCDaemonCapabilityRecurringTimeZone];
         }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityTrustedTravelTimeZone];
+        }]],
     ];
     NSArray<NSString*>* expectedReasons = @[
         @"recurring-schedule-store-missing",
@@ -580,11 +585,12 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"recurring-schedule-breaks-missing",
         @"recurring-commitment-extend-missing",
         @"recurring-time-zone-missing",
+        @"trusted-travel-time-zone-missing",
     ];
 
     NSString *reason = nil;
     XCTAssertFalse([SCXPCClient
-        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringScheduler
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringTimeZone
                    capabilities:capabilities
         supportsRecurringSchedulesWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"recurring-scheduler-protocol-too-old");
@@ -596,6 +602,44 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                           compatibleWithCurrentAppWithReason:&reason]);
         XCTAssertEqualObjects(reason, expectedReasons[index]);
     }
+}
+
+- (void)testSettingsSchemaValidatesTrustedTravelTimeZones {
+    NSDate *recordedAt = [NSDate dateWithTimeIntervalSince1970:1783900800];
+    NSDictionary *record = @{
+        @"schemaVersion": @1,
+        @"controllingUID": @501,
+        @"timeZoneIdentifier": @"Europe/London",
+        @"resolvedAt": recordedAt,
+    };
+    NSMutableDictionary *settings = [@{
+        @"SettingsVersionNumber": @8,
+        @"LastSettingsUpdate": [NSDate date],
+        @"BlockIsRunning": @NO,
+        @"TrustedTravelTimeZones": @{@"501": record},
+    } mutableCopy];
+    XCTAssertTrue([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    NSMutableDictionary *invalidRecord = [record mutableCopy];
+    invalidRecord[@"timeZoneIdentifier"] = @"Mars/Olympus_Mons";
+    settings[@"TrustedTravelTimeZones"] = @{@"501": invalidRecord};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    invalidRecord = [record mutableCopy];
+    invalidRecord[@"resolvedAt"] = @"yesterday";
+    settings[@"TrustedTravelTimeZones"] = @{@"501": invalidRecord};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    settings[@"TrustedTravelTimeZones"] = @{@"0501": record};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    invalidRecord = [record mutableCopy];
+    invalidRecord[@"controllingUID"] = @0;
+    settings[@"TrustedTravelTimeZones"] = @{@"0": invalidRecord};
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
+
+    settings[@"TrustedTravelTimeZones"] = @[];
+    XCTAssertFalse([SCSettings settingsDictionaryHasValidSchema:settings]);
 }
 
 - (void)testTelemetryDSNValidationRejectsPlaceholdersAndLegacyUpstream {
