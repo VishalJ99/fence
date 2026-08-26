@@ -287,8 +287,8 @@ static const CGFloat kHeaderHeight = 30.0;
 }
 
 - (void)pillClicked:(SCBundlePillView *)pill {
-    // Toggle selection
-    if ([pill.bundle.bundleID isEqualToString:self.selectedBundleID]) {
+    // A committed row acts as an Inspect action, so keep it selected on every click.
+    if (!self.isCommitted && [pill.bundle.bundleID isEqualToString:self.selectedBundleID]) {
         // Already selected - deselect (return to All-Up)
         self.selectedBundleID = nil;
     } else {

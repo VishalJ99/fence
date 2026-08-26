@@ -22,6 +22,7 @@
 #import "SCScheduleManager.h"
 #import "SCLogger.h"
 #import "SCCalendarGridView.h"
+#import "SCBundleEditorController.h"
 #import <Sentry/Sentry.h>
 #import <Sentry/Sentry-Swift.h>
 #import <zlib.h>
@@ -43,6 +44,10 @@
 + (NSDictionary *)commandInfo;
 + (BOOL)authorizationRightDefinition:(NSDictionary *)current
              matchesDesiredDefinition:(NSDictionary *)desired;
+@end
+
+@interface SCBundleEditorController (CommittedStateTests)
+- (void)updateButtonStatesForCommittedState;
 @end
 
 @interface SCLogger (DiagnosticTelemetryTests)
@@ -350,6 +355,50 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
 - (void)tearDown {
     // Put teardown code here. This method is called after the invocation of each test method in the class.
     [super tearDown];
+}
+
+- (void)testCommittedBundleEditorShowsContentsReadOnly {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Work" color:SCBlockBundle.colorRed];
+    [bundle addEntry:@"example.com"];
+    [bundle addEntry:@"app:com.example.Focus"];
+
+    SCBundleEditorController *editor = [[SCBundleEditorController alloc] initWithBundle:bundle];
+    editor.isCommitted = YES;
+    [editor updateButtonStatesForCommittedState];
+
+    NSTextField *nameField = [editor valueForKey:@"nameField"];
+    NSStackView *colorPicker = [editor valueForKey:@"colorPicker"];
+    NSTableView *entriesTableView = [editor valueForKey:@"entriesTableView"];
+    NSButton *addAppButton = [editor valueForKey:@"addAppButton"];
+    NSButton *addWebsiteButton = [editor valueForKey:@"addWebsiteButton"];
+    NSButton *removeEntryButton = [editor valueForKey:@"removeEntryButton"];
+    NSButton *deleteButton = [editor valueForKey:@"deleteButton"];
+    NSButton *doneButton = [editor valueForKey:@"doneButton"];
+    NSTextField *warningLabel = [editor valueForKey:@"committedWarningLabel"];
+
+    [entriesTableView reloadData];
+
+    XCTAssertEqual(entriesTableView.numberOfRows, 2);
+    XCTAssertTrue(entriesTableView.enabled);
+    XCTAssertFalse(entriesTableView.tableColumns.firstObject.editable);
+    XCTAssertFalse(nameField.enabled);
+    XCTAssertFalse(nameField.editable);
+    XCTAssertFalse(addAppButton.enabled);
+    XCTAssertFalse(addWebsiteButton.enabled);
+    XCTAssertFalse(removeEntryButton.enabled);
+    XCTAssertFalse(deleteButton.enabled);
+    XCTAssertEqualWithAccuracy(colorPicker.alphaValue, 0.45, 0.001);
+    XCTAssertEqualObjects(doneButton.title, @"Close");
+    XCTAssertFalse(warningLabel.hidden);
+    XCTAssertEqualObjects(warningLabel.stringValue,
+                          @"Locked during your commitment. End the commitment before changing this bundle.");
+    XCTAssertEqualObjects(warningLabel.textColor, NSColor.systemRedColor);
+
+    for (NSView *colorView in [editor valueForKey:@"colorViews"]) {
+        for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
+            XCTAssertFalse(recognizer.enabled);
+        }
+    }
 }
 
 - (void) testCleanBlocklistEntries {

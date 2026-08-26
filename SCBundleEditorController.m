@@ -66,9 +66,6 @@
 
 @property (nonatomic, strong) NSArray<NSView *> *colorViews;
 
-// Track original entries to detect additions
-@property (nonatomic, assign) NSUInteger originalEntryCount;
-
 // Event monitor for click-outside-to-close
 @property (nonatomic, strong) id clickOutsideMonitor;
 
@@ -93,7 +90,6 @@
         _bundle = nil;
         _workingBundle = [SCBlockBundle bundleWithName:@"New Bundle" color:[SCBlockBundle colorBlue]];
         _isNewBundle = YES;
-        _originalEntryCount = 0;
         window.delegate = self;
 
         [self setupUI];
@@ -118,7 +114,6 @@
         _bundle = bundle;
         _workingBundle = [bundle copy];
         _isNewBundle = NO;
-        _originalEntryCount = bundle.entries.count;
         window.delegate = self;
 
         [self setupUI];
@@ -218,6 +213,7 @@
     NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"entry"];
     column.title = @"Entry";
     column.width = 350;
+    column.editable = NO;
     [self.entriesTableView addTableColumn:column];
     self.entriesTableView.headerView = nil;
 
@@ -279,7 +275,7 @@
 
     // Warning label for committed state (hidden by default)
     self.committedWarningLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 90, y - 20, 190, 60)];
-    self.committedWarningLabel.stringValue = @"Locked - Bundle used in committed schedule. Additional entries will take effect immediately.";
+    self.committedWarningLabel.stringValue = @"Locked during your commitment. End the commitment before changing this bundle.";
     self.committedWarningLabel.font = [NSFont systemFontOfSize:10];
     self.committedWarningLabel.textColor = [NSColor systemRedColor];
     self.committedWarningLabel.bezeled = NO;
@@ -294,10 +290,19 @@
 
 - (void)updateButtonStatesForCommittedState {
     if (self.isCommitted) {
-        // Grey out destructive actions in committed state
+        self.nameField.editable = NO;
+        self.nameField.enabled = NO;
+        self.addAppButton.enabled = NO;
+        self.addWebsiteButton.enabled = NO;
         self.deleteButton.enabled = NO;
         self.removeEntryButton.enabled = NO;
-        // Show warning label
+        self.colorPicker.alphaValue = 0.45;
+        for (NSView *colorView in self.colorViews) {
+            for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
+                recognizer.enabled = NO;
+            }
+        }
+        self.doneButton.title = @"Close";
         self.committedWarningLabel.hidden = NO;
     } else {
         self.committedWarningLabel.hidden = YES;
@@ -443,6 +448,11 @@
 }
 
 - (void)doneClicked:(id)sender {
+    if (self.isCommitted) {
+        [self closeEditor];
+        return;
+    }
+
     // Validate
     NSString *name = [self.nameField.stringValue stringByTrimmingCharactersInSet:
                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -456,27 +466,6 @@
     }
 
     self.workingBundle.name = name;
-
-    // Check if entries were added in committed state - show confirmation
-    BOOL entriesWereAdded = self.workingBundle.entries.count > self.originalEntryCount;
-    if (self.isCommitted && entriesWereAdded) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"Confirm Additions";
-        alert.informativeText = @"NOTE: You are in a committed state. Additions will be effective immediately. "
-            @"You will not be able to undo this until the end of the week.";
-        alert.alertStyle = NSAlertStyleWarning;
-        [alert addButtonWithTitle:@"Confirm"];
-        [alert addButtonWithTitle:@"Cancel"];
-
-        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
-            if (returnCode == NSAlertFirstButtonReturn) {
-                [self removeClickOutsideMonitor];
-                [self.delegate bundleEditor:self didSaveBundle:self.workingBundle];
-                [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseOK];
-            }
-        }];
-        return;
-    }
 
     [self removeClickOutsideMonitor];
     [self.delegate bundleEditor:self didSaveBundle:self.workingBundle];

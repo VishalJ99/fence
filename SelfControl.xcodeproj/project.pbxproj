@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C44400000000000000000001 /* SCBundleEditorController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355212EFB7C8100E77469 /* SCBundleEditorController.m */; };
 		B44400000000000000000003 /* SCTravelTimezoneManager.m in Sources */ = {isa = PBXBuildFile; fileRef = B44400000000000000000002 /* SCTravelTimezoneManager.m */; };
 		B44400000000000000000004 /* SCTravelTimezoneManager.m in Sources */ = {isa = PBXBuildFile; fileRef = B44400000000000000000002 /* SCTravelTimezoneManager.m */; };
 		B44400000000000000000006 /* CoreLocation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B44400000000000000000005 /* CoreLocation.framework */; };
@@ -4106,6 +4107,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C44400000000000000000001 /* SCBundleEditorController.m in Sources */,
 				B44400000000000000000009 /* SCTravelTimezoneManagerTests.m in Sources */,
 				B44400000000000000000004 /* SCTravelTimezoneManager.m in Sources */,
 				F44400000000000000000040 /* NSString+IPAddress.m in Sources */,

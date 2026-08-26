@@ -1530,12 +1530,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)weekGridView:(SCWeekGridView *)gridView didRequestEditBundle:(SCBlockBundle *)bundle {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+    if (manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Bundles Locked";
-        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
-            ? @"Choose which legacy schedule should repeat before editing bundles."
-            : @"Bundle changes stay locked until you end the recurring commitment.";
+        alert.informativeText = @"Choose which legacy schedule should repeat before viewing bundle details.";
         [alert runModal];
         return;
     }
@@ -1561,6 +1559,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Update calendar grid with new focus
     self.calendarGridView.focusedBundleID = self.focusedBundleID;
     [self.calendarGridView reloadData];
+
+    if (bundle != nil && [SCScheduleManager sharedManager].hasRecurringCommitment) {
+        [self bundleSidebar:sidebar didRequestEditBundle:bundle];
+    }
 }
 
 - (void)bundleSidebarDidRequestAddBundle:(SCBundleSidebarView *)sidebar {
@@ -1569,12 +1571,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)bundleSidebar:(SCBundleSidebarView *)sidebar didRequestEditBundle:(SCBlockBundle *)bundle {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+    if (manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Bundles Locked";
-        alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
-            ? @"Choose which legacy schedule should repeat before editing bundles."
-            : @"Bundle changes stay locked until you end the recurring commitment.";
+        alert.informativeText = @"Choose which legacy schedule should repeat before viewing bundle details.";
         [alert runModal];
         return;
     }
