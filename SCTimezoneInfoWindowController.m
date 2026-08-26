@@ -276,7 +276,6 @@
                 break;
             case SCTravelTimezoneStatusNeedsAuthorization:
                 self.locationStatusLabel.stringValue = @"Allow Location Services to let Fence resolve your timezone.";
-                self.openLocationSettingsButton.title = @"Allow Location Access";
                 self.openLocationSettingsButton.hidden = NO;
                 break;
             case SCTravelTimezoneStatusUnavailable:
@@ -323,11 +322,6 @@
 }
 
 - (void)openLocationSettingsClicked:(id)sender {
-    SCTravelTimezoneManager *manager = [SCTravelTimezoneManager sharedManager];
-    if (manager.status == SCTravelTimezoneStatusNeedsAuthorization) {
-        [manager requestAuthorizationFromUserInteraction];
-        return;
-    }
     NSURL *url = [NSURL URLWithString:
         @"x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"];
     if (url != nil) {
