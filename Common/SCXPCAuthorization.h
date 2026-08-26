@@ -22,11 +22,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns YES when any installed Fence-managed rule is missing or stale.
 + (BOOL)authorizationRightsNeedRefresh;
 
+/// Returns YES when the installed rule used by `command` is missing or stale.
++ (BOOL)authorizationRightNeedsRefreshForCommand:(SEL)command;
+
 + (void)setupAuthorizationRights:(AuthorizationRef)authRef;
     // Set up the default authorization rights in the authorization database.
 
 + (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error;
-    // Rewrites each distinct Fence-managed authorization right once.
+    // Updates each stale Fence-managed authorization right once.
+
++ (BOOL)refreshAuthorizationRightForCommand:(SEL)command
+                              authorization:(AuthorizationRef)authRef
+                                      error:(NSError **)error;
+    // Updates only the stale Fence-managed right used by command.
 
 @end
 

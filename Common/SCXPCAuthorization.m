@@ -171,23 +171,40 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
     return YES;
 }
 
++ (BOOL)authorizationRightNamed:(NSString *)authRightName
+          needsDesiredDefinition:(NSDictionary *)desired {
+    if (![authRightName isKindOfClass:[NSString class]] ||
+        ![desired isKindOfClass:[NSDictionary class]]) {
+        return YES;
+    }
+
+    CFDictionaryRef currentDefinition = NULL;
+    OSStatus status = AuthorizationRightGet([authRightName UTF8String], &currentDefinition);
+    if (status != errAuthorizationSuccess || currentDefinition == NULL) {
+        if (currentDefinition != NULL) CFRelease(currentDefinition);
+        return YES;
+    }
+
+    NSDictionary *current = CFBridgingRelease(currentDefinition);
+    return ![self authorizationRightDefinition:current matchesDesiredDefinition:desired];
+}
+
++ (BOOL)authorizationRightNeedsRefreshForCommand:(SEL)command {
+    NSDictionary *commandInfo = self.commandInfo[NSStringFromSelector(command)];
+    NSString *authRightName = commandInfo[kCommandKeyAuthRightName];
+    NSDictionary *desired = commandInfo[kCommandKeyAuthRightDefault];
+    return [self authorizationRightNamed:authRightName needsDesiredDefinition:desired];
+}
+
 + (BOOL)authorizationRightsNeedRefresh {
     __block BOOL needsRefresh = NO;
     [self enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
         #pragma unused(authRightDesc)
         if (needsRefresh) return;
-        CFDictionaryRef currentDefinition = NULL;
-        OSStatus status = AuthorizationRightGet([authRightName UTF8String], &currentDefinition);
-        if (status != errAuthorizationSuccess || currentDefinition == NULL) {
-            needsRefresh = YES;
-            if (currentDefinition != NULL) CFRelease(currentDefinition);
-            return;
-        }
-        NSDictionary *current = CFBridgingRelease(currentDefinition);
         NSDictionary *desired = [authRightDefault isKindOfClass:[NSDictionary class]]
             ? authRightDefault : @{};
-        needsRefresh = ![self authorizationRightDefinition:current
-                                  matchesDesiredDefinition:desired];
+        needsRefresh = [self authorizationRightNamed:authRightName
+                              needsDesiredDefinition:desired];
     }];
     return needsRefresh;
 }
@@ -223,70 +240,65 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
     }];
 }
 
-+ (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error {
-    assert(authRef != NULL);
-
-    NSArray<NSString *> *managedRights = [self managedAuthorizationRightNames];
-    NSMutableArray<NSString *> *removeRightNames = [NSMutableArray arrayWithCapacity:managedRights.count];
-    AuthorizationItem authorizationItems[managedRights.count];
-    for (NSUInteger index = 0; index < managedRights.count; index++) {
-        NSString *removeRightName = [@"config.remove." stringByAppendingString:managedRights[index]];
-        [removeRightNames addObject:removeRightName];
-        authorizationItems[index] = (AuthorizationItem){
-            [removeRightName UTF8String], 0, NULL, 0
-        };
-    }
-    AuthorizationRights removalRights = {
-        (UInt32)managedRights.count, authorizationItems
-    };
-    AuthorizationFlags authorizationFlags = kAuthorizationFlagDefaults |
-        kAuthorizationFlagExtendRights | kAuthorizationFlagInteractionAllowed;
-    OSStatus authorizationStatus = AuthorizationCopyRights(
-        authRef, &removalRights, kAuthorizationEmptyEnvironment,
-        authorizationFlags, NULL);
-    if (authorizationStatus != errAuthorizationSuccess) {
++ (BOOL)updateAuthorizationRightNamed:(NSString *)authRightName
+                    desiredDefinition:(NSDictionary *)desiredDefinition
+                       descriptionKey:(NSString *)descriptionKey
+                        authorization:(AuthorizationRef)authRef
+                                error:(NSError **)error {
+    if (authRef == NULL || ![authRightName isKindOfClass:[NSString class]] ||
+        ![desiredDefinition isKindOfClass:[NSDictionary class]] ||
+        ![descriptionKey isKindOfClass:[NSString class]]) {
         if (error) {
-            *error = [NSError errorWithDomain:NSOSStatusErrorDomain
-                                          code:authorizationStatus
-                                      userInfo:nil];
+            *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:paramErr userInfo:nil];
         }
         return NO;
     }
 
-    __block BOOL success = YES;
-    __block NSError *lastError = nil;
-
-    [SCXPCAuthorization enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
-        if (!success) {
-            return;
-        }
-
-        OSStatus removeStatus = AuthorizationRightRemove(authRef, [authRightName UTF8String]);
-        if (removeStatus != errAuthorizationSuccess && removeStatus != errAuthorizationDenied) {
-            success = NO;
-            lastError = [NSError errorWithDomain:NSOSStatusErrorDomain code:removeStatus userInfo:nil];
-            return;
-        }
-
-        OSStatus setStatus = AuthorizationRightSet(
-            authRef,
-            [authRightName UTF8String],
-            (__bridge CFTypeRef)authRightDefault,
-            (__bridge CFStringRef)authRightDesc,
-            NULL,
-            CFSTR("SCXPCAuthorization")
-        );
-
-        if (setStatus != errAuthorizationSuccess) {
-            success = NO;
-            lastError = [NSError errorWithDomain:NSOSStatusErrorDomain code:setStatus userInfo:nil];
-        }
-    }];
-
-    if (!success && error) {
-        *error = lastError;
+    if (![self authorizationRightNamed:authRightName
+                needsDesiredDefinition:desiredDefinition]) {
+        return YES;
     }
 
+    OSStatus status = AuthorizationRightSet(
+        authRef,
+        [authRightName UTF8String],
+        (__bridge CFTypeRef)desiredDefinition,
+        (__bridge CFStringRef)descriptionKey,
+        NULL,
+        CFSTR("SCXPCAuthorization")
+    );
+    if (status != errAuthorizationSuccess && error) {
+        *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+    }
+    return status == errAuthorizationSuccess;
+}
+
++ (BOOL)refreshAuthorizationRightForCommand:(SEL)command
+                              authorization:(AuthorizationRef)authRef
+                                      error:(NSError **)error {
+    NSDictionary *commandInfo = self.commandInfo[NSStringFromSelector(command)];
+    return [self updateAuthorizationRightNamed:commandInfo[kCommandKeyAuthRightName]
+                             desiredDefinition:commandInfo[kCommandKeyAuthRightDefault]
+                                descriptionKey:commandInfo[kCommandKeyAuthRightDesc]
+                                 authorization:authRef
+                                         error:error];
+}
+
++ (BOOL)refreshAuthorizationRights:(AuthorizationRef)authRef error:(NSError **)error {
+    assert(authRef != NULL);
+
+    __block BOOL success = YES;
+    __block NSError *lastError = nil;
+    [self enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
+        if (!success) return;
+        success = [self updateAuthorizationRightNamed:authRightName
+                                    desiredDefinition:authRightDefault
+                                       descriptionKey:authRightDesc
+                                        authorization:authRef
+                                                error:&lastError];
+    }];
+
+    if (!success && error) *error = lastError;
     return success;
 }
 

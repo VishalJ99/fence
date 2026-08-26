@@ -22,6 +22,14 @@ typedef NS_ENUM(NSInteger, SCXPCDaemonCompatibilityErrorCode) {
 
 static const NSTimeInterval SCXPCDaemonCompatibilityTimeout = 5.0;
 
+static SEL SCXPCStartBlockAuthorizationCommand(void) {
+    return @selector(startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:);
+}
+
+static SEL SCXPCModifyBlockAuthorizationCommand(void) {
+    return @selector(updateBlocklist:authorization:reply:);
+}
+
 static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     return MIN(MAX(errorCode, -1000000000), 1000000000);
 }
@@ -41,7 +49,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
                                                 error:(NSError*)error
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
 + (BOOL)recordAuthorizationRejectionForCommand:(NSString*)command error:(NSError*)error;
-- (BOOL)repairManagedAuthorizationRightsIfNeeded:(NSError **)error;
+- (BOOL)repairManagedAuthorizationRightForCommand:(SEL)command error:(NSError **)error;
 
 @end
 
@@ -315,7 +323,8 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
 
 - (void)installDaemon:(void(^)(NSError*))callback {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         callback([SCMiscUtilities errorIsAuthCanceled:authorizationRepairError]
             ? [SCErr errorWithCode:1] : authorizationRepairError);
         return;
@@ -438,9 +447,19 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     return refreshed;
 }
 
-- (BOOL)repairManagedAuthorizationRightsIfNeeded:(NSError **)error {
-    if (![self authorizationRightsNeedRefresh]) return YES;
-    return [self refreshAuthorizationRightsAllowingInteraction:YES error:error];
+- (BOOL)repairManagedAuthorizationRightForCommand:(SEL)command error:(NSError **)error {
+    [self setupAuthorization];
+    if (![SCXPCAuthorization authorizationRightNeedsRefreshForCommand:command]) return YES;
+
+    NSError *refreshError = nil;
+    BOOL refreshed = [SCXPCAuthorization refreshAuthorizationRightForCommand:command
+                                                               authorization:self->_authRef
+                                                                       error:&refreshError];
+    if (!refreshed) {
+        [SCXPCClient recordAuthorizationRejectionForCommand:@"repair" error:refreshError];
+        if (error) *error = refreshError;
+    }
+    return refreshed;
 }
 
 - (BOOL)connectionIsActive {
@@ -756,7 +775,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings reply:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -784,7 +804,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist reply:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCModifyBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -855,7 +876,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCModifyBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -891,7 +913,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                     segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                        reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(@{}, authorizationRepairError);
         return;
     }
@@ -981,7 +1004,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(@{}, authorizationRepairError);
         return;
     }
@@ -1144,7 +1168,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                      endDate:(NSDate*)endDate
                          reply:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -1219,7 +1244,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 - (void)unregisterScheduleWithID:(NSString*)scheduleId
                            reply:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -1249,7 +1275,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)clearAllApprovedSchedules:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }
@@ -1321,7 +1348,8 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)clearBlockForDebug:(void(^)(NSError* error))reply {
     NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                    error:&authorizationRepairError]) {
         reply(authorizationRepairError);
         return;
     }

@@ -1596,6 +1596,22 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(managedRules.anyObject, expectedRule);
 }
 
+- (void)testXPCAuthorizationCommandsResolveToTheirSpecificManagedRight {
+    NSString *startRight = @"org.eyebeam.SelfControl.startBlock";
+    NSString *modifyRight = @"org.eyebeam.SelfControl.modifyBlock";
+
+    XCTAssertEqualObjects([SCXPCAuthorization authorizationRightForCommand:
+        @selector(startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:)],
+        startRight);
+    XCTAssertEqualObjects([SCXPCAuthorization authorizationRightForCommand:
+        @selector(replaceScheduledCommitmentForWeekKey:weekStartDate:weekEndDate:commitmentID:generation:segments:authorization:reply:)],
+        startRight);
+    XCTAssertEqualObjects([SCXPCAuthorization authorizationRightForCommand:
+        @selector(updateBlocklist:authorization:reply:)], modifyRight);
+    XCTAssertEqualObjects([SCXPCAuthorization authorizationRightForCommand:
+        @selector(updateBlockEndDate:authorization:reply:)], modifyRight);
+}
+
 - (void)testXPCAuthorizationRuleComparisonDetectsLegacyRuleWithoutLoopingOnSystemFields {
     NSDictionary *desired = @{
         @"class": @"user",
