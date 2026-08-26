@@ -106,6 +106,7 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// Record existence, rather than lock deadline, defines an active recurring
 /// enforcement session.
 @property (nonatomic, readonly) BOOL hasRecurringCommitment;
+@property (nonatomic, readonly, nullable) NSString *recurringCommitmentGeneration;
 @property (nonatomic, readonly) BOOL isRecurringCommitmentLockActive;
 @property (nonatomic, readonly, nullable) NSDate *recurringCommitmentLockEndDate;
 @property (nonatomic, readonly) NSString *recurringTimeZoneIdentifier;
@@ -226,6 +227,13 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 /// Checks if a bundle WOULD be allowed right now (for display)
 - (BOOL)wouldBundleBeAllowed:(NSString *)bundleID;
+
+/// Returns the next effective recurring boundary where one or more enabled
+/// bundles begin blocking. The calculation uses the commitment's named
+/// timezone and the same half-open compiled policy, timed-break override, and
+/// Protected Hours precedence as daemon enforcement.
+- (nullable NSDate *)nextRecurringBlockingStartAfterDate:(NSDate *)date
+                                        affectedBundleIDs:(NSArray<NSString *> * _Nullable * _Nullable)affectedBundleIDs;
 
 #pragma mark - Persistence
 

@@ -76,6 +76,81 @@ static NSString * const SCScheduleCommitErrorDomain = @"org.eyebeam.Fence.Schedu
 static const NSUInteger SCScheduleMaximumCommitmentEntries = 4096;
 static const NSUInteger SCScheduleMaximumCommitmentSegments = 512;
 
+static NSDate *SCRecurringStartOfMondayWeek(NSDate *date, NSCalendar *calendar) {
+    NSDate *startOfDay = [calendar startOfDayForDate:date];
+    NSInteger weekday = [calendar component:NSCalendarUnitWeekday fromDate:startOfDay];
+    NSInteger daysSinceMonday = (weekday + 5) % 7;
+    return [calendar dateByAddingUnit:NSCalendarUnitDay
+                                value:-daysSinceMonday
+                               toDate:startOfDay
+                              options:0];
+}
+
+static NSDate *SCRecurringDateForMinuteOfWeek(NSInteger minuteOfWeek,
+                                               NSDate *weekStart,
+                                               NSCalendar *calendar) {
+    NSInteger dayOffset = minuteOfWeek / (24 * 60);
+    NSInteger minuteOfDay = minuteOfWeek % (24 * 60);
+    NSDate *day = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                       value:dayOffset
+                                      toDate:weekStart
+                                     options:0];
+    return [calendar dateBySettingHour:minuteOfDay / 60
+                                minute:minuteOfDay % 60
+                                second:0
+                                ofDate:day
+                               options:NSCalendarMatchNextTimePreservingSmallerUnits];
+}
+
+static NSArray<NSString *> *SCRecurringSourceBundleIDsAtMinute(
+    NSInteger minuteOfWeek,
+    NSArray<NSDictionary<NSString *, id> *> *segments) {
+    NSInteger normalizedMinute = (minuteOfWeek + 7 * 24 * 60) % (7 * 24 * 60);
+    for (NSDictionary<NSString *, id> *segment in segments) {
+        NSInteger start = [segment[SCRecurringSegmentStartMinuteKey] integerValue];
+        NSInteger end = [segment[SCRecurringSegmentEndMinuteKey] integerValue];
+        if (start <= normalizedMinute && normalizedMinute < end) {
+            NSArray *sourceIDs = segment[SCRecurringSegmentSourceBundleIDsKey];
+            return [sourceIDs isKindOfClass:[NSArray class]] ? sourceIDs : @[];
+        }
+    }
+    return @[];
+}
+
+static NSArray<NSString *> *SCRecurringEffectiveSourceBundleIDsAtDate(
+    NSDate *date,
+    NSArray<NSDictionary<NSString *, id> *> *segments,
+    NSCalendar *calendar,
+    NSDate *breakEnd,
+    BOOL protectedHoursEnabled,
+    SCProtectedHoursRange protectedHoursRange) {
+    NSDateComponents *components = [calendar
+        components:(NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute)
+          fromDate:date];
+    NSInteger dayFromMonday = (components.weekday + 5) % 7;
+    NSInteger minuteOfWeek = dayFromMonday * 24 * 60 +
+        components.hour * 60 + components.minute;
+    BOOL breakActive = [breakEnd compare:date] == NSOrderedDescending;
+    BOOL protectedHoursActive = SCProtectedHoursAreActive(
+        protectedHoursEnabled, protectedHoursRange, date, calendar);
+    if (breakActive && !protectedHoursActive) return @[];
+    return SCRecurringSourceBundleIDsAtMinute(minuteOfWeek, segments);
+}
+
+static NSSet<NSString *> *SCRecurringCanonicalEntriesForBundleIDs(
+    NSArray<NSString *> *bundleIDs,
+    NSDictionary<NSString *, SCBlockBundle *> *bundlesByID) {
+    NSMutableSet<NSString *> *entries = [NSMutableSet set];
+    for (NSString *bundleID in bundleIDs) {
+        SCBlockBundle *bundle = bundlesByID[bundleID];
+        for (NSString *entry in bundle.entries) {
+            NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+            if (canonical.length > 0) [entries addObject:canonical];
+        }
+    }
+    return entries;
+}
+
 static BOOL SCScheduleWaitForSemaphore(dispatch_semaphore_t semaphore,
                                        NSTimeInterval timeout) {
     BOOL hasDeadline = timeout > 0;
@@ -1865,6 +1940,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
     return self.recurringCommitmentDictionary != nil;
 }
 
+- (NSString *)recurringCommitmentGeneration {
+    return self.recurringCommitmentDictionary[@"generation"];
+}
+
 - (NSDate *)recurringCommitmentLockEndDate {
     return self.recurringCommitmentDictionary[@"lockEndsAt"];
 }
@@ -2623,6 +2702,90 @@ static NSError *SCScheduleCommitError(NSInteger code,
         if (window.startMinutes <= minute && minute < window.endMinutes) return YES;
     }
     return NO;
+}
+
+- (NSDate *)nextRecurringBlockingStartAfterDate:(NSDate *)date
+                                affectedBundleIDs:(NSArray<NSString *> * _Nullable __autoreleasing *)affectedBundleIDs {
+    if (affectedBundleIDs != NULL) *affectedBundleIDs = nil;
+    if (date == nil || !self.hasRecurringCommitment) return nil;
+
+    NSArray<NSDictionary<NSString *, id> *> *segments =
+        [SCRecurringScheduleCompiler segmentsForBundles:self.mutableBundles
+                                                schedules:self.recurringSchedules];
+    if (segments.count == 0) return nil;
+
+    NSCalendar *calendar = self.recurringCalendar;
+    NSDate *weekStart = SCRecurringStartOfMondayWeek(date, calendar);
+    if (weekStart == nil) return nil;
+
+    NSMutableArray<NSDate *> *candidateDates = [NSMutableArray array];
+    for (NSDictionary<NSString *, id> *segment in segments) {
+        NSInteger startMinute = [segment[SCRecurringSegmentStartMinuteKey] integerValue];
+        NSDate *candidate = SCRecurringDateForMinuteOfWeek(startMinute, weekStart, calendar);
+        if (candidate == nil) continue;
+        if ([candidate compare:date] != NSOrderedDescending) {
+            candidate = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                              value:7
+                                             toDate:candidate
+                                            options:0];
+        }
+        if (candidate != nil) [candidateDates addObject:candidate];
+    }
+
+    NSDate *breakEnd = self.activeTimedBreakEndDate;
+    SCProtectedHoursRange protectedRange = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    if ([breakEnd compare:date] == NSOrderedDescending) {
+        [candidateDates addObject:breakEnd];
+        NSDate *protectedBoundary = SCNextProtectedHoursBoundary(
+            self.protectedHoursEnabled, protectedRange, date, calendar);
+        if ([protectedBoundary compare:breakEnd] == NSOrderedAscending) {
+            [candidateDates addObject:protectedBoundary];
+        }
+    }
+
+    [candidateDates sortUsingSelector:@selector(compare:)];
+    NSMutableDictionary<NSString *, SCBlockBundle *> *bundlesByID = [NSMutableDictionary dictionary];
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (bundle.bundleID.length > 0) bundlesByID[bundle.bundleID] = bundle;
+    }
+    NSDate *lastCandidate = nil;
+    for (NSDate *candidate in candidateDates) {
+        if (lastCandidate != nil && fabs([candidate timeIntervalSinceDate:lastCandidate]) < 0.001) {
+            continue;
+        }
+        lastCandidate = candidate;
+        NSArray<NSString *> *beforeIDs = SCRecurringEffectiveSourceBundleIDsAtDate(
+            [candidate dateByAddingTimeInterval:-0.001], segments, calendar, breakEnd,
+            self.protectedHoursEnabled, protectedRange);
+        NSArray<NSString *> *afterIDs = SCRecurringEffectiveSourceBundleIDsAtDate(
+            candidate, segments, calendar, breakEnd,
+            self.protectedHoursEnabled, protectedRange);
+        NSSet<NSString *> *beforeSet = [NSSet setWithArray:beforeIDs];
+        NSSet<NSString *> *beforeEntries = SCRecurringCanonicalEntriesForBundleIDs(
+            beforeIDs, bundlesByID);
+        NSMutableSet<NSString *> *newEntries = [SCRecurringCanonicalEntriesForBundleIDs(
+            afterIDs, bundlesByID) mutableCopy];
+        [newEntries minusSet:beforeEntries];
+        if (newEntries.count == 0) continue;
+
+        NSMutableArray<NSString *> *newlyBlockedIDs = [NSMutableArray array];
+        for (NSString *bundleID in afterIDs) {
+            if ([beforeSet containsObject:bundleID]) continue;
+            SCBlockBundle *bundle = bundlesByID[bundleID];
+            for (NSString *entry in bundle.entries) {
+                NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+                if ([newEntries containsObject:canonical]) {
+                    [newlyBlockedIDs addObject:bundleID];
+                    break;
+                }
+            }
+        }
+        if (newlyBlockedIDs.count == 0) continue;
+        if (affectedBundleIDs != NULL) *affectedBundleIDs = newlyBlockedIDs;
+        return candidate;
+    }
+    return nil;
 }
 
 - (NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date {

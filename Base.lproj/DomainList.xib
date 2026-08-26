@@ -287,6 +287,7 @@ CA
             <connections>
                 <outlet property="allowlistRadioMatrix_" destination="109" id="9FT-ZJ-kZG"/>
                 <outlet property="domainListTableView_" destination="15" id="106"/>
+                <outlet property="readOnlyMessageLabel_" destination="lHN-D1-jGr" id="q4B-kL-8xZ"/>
                 <outlet property="window" destination="1" id="124"/>
             </connections>
         </customObject>

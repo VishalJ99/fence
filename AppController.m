@@ -123,6 +123,8 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 - (void)checkDaemonCompatibilityAllowingRepair:(BOOL)allowRepair;
 - (void)reinstallDaemon;
+- (void)configureDomainListForCurrentState;
+- (void)scheduleManagerDidChange:(NSNotification *)notification;
 - (void)emitDaemonUnreachableRepairOutcome:(NSString*)outcome
                                 finalError:(nullable NSError*)finalError
                         reinstallSucceeded:(BOOL)reinstallSucceeded
@@ -370,8 +372,10 @@ static BOOL SCFileExistsAtPath(NSString *path) {
             // apparently, a block is running, so make sure FirstBlockStarted is true
             [defaults_ setBool: YES forKey: @"FirstBlockStarted"];
 		}
-    } else { // block is off
-		if(blockWasOn) { // if we just switched states to off...
+	} else { // block is off
+		SCScheduleManager *manager = [SCScheduleManager sharedManager];
+		BOOL recurringCommitmentStillActive = manager.hasRecurringCommitment;
+		if(blockWasOn && !recurringCommitmentStillActive) { // a legacy block actually ended
 			[timerWindowController_ blockEnded];
 
 			// Makes sure the domain list will refresh when it comes back
@@ -394,7 +398,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
         // UI visibility logic OUTSIDE transition check (runs on every refresh)
         // This ensures UI shows on cold launch, not just state transitions
-        SCScheduleManager *manager = [SCScheduleManager sharedManager];
         if ([manager isCommitted]) {
             // Committed state: show menu bar for access to schedule/settings
             [[SCMenuBarController sharedController] setVisible:YES];
@@ -490,7 +493,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     
     // let the domain list know!
     if (domainListWindowController_ != nil) {
-        domainListWindowController_.readOnly = [SCUIUtilities blockIsRunning];
+        [self configureDomainListForCurrentState];
         [domainListWindowController_ refreshDomainList];
     }
     
@@ -503,6 +506,15 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     
     // and our interface may need to change to match!
     [self refreshUserInterface];
+}
+
+- (void)scheduleManagerDidChange:(NSNotification *)notification {
+    #pragma unused(notification)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (domainListWindowController_ == nil) return;
+        [self configureDomainListForCurrentState];
+        [domainListWindowController_ refreshDomainList];
+    });
 }
 
 - (void)showTimerWindow {
@@ -666,6 +678,10 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 											 selector: @selector(handleConfigurationChangedNotification)
 												 name: @"SCConfigurationChangedNotification"
 											   object: nil];
+	[[NSNotificationCenter defaultCenter] addObserver:self
+										 selector:@selector(scheduleManagerDidChange:)
+											 name:SCScheduleManagerDidChangeNotification
+										   object:nil];
 
 	[initialWindow_ center];
 
@@ -1310,6 +1326,50 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     }];
 }
 
+- (void)configureDomainListForCurrentState {
+    if (domainListWindowController_ == nil) return;
+
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    BOOL blockRunning = [SCUIUtilities blockIsRunning];
+    BOOL isTestBlock = [[[SCSettings sharedSettings] valueForKey:@"IsTestBlock"] boolValue];
+    BOOL readOnly = blockRunning || manager.isCommitted;
+    domainListWindowController_.readOnly = readOnly;
+    domainListWindowController_.readOnlyNoticeText = nil;
+    domainListWindowController_.readOnlyNoticeColor = nil;
+
+    if (blockRunning && isTestBlock) {
+        NSArray *activeBlocklist = [[SCSettings sharedSettings] valueForKey:@"ActiveBlocklist"];
+        domainListWindowController_.displayEntries = [activeBlocklist mutableCopy] ?: @[];
+        domainListWindowController_.readOnlyNoticeText =
+            @"Locked while the test block is running.";
+        return;
+    }
+
+    if (manager.isCommitted || blockRunning) {
+        NSMutableOrderedSet<NSString *> *underlyingEntries = [NSMutableOrderedSet orderedSet];
+        for (SCBlockBundle *bundle in manager.bundles) {
+            if (!bundle.enabled || bundle.entries.count == 0) continue;
+            if (![manager wouldBundleBeAllowed:bundle.bundleID]) {
+                [underlyingEntries addObjectsFromArray:bundle.entries];
+            }
+        }
+        domainListWindowController_.displayEntries = underlyingEntries.array;
+
+        BOOL breakSuspendsEnforcement = manager.hasActiveTimedBreak &&
+            !manager.protectedHoursActiveNow;
+        if (breakSuspendsEnforcement) {
+            domainListWindowController_.readOnlyNoticeText =
+                @"Break active — listed apps and sites are allowed.";
+            domainListWindowController_.readOnlyNoticeColor = NSColor.systemGreenColor;
+        } else {
+            domainListWindowController_.readOnlyNoticeText =
+                @"Locked during the active commitment.";
+        }
+    } else {
+        domainListWindowController_.displayEntries = nil;
+    }
+}
+
 - (IBAction)showDomainList:(id)sender {
     [SCSentry addBreadcrumb: @"Showing domain list" category:@"app"];
 
@@ -1317,31 +1377,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
         [[NSBundle mainBundle] loadNibNamed: @"DomainList" owner: self topLevelObjects: nil];
 	}
 
-    BOOL blockRunning = [SCUIUtilities blockIsRunning];
-    domainListWindowController_.readOnly = blockRunning;
-
-    // When block is running, show the active blocklist
-    if (blockRunning) {
-        BOOL isTestBlock = [[[SCSettings sharedSettings] valueForKey:@"IsTestBlock"] boolValue];
-        if (isTestBlock) {
-            // Test block - read from ActiveBlocklist setting (not schedule manager)
-            NSArray *activeBlocklist = [[SCSettings sharedSettings] valueForKey:@"ActiveBlocklist"];
-            domainListWindowController_.displayEntries = [activeBlocklist mutableCopy];
-        } else {
-            // Regular block - gather entries from bundles currently blocking
-            SCScheduleManager *manager = [SCScheduleManager sharedManager];
-            NSMutableArray<NSString *> *allEntries = [NSMutableArray array];
-            for (SCBlockBundle *bundle in manager.bundles) {
-                // Only include entries from bundles that are currently blocking
-                if (![manager wouldBundleBeAllowed:bundle.bundleID]) {
-                    [allEntries addObjectsFromArray:bundle.entries];
-                }
-            }
-            domainListWindowController_.displayEntries = allEntries;
-        }
-    } else {
-        domainListWindowController_.displayEntries = nil;
-    }
+    [self configureDomainListForCurrentState];
 
     [domainListWindowController_ showWindow: self];
 
@@ -1472,8 +1508,11 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 - (void)dealloc {
 	[[NSNotificationCenter defaultCenter] removeObserver: self
-													name: @"SCConfigurationChangedNotification"
-												  object: nil];
+											name: @"SCConfigurationChangedNotification"
+										  object: nil];
+	[[NSNotificationCenter defaultCenter] removeObserver:self
+											name:SCScheduleManagerDidChangeNotification
+										  object:nil];
 	[[NSDistributedNotificationCenter defaultCenter] removeObserver: self
 															   name: @"SCConfigurationChangedNotification"
 														 object: nil];

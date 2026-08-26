@@ -1424,6 +1424,261 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertNotNil([schedule nextStateChangeDateAfterDate:instant calendar:london]);
 }
 
+- (void)testNextRecurringBlockingStartGroupsBundlesAndLoopsToNextWeek {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults,
+        SCRecurringTelemetryDefaultsKeys(defaults));
+
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+
+        SCBlockBundle *work = [SCBlockBundle bundleWithName:@"Work"
+                                                     color:[SCBlockBundle colorRed]];
+        work.displayOrder = 0;
+        [work addEntry:@"app:com.example.work"];
+        SCBlockBundle *social = [SCBlockBundle bundleWithName:@"Social Media"
+                                                       color:[SCBlockBundle colorYellow]];
+        social.displayOrder = 1;
+        [social addEntry:@"social.example"];
+        SCBlockBundle *disabled = [SCBlockBundle bundleWithName:@"Disabled"
+                                                         color:[SCBlockBundle colorBlue]];
+        disabled.displayOrder = 2;
+        disabled.enabled = NO;
+        [disabled addEntry:@"disabled.example"];
+        SCBlockBundle *continuous = [SCBlockBundle bundleWithName:@"Continuous"
+                                                           color:[SCBlockBundle colorPurple]];
+        continuous.displayOrder = 3;
+        [continuous addEntry:@"continuous.example"];
+
+        SCWeeklySchedule *workSchedule = [SCWeeklySchedule
+            emptyScheduleForBundleID:work.bundleID];
+        [workSchedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                                  forDay:SCDayOfWeekMonday];
+        SCWeeklySchedule *socialSchedule = [SCWeeklySchedule
+            emptyScheduleForBundleID:social.bundleID];
+        [socialSchedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                                    forDay:SCDayOfWeekMonday];
+
+        [defaults setObject:@[
+            work.toDictionary,
+            social.toDictionary,
+            disabled.toDictionary,
+            continuous.toDictionary,
+        ] forKey:@"SCScheduleBundles"];
+        [defaults setObject:@[workSchedule.toDictionary, socialSchedule.toDictionary]
+                     forKey:@"SCRecurringSchedules"];
+        [defaults setInteger:1 forKey:@"SCRecurringScheduleMigrationVersion"];
+        [defaults setObject:@{@"schemaVersion": @1, @"status": @"complete"}
+                     forKey:@"SCRecurringScheduleMigrationState"];
+        [defaults setObject:@{
+            @"schemaVersion": @1,
+            @"commitmentID": NSUUID.UUID.UUIDString,
+            @"generation": NSUUID.UUID.UUIDString,
+            @"startedAt": [NSDate dateWithTimeIntervalSince1970:1],
+            @"lockEndsAt": [NSDate distantFuture],
+            @"timeZoneIdentifier": @"Europe/London",
+            @"followsLocationTimeZone": @NO,
+        } forKey:@"SCRecurringCommitment"];
+        [defaults synchronize];
+
+        NSCalendar *london = [[NSCalendar alloc]
+            initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        london.timeZone = [NSTimeZone timeZoneWithName:@"Europe/London"];
+        NSDateComponents *components = [NSDateComponents new];
+        components.year = 2026;
+        components.month = 7;
+        components.day = 13;
+        components.hour = 9;
+        components.minute = 58;
+        components.second = 30;
+        NSDate *insideAllowWindow = [london dateFromComponents:components];
+        components.hour = 10;
+        components.minute = 0;
+        components.second = 0;
+        NSDate *expectedStart = [london dateFromComponents:components];
+
+        SCScheduleManager *manager = [[SCScheduleManager alloc] init];
+        NSArray<NSString *> *affectedIDs = nil;
+        NSDate *actualStart = [manager nextRecurringBlockingStartAfterDate:insideAllowWindow
+                                                        affectedBundleIDs:&affectedIDs];
+        XCTAssertEqualObjects(actualStart, expectedStart);
+        XCTAssertEqualObjects(affectedIDs, (@[work.bundleID, social.bundleID]));
+        XCTAssertFalse([affectedIDs containsObject:disabled.bundleID]);
+        XCTAssertFalse([affectedIDs containsObject:continuous.bundleID]);
+
+        NSDate *afterThisWeeksStart = [expectedStart dateByAddingTimeInterval:30 * 60];
+        NSDate *expectedNextWeek = [london dateByAddingUnit:NSCalendarUnitDay
+                                                     value:7
+                                                    toDate:expectedStart
+                                                   options:0];
+        affectedIDs = nil;
+        actualStart = [manager nextRecurringBlockingStartAfterDate:afterThisWeeksStart
+                                                 affectedBundleIDs:&affectedIDs];
+        XCTAssertEqualObjects(actualStart, expectedNextWeek);
+        XCTAssertEqualObjects(affectedIDs, (@[work.bundleID, social.bundleID]));
+
+        // A Protected Hours start can resume blocking before a long break ends.
+        [defaults setObject:@{@"endsAt": [NSDate distantFuture]}
+                     forKey:@"SCActiveTimedBreak"];
+        [defaults setBool:YES forKey:@"SCProtectedHoursEnabled"];
+        [defaults setInteger:9 * 60 forKey:@"SCProtectedHoursStartMinute"];
+        [defaults setInteger:10 * 60 forKey:@"SCProtectedHoursEndMinute"];
+        [defaults synchronize];
+        components.hour = 8;
+        components.minute = 58;
+        components.second = 30;
+        NSDate *beforeProtectedHours = [london dateFromComponents:components];
+        components.hour = 9;
+        components.minute = 0;
+        components.second = 0;
+        NSDate *protectedHoursStart = [london dateFromComponents:components];
+        affectedIDs = nil;
+        actualStart = [manager nextRecurringBlockingStartAfterDate:beforeProtectedHours
+                                                 affectedBundleIDs:&affectedIDs];
+        XCTAssertEqualObjects(actualStart, protectedHoursStart);
+        XCTAssertEqualObjects(affectedIDs, (@[continuous.bundleID]));
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testNextRecurringBlockingStartIgnoresDuplicateEntryBundleHandoff {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults,
+        SCRecurringTelemetryDefaultsKeys(defaults));
+
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCBlockBundle *source = [SCBlockBundle bundleWithName:@"Source"
+                                                       color:[SCBlockBundle colorRed]];
+        [source addEntry:@"app:com.example.shared"];
+        SCBlockBundle *replacement = [SCBlockBundle bundleWithName:@"Replacement"
+                                                            color:[SCBlockBundle colorBlue]];
+        [replacement addEntry:@"app:com.example.shared"];
+
+        SCWeeklySchedule *sourceSchedule = [SCWeeklySchedule
+            emptyScheduleForBundleID:source.bundleID];
+        [sourceSchedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"11:00"]]
+                                    forDay:SCDayOfWeekMonday];
+        SCWeeklySchedule *replacementSchedule = [SCWeeklySchedule
+            emptyScheduleForBundleID:replacement.bundleID];
+        [replacementSchedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                                         forDay:SCDayOfWeekMonday];
+
+        NSString *generation = NSUUID.UUID.UUIDString;
+        [defaults setObject:@[source.toDictionary, replacement.toDictionary]
+                     forKey:@"SCScheduleBundles"];
+        [defaults setObject:@[sourceSchedule.toDictionary, replacementSchedule.toDictionary]
+                     forKey:@"SCRecurringSchedules"];
+        [defaults setInteger:1 forKey:@"SCRecurringScheduleMigrationVersion"];
+        [defaults setObject:@{@"schemaVersion": @1, @"status": @"complete"}
+                     forKey:@"SCRecurringScheduleMigrationState"];
+        [defaults setObject:@{
+            @"schemaVersion": @1,
+            @"commitmentID": NSUUID.UUID.UUIDString,
+            @"generation": generation,
+            @"startedAt": [NSDate dateWithTimeIntervalSince1970:1],
+            @"lockEndsAt": [NSDate distantFuture],
+            @"timeZoneIdentifier": @"Europe/London",
+            @"followsLocationTimeZone": @NO,
+        } forKey:@"SCRecurringCommitment"];
+        [defaults synchronize];
+
+        NSCalendar *london = [[NSCalendar alloc]
+            initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        london.timeZone = [NSTimeZone timeZoneWithName:@"Europe/London"];
+        NSDateComponents *components = [NSDateComponents new];
+        components.year = 2026;
+        components.month = 7;
+        components.day = 13;
+        components.hour = 9;
+        components.minute = 58;
+        components.second = 30;
+        NSDate *beforeHandoff = [london dateFromComponents:components];
+        components.hour = 10;
+        components.minute = 0;
+        components.second = 0;
+        NSDate *handoff = [london dateFromComponents:components];
+
+        SCScheduleManager *manager = [[SCScheduleManager alloc] init];
+        NSArray<NSString *> *affectedIDs = nil;
+        XCTAssertNil([manager nextRecurringBlockingStartAfterDate:beforeHandoff
+                                                affectedBundleIDs:&affectedIDs]);
+        XCTAssertNil(affectedIDs);
+        XCTAssertEqualObjects(manager.recurringCommitmentGeneration, generation);
+
+        [replacement addEntry:@"app:com.example.new"];
+        [defaults setObject:@[source.toDictionary, replacement.toDictionary]
+                     forKey:@"SCScheduleBundles"];
+        [defaults synchronize];
+        manager = [[SCScheduleManager alloc] init];
+        NSDate *actual = [manager nextRecurringBlockingStartAfterDate:beforeHandoff
+                                                    affectedBundleIDs:&affectedIDs];
+        XCTAssertEqualObjects(actual, handoff);
+        XCTAssertEqualObjects(affectedIDs, (@[replacement.bundleID]));
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testNextRecurringBlockingStartUsesCommitmentTimeZone {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults,
+        SCRecurringTelemetryDefaultsKeys(defaults));
+
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Tokyo Work"
+                                                       color:[SCBlockBundle colorRed]];
+        [bundle addEntry:@"app:com.example.tokyo"];
+        SCWeeklySchedule *schedule = [SCWeeklySchedule
+            emptyScheduleForBundleID:bundle.bundleID];
+        [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                              forDay:SCDayOfWeekMonday];
+
+        [defaults setObject:@[bundle.toDictionary] forKey:@"SCScheduleBundles"];
+        [defaults setObject:@[schedule.toDictionary] forKey:@"SCRecurringSchedules"];
+        [defaults setInteger:1 forKey:@"SCRecurringScheduleMigrationVersion"];
+        [defaults setObject:@{@"schemaVersion": @1, @"status": @"complete"}
+                     forKey:@"SCRecurringScheduleMigrationState"];
+        [defaults setObject:@{
+            @"schemaVersion": @1,
+            @"commitmentID": NSUUID.UUID.UUIDString,
+            @"generation": NSUUID.UUID.UUIDString,
+            @"startedAt": [NSDate dateWithTimeIntervalSince1970:1],
+            @"lockEndsAt": [NSDate distantFuture],
+            @"timeZoneIdentifier": @"Asia/Tokyo",
+            @"followsLocationTimeZone": @NO,
+        } forKey:@"SCRecurringCommitment"];
+        [defaults synchronize];
+
+        NSCalendar *utc = [[NSCalendar alloc]
+            initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        utc.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+        NSDateComponents *components = [NSDateComponents new];
+        components.year = 2026;
+        components.month = 7;
+        components.day = 13;
+        components.hour = 0;
+        components.minute = 58;
+        components.second = 30;
+        NSDate *absoluteNow = [utc dateFromComponents:components];
+        components.hour = 1;
+        components.minute = 0;
+        components.second = 0;
+        NSDate *expectedAbsoluteStart = [utc dateFromComponents:components];
+
+        SCScheduleManager *manager = [[SCScheduleManager alloc] init];
+        NSArray<NSString *> *affectedIDs = nil;
+        NSDate *actualStart = [manager nextRecurringBlockingStartAfterDate:absoluteNow
+                                                        affectedBundleIDs:&affectedIDs];
+        XCTAssertEqualObjects(actualStart, expectedAbsoluteStart);
+        XCTAssertEqualObjects(affectedIDs, (@[bundle.bundleID]));
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
 - (void)testDiagnosticSnapshotCarriesExactLegacyApprovalDrift {
     NSDictionary<NSString *, NSNumber *> *appSnapshot = @{
         @"app_has_schedule_state": @YES,

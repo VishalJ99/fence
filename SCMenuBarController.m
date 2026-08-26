@@ -4,6 +4,7 @@
 //
 
 #import "SCMenuBarController.h"
+#import "SCCountdownWarningController.h"
 #import "Block Management/SCScheduleManager.h"
 #import "Block Management/SCBlockBundle.h"
 #import "Block Management/SCWeeklySchedule.h"
@@ -16,13 +17,29 @@
 #import "AppController.h"
 #import <Sparkle/Sparkle.h>
 
+static const NSTimeInterval SCWarningLeadTime = 90.0;
+
+@interface SCMenuBarCountdownEvent : NSObject
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, strong) NSDate *targetDate;
+@property (nonatomic, copy) NSString *eventIdentifier;
+@end
+
+@implementation SCMenuBarCountdownEvent
+@end
+
 @interface SCMenuBarController ()
 
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, strong) NSMenu *statusMenu;
 @property (nonatomic, strong) NSTimer *updateTimer;
+@property (nonatomic, strong, nullable) NSTimer *warningArmTimer;
+@property (nonatomic, strong) SCCountdownWarningController *countdownWarningController;
+@property (nonatomic, copy, nullable) NSString *dismissedWarningIdentifier;
 @property (nonatomic, strong, nullable) SCLicenseWindowController *licenseWindowController;
 @property (nonatomic, strong, nullable) SCTestBlockWindowController *testBlockWindowController;
+
+- (void)refreshCountdownWarning;
 
 @end
 
@@ -41,11 +58,25 @@
     self = [super init];
     if (self) {
         _isVisible = NO;
+        _countdownWarningController = [[SCCountdownWarningController alloc] init];
+        __weak typeof(self) weakSelf = self;
+        _countdownWarningController.onDismiss = ^(NSString *eventIdentifier) {
+            weakSelf.dismissedWarningIdentifier = eventIdentifier;
+            [weakSelf refreshCountdownWarning];
+        };
+        _countdownWarningController.onExpire = ^{
+            [weakSelf refreshCountdownWarning];
+        };
 
         // Listen for schedule changes
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(scheduleDidChange:)
                                                      name:SCScheduleManagerDidChangeNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(systemClockDidChange:)
+                                                     name:NSSystemClockDidChangeNotification
                                                    object:nil];
 
         // Listen for wake from sleep to refresh status
@@ -61,6 +92,8 @@
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
     [self.updateTimer invalidate];
+    [self.warningArmTimer invalidate];
+    [self.countdownWarningController hideWarning];
 }
 
 #pragma mark - Visibility
@@ -73,7 +106,11 @@
     if (visible) {
         [self createStatusItem];
         [self startUpdateTimer];
+        [self refreshCountdownWarning];
     } else {
+        [self.warningArmTimer invalidate];
+        self.warningArmTimer = nil;
+        [self.countdownWarningController hideWarning];
         [self removeStatusItem];
         [self stopUpdateTimer];
     }
@@ -92,6 +129,10 @@
     [self rebuildMenu];
 
     self.statusItem.menu = self.statusMenu;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self refreshCountdownWarning];
+    });
 }
 
 - (void)removeStatusItem {
@@ -109,20 +150,51 @@
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
-    // Only show bundle status pills when committed (like week schedule window)
+    // Only show bundle status pills when committed (like week schedule window).
     if (manager.isCommitted) {
+        BOOL breakSuspendsEnforcement = manager.hasActiveTimedBreak &&
+            !manager.protectedHoursActiveNow;
+        if (manager.hasActiveTimedBreak) {
+            NSString *breakText = breakSuspendsEnforcement
+                ? @"● Break active"
+                : @"● Break interrupted by Protected Hours";
+            NSColor *breakColor = breakSuspendsEnforcement
+                ? NSColor.systemGreenColor
+                : NSColor.systemOrangeColor;
+            NSMenuItem *breakItem = [[NSMenuItem alloc] initWithTitle:breakText
+                                                               action:nil
+                                                        keyEquivalent:@""];
+            NSMutableAttributedString *breakTitle =
+                [[NSMutableAttributedString alloc] initWithString:breakText];
+            [breakTitle addAttributes:@{
+                NSForegroundColorAttributeName: breakColor,
+                NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
+            } range:NSMakeRange(0, breakText.length)];
+            breakItem.attributedTitle = breakTitle;
+            breakItem.enabled = NO;
+            [self.statusMenu addItem:breakItem];
+        }
+
+        NSUInteger renderedBundleCount = 0;
         for (SCBlockBundle *bundle in manager.bundles) {
-            BOOL allowed = [manager wouldBundleBeAllowed:bundle.bundleID];
+            if (!bundle.enabled || bundle.entries.count == 0) continue;
+
+            BOOL scheduleAllows = [manager wouldBundleBeAllowed:bundle.bundleID];
             NSString *statusStr = [manager statusStringForBundleID:bundle.bundleID];
 
             // Skip bundles with no schedule for current week
             if (statusStr.length == 0) continue;
 
+            BOOL allowed = scheduleAllows || breakSuspendsEnforcement;
             NSString *statusWord = allowed ? @"allowed" : @"blocked";
             NSColor *statusColor = allowed ? [NSColor systemGreenColor] : [NSColor systemRedColor];
 
-            // Format: "● noise allowed till 8:16pm"
-            NSString *fullText = [NSString stringWithFormat:@"● %@ %@ %@", bundle.name, statusWord, statusStr];
+            NSString *fullText;
+            if (breakSuspendsEnforcement && !scheduleAllows) {
+                fullText = [NSString stringWithFormat:@"● %@ allowed during break", bundle.name];
+            } else {
+                fullText = [NSString stringWithFormat:@"● %@ %@ %@", bundle.name, statusWord, statusStr];
+            }
 
             NSMenuItem *bundleItem = [[NSMenuItem alloc] initWithTitle:fullText
                                                                 action:nil
@@ -137,10 +209,11 @@
             bundleItem.enabled = NO;
 
             [self.statusMenu addItem:bundleItem];
+            renderedBundleCount += 1;
         }
 
-        if (manager.bundles.count == 0) {
-            NSMenuItem *noBundlesItem = [[NSMenuItem alloc] initWithTitle:@"No bundles configured"
+        if (renderedBundleCount == 0) {
+            NSMenuItem *noBundlesItem = [[NSMenuItem alloc] initWithTitle:@"No active bundles configured"
                                                                    action:nil
                                                             keyEquivalent:@""];
             noBundlesItem.enabled = NO;
@@ -153,14 +226,22 @@
     // Commitment / Test Block info
     BOOL blockIsRunning = [[SCSettings sharedSettings] boolForKey:@"BlockIsRunning"];
     BOOL isTestBlock = [[[SCSettings sharedSettings] valueForKey:@"IsTestBlock"] boolValue];
-    NSDate *blockEndDate = [[SCSettings sharedSettings] valueForKey:@"BlockEndDate"];
 
     if (manager.isCommitted) {
-        NSDateFormatter *endFormatter = [[NSDateFormatter alloc] init];
-        endFormatter.dateFormat = @"EEEE";
-        NSString *endDay = [endFormatter stringFromDate:manager.commitmentEndDate];
+        NSString *commitmentText = @"Recurring commitment active";
+        if (!manager.hasRecurringCommitment) {
+            NSDate *legacyEnd = manager.commitmentEndDate;
+            if (legacyEnd != nil) {
+                NSDateFormatter *endFormatter = [[NSDateFormatter alloc] init];
+                endFormatter.dateFormat = @"EEEE";
+                commitmentText = [NSString stringWithFormat:@"Committed until %@",
+                    [endFormatter stringFromDate:legacyEnd]];
+            } else {
+                commitmentText = @"Commitment active";
+            }
+        }
 
-        NSMenuItem *commitItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Committed until %@", endDay]
+        NSMenuItem *commitItem = [[NSMenuItem alloc] initWithTitle:commitmentText
                                                             action:nil
                                                      keyEquivalent:@""];
         commitItem.enabled = NO;
@@ -332,23 +413,29 @@
 
 - (NSString *)blocklistMenuTitle {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    NSInteger siteCount = 0;
-    NSInteger appCount = 0;
+    NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
 
-    // Count entries from bundles currently blocking (not in allowed window)
+    // Show the underlying committed policy even while a timed break temporarily
+    // pauses enforcement.
     for (SCBlockBundle *bundle in manager.bundles) {
+        if (!bundle.enabled || bundle.entries.count == 0) continue;
         if ([manager wouldBundleBeAllowed:bundle.bundleID]) {
             continue; // Skip bundles in allowed window
         }
         for (id entry in bundle.entries) {
-            if ([entry isKindOfClass:[NSString class]]) {
-                NSString *entryStr = (NSString *)entry;
-                if ([entryStr hasPrefix:@"app:"]) {
-                    appCount++;
-                } else {
-                    siteCount++;
-                }
+            if ([entry isKindOfClass:[NSString class]] && [(NSString *)entry length] > 0) {
+                [entries addObject:entry];
             }
+        }
+    }
+
+    NSInteger siteCount = 0;
+    NSInteger appCount = 0;
+    for (NSString *entry in entries) {
+        if ([entry hasPrefix:@"app:"]) {
+            appCount++;
+        } else {
+            siteCount++;
         }
     }
 
@@ -395,6 +482,96 @@
     return image;
 }
 
+#pragma mark - Countdown Warning
+
+- (SCMenuBarCountdownEvent *)countdownEventAfterDate:(NSDate *)date {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (!self.isVisible || !manager.hasRecurringCommitment) return nil;
+    NSString *commitmentGeneration = manager.recurringCommitmentGeneration ?: @"unknown";
+
+    NSDate *breakEnd = manager.activeTimedBreakEndDate;
+    NSArray<NSString *> *bundleIDs = nil;
+    NSDate *blockStart = [manager nextRecurringBlockingStartAfterDate:date
+                                                   affectedBundleIDs:&bundleIDs];
+    BOOL breakEndsFirst = [breakEnd compare:date] == NSOrderedDescending &&
+        (blockStart == nil || [breakEnd compare:blockStart] != NSOrderedDescending);
+    if (breakEndsFirst) {
+        SCMenuBarCountdownEvent *event = [[SCMenuBarCountdownEvent alloc] init];
+        event.title = @"Break ending soon";
+        event.targetDate = breakEnd;
+        event.eventIdentifier = [NSString stringWithFormat:@"%@-break-%.3f",
+            commitmentGeneration, breakEnd.timeIntervalSince1970];
+        return event;
+    }
+
+    if (blockStart == nil || bundleIDs.count == 0) return nil;
+
+    NSDictionary<NSString *, SCBlockBundle *> *bundlesByID = [NSDictionary dictionaryWithObjects:
+        manager.bundles forKeys:[manager.bundles valueForKey:@"bundleID"]];
+    NSMutableArray<NSString *> *bundleNames = [NSMutableArray array];
+    for (NSString *bundleID in bundleIDs) {
+        SCBlockBundle *bundle = bundlesByID[bundleID];
+        if (bundle.name.length > 0) [bundleNames addObject:bundle.name];
+    }
+    if (bundleNames.count == 0) return nil;
+
+    NSString *joinedNames = [NSListFormatter localizedStringByJoiningStrings:bundleNames];
+    SCMenuBarCountdownEvent *event = [[SCMenuBarCountdownEvent alloc] init];
+    event.title = [NSString stringWithFormat:@"%@ blocking starting soon", joinedNames];
+    event.targetDate = blockStart;
+    event.eventIdentifier = [NSString stringWithFormat:@"%@-block-%.0f-%@",
+        commitmentGeneration, blockStart.timeIntervalSince1970,
+        [bundleIDs componentsJoinedByString:@","]];
+    return event;
+}
+
+- (void)refreshCountdownWarning {
+    [self.warningArmTimer invalidate];
+    self.warningArmTimer = nil;
+
+    NSDate *now = [NSDate date];
+    SCMenuBarCountdownEvent *event = [self countdownEventAfterDate:now];
+    if (event == nil) {
+        [self.countdownWarningController hideWarning];
+        return;
+    }
+
+    NSTimeInterval remaining = [event.targetDate timeIntervalSinceDate:now];
+    if (remaining <= 0.0) {
+        [self.countdownWarningController hideWarning];
+        return;
+    }
+
+    if (remaining <= SCWarningLeadTime) {
+        if ([self.dismissedWarningIdentifier isEqualToString:event.eventIdentifier]) {
+            [self.countdownWarningController hideWarning];
+            return;
+        }
+        NSScreen *screen = self.statusItem.button.window.screen ?: NSScreen.mainScreen;
+        [self.countdownWarningController showWarningWithTitle:event.title
+                                                   targetDate:event.targetDate
+                                              eventIdentifier:event.eventIdentifier
+                                                       screen:screen];
+        return;
+    }
+
+    [self.countdownWarningController hideWarning];
+    NSDate *fireDate = [event.targetDate dateByAddingTimeInterval:-SCWarningLeadTime];
+    self.warningArmTimer = [[NSTimer alloc] initWithFireDate:fireDate
+                                                  interval:0.0
+                                                    target:self
+                                                  selector:@selector(warningArmTimerFired:)
+                                                  userInfo:nil
+                                                   repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.warningArmTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)warningArmTimerFired:(NSTimer *)timer {
+    #pragma unused(timer)
+    self.warningArmTimer = nil;
+    [self refreshCountdownWarning];
+}
+
 #pragma mark - Update
 
 - (void)updateStatus {
@@ -403,6 +580,7 @@
     self.statusItem.button.image = [self statusImage];
     [self rebuildMenu];
     self.statusItem.menu = self.statusMenu;
+    [self refreshCountdownWarning];
 }
 
 - (void)startUpdateTimer {
@@ -441,12 +619,20 @@
     });
 }
 
+- (void)systemClockDidChange:(NSNotification *)note {
+    #pragma unused(note)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateStatus];
+    });
+}
+
 #pragma mark - NSMenuDelegate
 
 - (void)menuWillOpen:(NSMenu *)menu {
     // Rebuild menu fresh when opened to ensure latest state
     [self rebuildMenu];
     self.statusItem.menu = self.statusMenu;
+    [self refreshCountdownWarning];
 }
 
 #pragma mark - Actions

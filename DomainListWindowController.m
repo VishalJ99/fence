@@ -63,7 +63,13 @@
     }
     
     [[self window] makeFirstResponder: self];
-    domainList_ = [[defaults_ arrayForKey: @"Blocklist"] mutableCopy];
+    if (self.readOnly && self.displayEntries != nil) {
+        domainList_ = [self.displayEntries mutableCopy];
+    } else {
+        domainList_ = [[defaults_ arrayForKey: @"Blocklist"] mutableCopy];
+    }
+    if (self.readOnly) [self setupReadOnlyAppearance];
+    else [self setupEditableAppearance];
     [domainListTableView_ reloadData];
 }
 
@@ -72,6 +78,9 @@
 	// use those instead of NSUserDefaults
 	if (self.displayEntries) {
 		domainList_ = [self.displayEntries mutableCopy];
+		[domainListTableView_ reloadData];
+	} else if (!self.readOnly) {
+		domainList_ = [[defaults_ arrayForKey:@"Blocklist"] mutableCopy];
 		[domainListTableView_ reloadData];
 	}
 
@@ -442,24 +451,19 @@
 }
 
 - (void)setupReadOnlyAppearance {
-    // Hide editing UI (radio buttons and "can't be edited" message)
+    // Hide editing UI and show the context-specific read-only footer.
     allowlistRadioMatrix_.hidden = YES;
-
-    // Find and hide the "can't be edited" label
-    for (NSView* subview in self.window.contentView.subviews) {
-        if ([subview isKindOfClass:[NSTextField class]]) {
-            NSTextField* textField = (NSTextField*)subview;
-            if ([textField.stringValue containsString:@"can't be edited"]) {
-                textField.hidden = YES;
-                break;
-            }
-        }
-    }
+    readOnlyMessageLabel_.stringValue = self.readOnlyNoticeText.length > 0
+        ? self.readOnlyNoticeText
+        : @"Locked during the active commitment.";
+    readOnlyMessageLabel_.textColor = self.readOnlyNoticeColor ?: NSColor.secondaryLabelColor;
+    readOnlyMessageLabel_.hidden = NO;
 }
 
 - (void)setupEditableAppearance {
     // Show editing UI
     allowlistRadioMatrix_.hidden = NO;
+    readOnlyMessageLabel_.hidden = YES;
 }
 
 @end

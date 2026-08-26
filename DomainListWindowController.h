@@ -34,6 +34,7 @@
 	NSMutableArray* domainList_;
 	IBOutlet NSTableView* domainListTableView_;
     IBOutlet NSMatrix* allowlistRadioMatrix_;
+	IBOutlet NSTextField* readOnlyMessageLabel_;
 	NSUserDefaults* defaults_;
 }
 
@@ -42,6 +43,10 @@
 /// Entries to display when in readOnly mode (from active bundles).
 /// When set, overrides the default NSUserDefaults reading.
 @property (nonatomic, copy) NSArray<NSString *> *displayEntries;
+
+/// Optional footer shown under a read-only committed blocklist.
+@property (nonatomic, copy, nullable) NSString *readOnlyNoticeText;
+@property (nonatomic, strong, nullable) NSColor *readOnlyNoticeColor;
 
 - (void)refreshDomainList;
 

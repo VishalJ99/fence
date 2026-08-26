@@ -14,3 +14,4 @@
 - `decisions/agent/pending/PER-383-root-scheduler-authority-and-legacy-rollback.md` — pending maintainer review record for scheduler authority, commitment immutability, strictify coupling, and rollback boundaries.
 - `decisions/human/PER-444-github-release-assets-trial.md` — approved 3.4.12 trial contract for publishing signed ZIP/DMG artifacts on GitHub Releases while retaining Cloudflare Pages for appcasts and the website.
 - `decisions/human/PER-444-travel-timezone-contract.md` — approved recurring-commitment timezone ownership, Location Services travel mode, privacy, failure fallback, and rollback contract.
+- `decisions/agent/pending/PER-444-macos-countdown-warning-surface.md` — pending review record for the non-activating 90-second macOS block-start and break-end warning pill.

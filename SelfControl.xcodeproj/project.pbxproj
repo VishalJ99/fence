@@ -85,6 +85,7 @@
 		2283551C2EFB7C5100E77469 /* SCWeekScheduleWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 2283551B2EFB7C5100E77469 /* SCWeekScheduleWindowController.m */; };
 		2283551F2EFB7C6300E77469 /* SCWeekGridView.m in Sources */ = {isa = PBXBuildFile; fileRef = 2283551E2EFB7C6300E77469 /* SCWeekGridView.m */; };
 		228355262EFB7C8100E77469 /* SCMenuBarController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355252EFB7C8100E77469 /* SCMenuBarController.m */; };
+		C90D00000000000000000003 /* SCCountdownWarningController.m in Sources */ = {isa = PBXBuildFile; fileRef = C90D00000000000000000002 /* SCCountdownWarningController.m */; };
 		228355272EFB7C8100E77469 /* SCBundleEditorController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355212EFB7C8100E77469 /* SCBundleEditorController.m */; };
 		228355282EFB7C8100E77469 /* SCDayScheduleEditorController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355232EFB7C8100E77469 /* SCDayScheduleEditorController.m */; };
 		22AE30892F056A6D00B0FDE8 /* SCCalendarGridView.m in Sources */ = {isa = PBXBuildFile; fileRef = 22AE30882F056A6D00B0FDE8 /* SCCalendarGridView.m */; };
@@ -684,6 +685,8 @@
 		228355232EFB7C8100E77469 /* SCDayScheduleEditorController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCDayScheduleEditorController.m; sourceTree = "<group>"; };
 		228355242EFB7C8100E77469 /* SCMenuBarController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCMenuBarController.h; sourceTree = "<group>"; };
 		228355252EFB7C8100E77469 /* SCMenuBarController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCMenuBarController.m; sourceTree = "<group>"; };
+		C90D00000000000000000001 /* SCCountdownWarningController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCCountdownWarningController.h; sourceTree = "<group>"; };
+		C90D00000000000000000002 /* SCCountdownWarningController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCCountdownWarningController.m; sourceTree = "<group>"; };
 		229A86A42F0B1D0A00F5D2B7 /* SelfControlRelease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SelfControlRelease.entitlements; sourceTree = "<group>"; };
 		22AE30852F056A6D00B0FDE8 /* SCBundleSidebarView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCBundleSidebarView.h; sourceTree = "<group>"; };
 		22AE30862F056A6D00B0FDE8 /* SCBundleSidebarView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCBundleSidebarView.m; sourceTree = "<group>"; };
@@ -1921,6 +1924,8 @@
 				228355232EFB7C8100E77469 /* SCDayScheduleEditorController.m */,
 				228355242EFB7C8100E77469 /* SCMenuBarController.h */,
 				228355252EFB7C8100E77469 /* SCMenuBarController.m */,
+				C90D00000000000000000001 /* SCCountdownWarningController.h */,
+				C90D00000000000000000002 /* SCCountdownWarningController.m */,
 				2283551D2EFB7C6300E77469 /* SCWeekGridView.h */,
 				2283551E2EFB7C6300E77469 /* SCWeekGridView.m */,
 				2283551A2EFB7C5100E77469 /* SCWeekScheduleWindowController.h */,
@@ -4070,6 +4075,7 @@
 				CBB1731920F05C07007FCAE9 /* SCMiscUtilities.m in Sources */,
 				CB58948025B3FC6D00E9A5C0 /* HostFileBlocker.m in Sources */,
 				228355262EFB7C8100E77469 /* SCMenuBarController.m in Sources */,
+				C90D00000000000000000003 /* SCCountdownWarningController.m in Sources */,
 				228355272EFB7C8100E77469 /* SCBundleEditorController.m in Sources */,
 				228355282EFB7C8100E77469 /* SCDayScheduleEditorController.m in Sources */,
 				22AE30BA2F057AAD00B0FDE8 /* SCVersionTracker.m in Sources */,
