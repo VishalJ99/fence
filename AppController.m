@@ -184,14 +184,10 @@ static BOOL SCFileExistsAtPath(NSString *path) {
         return;
     }
 
-    NSError *authRepairError = nil;
-    if ([self.xpc refreshAuthorizationRights:&authRepairError]) {
-        [defaults setObject:currentBuild forKey:kRepairMigrationPER352AuthRefreshBuildKey];
-        [defaults synchronize];
-        NSLog(@"AppController: Completed one-time PER-352 authorization repair");
-    } else {
-        NSLog(@"AppController: Failed one-time PER-352 authorization repair: %@", authRepairError);
-    }
+    // Do not surprise the user with an administrator prompt at app launch.
+    // The next authorization-protected action repairs stale managed rights
+    // before it asks the helper to mutate protected state.
+    NSLog(@"AppController: Deferring stale authorization-right repair until protected action");
 }
 
 - (IBAction)updateTimeSliderDisplay:(id)sender {

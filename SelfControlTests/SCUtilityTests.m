@@ -39,6 +39,12 @@
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
 @end
 
+@interface SCXPCAuthorization (RuleDefinitionTests)
++ (NSDictionary *)commandInfo;
++ (BOOL)authorizationRightDefinition:(NSDictionary *)current
+             matchesDesiredDefinition:(NSDictionary *)desired;
+@end
+
 @interface SCLogger (DiagnosticTelemetryTests)
 + (NSDictionary<NSString *, id> *)diagnosticTelemetryFieldsForAppSnapshot:(NSDictionary<NSString *, NSNumber *> *)appSnapshot
                                                                  uiSnapshot:(nullable NSDictionary<NSString *, NSNumber *> *)uiSnapshot
@@ -1567,6 +1573,55 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"org.eyebeam.SelfControl.modifyBlock",
     ]];
     XCTAssertEqualObjects(rights, expectedRights);
+}
+
+- (void)testXPCAuthorizationManagedRightsUseNativeAdminAuthenticationVersion2 {
+    NSDictionary *expectedRule = @{
+        @"class": @"user",
+        @"group": @"admin",
+        @"timeout": @120,
+        @"shared": @YES,
+        @"version": @2,
+    };
+
+    NSMutableSet<NSDictionary *> *managedRules = [NSMutableSet set];
+    for (NSDictionary *command in SCXPCAuthorization.commandInfo.allValues) {
+        NSDictionary *rule = command[@"authRightDefault"];
+        XCTAssertNotNil(rule);
+        XCTAssertNil(rule[@"mechanisms"]);
+        [managedRules addObject:rule];
+    }
+
+    XCTAssertEqual(managedRules.count, 1u);
+    XCTAssertEqualObjects(managedRules.anyObject, expectedRule);
+}
+
+- (void)testXPCAuthorizationRuleComparisonDetectsLegacyRuleWithoutLoopingOnSystemFields {
+    NSDictionary *desired = @{
+        @"class": @"user",
+        @"group": @"admin",
+        @"timeout": @120,
+        @"shared": @YES,
+        @"version": @2,
+    };
+    NSDictionary *legacy = @{
+        @"class": @"user",
+        @"group": @"admin",
+        @"timeout": @120,
+        @"shared": @YES,
+        @"version": @1,
+        @"mechanisms": @[@"builtin:authenticate"],
+    };
+    NSMutableDictionary *currentWithSystemFields = [desired mutableCopy];
+    currentWithSystemFields[@"created"] = @123;
+    currentWithSystemFields[@"modified"] = @456;
+
+    XCTAssertFalse([SCXPCAuthorization authorizationRightDefinition:legacy
+                                            matchesDesiredDefinition:desired]);
+    XCTAssertTrue([SCXPCAuthorization authorizationRightDefinition:desired
+                                           matchesDesiredDefinition:desired]);
+    XCTAssertTrue([SCXPCAuthorization authorizationRightDefinition:currentWithSystemFields
+                                           matchesDesiredDefinition:desired]);
 }
 
 - (void)testXPCAuthorizationRejectionTelemetrySkipsCancellationAndDeduplicatesByCommand {

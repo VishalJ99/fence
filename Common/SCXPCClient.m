@@ -41,6 +41,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
                                                 error:(NSError*)error
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
 + (BOOL)recordAuthorizationRejectionForCommand:(NSString*)command error:(NSError*)error;
+- (BOOL)repairManagedAuthorizationRightsIfNeeded:(NSError **)error;
 
 @end
 
@@ -313,6 +314,13 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
 }
 
 - (void)installDaemon:(void(^)(NSError*))callback {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        callback([SCMiscUtilities errorIsAuthCanceled:authorizationRepairError]
+            ? [SCErr errorWithCode:1] : authorizationRepairError);
+        return;
+    }
+
     // make sure authorization is set up (if we haven't connected yet)
     [self setupAuthorization];
     
@@ -428,6 +436,11 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
         if (error) *error = refreshError;
     }
     return refreshed;
+}
+
+- (BOOL)repairManagedAuthorizationRightsIfNeeded:(NSError **)error {
+    if (![self authorizationRightsNeedRefresh]) return YES;
+    return [self refreshAuthorizationRightsAllowingInteraction:YES error:error];
 }
 
 - (BOOL)connectionIsActive {
@@ -742,6 +755,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 }
 
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings reply:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             [SCSentry captureError: connectError];
@@ -765,6 +783,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 }
 
 - (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist reply:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Blocklist update failed with connection error: %@", connectError);
@@ -831,6 +854,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 }
 
 - (void)updateBlockEndDate:(NSDate*)newEndDate reply:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Block end date update failed with connection error: %@", connectError);
@@ -862,6 +890,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                   generation:(NSString *)generation
                                     segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                        reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(@{}, authorizationRepairError);
+        return;
+    }
     [self getCompatibilityInfo:^(NSInteger protocolVersion,
                                  NSString *buildVersion,
                                  NSString *marketingVersion,
@@ -947,6 +980,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                              blockSettings:(NSDictionary<NSString *,id> *)blockSettings
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(@{}, authorizationRepairError);
+        return;
+    }
     [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
                                  NSString *marketingVersion, NSArray<NSString *> *capabilities,
                                  NSError *handshakeError) {
@@ -1105,6 +1143,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                    startDate:(NSDate*)startDate
                      endDate:(NSDate*)endDate
                          reply:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Register schedule failed with connection error: %@", connectError);
@@ -1175,6 +1218,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 
 - (void)unregisterScheduleWithID:(NSString*)scheduleId
                            reply:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Unregister schedule failed with connection error: %@", connectError);
@@ -1200,6 +1248,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 }
 
 - (void)clearAllApprovedSchedules:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Clear all approved schedules failed with connection error: %@", connectError);
@@ -1267,6 +1320,11 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
 }
 
 - (void)clearBlockForDebug:(void(^)(NSError* error))reply {
+    NSError *authorizationRepairError = nil;
+    if (![self repairManagedAuthorizationRightsIfNeeded:&authorizationRepairError]) {
+        reply(authorizationRepairError);
+        return;
+    }
     [self connectAndExecuteCommandBlock:^(NSError * connectError) {
         if (connectError != nil) {
             NSLog(@"Clear block for debug failed with connection error: %@", connectError);

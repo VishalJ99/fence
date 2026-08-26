@@ -80,10 +80,7 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
             @"group": @"admin",
             @"timeout": @(120), // 2 minutes
             @"shared": @(YES),
-            @"version": @1, // not entirely sure what this does TBH
-            // Enable Touch ID and other biometric authentication on macOS 10.12.2+
-            // The authenticate mechanism supports Touch ID when available
-            @"mechanisms": @[@"builtin:authenticate"]
+            @"version": @2
         };
     }
     
@@ -162,6 +159,18 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
     return [rightNames sortedArrayUsingSelector:@selector(compare:)];
 }
 
++ (BOOL)authorizationRightDefinition:(NSDictionary *)current
+             matchesDesiredDefinition:(NSDictionary *)desired {
+    if (![current isKindOfClass:[NSDictionary class]] ||
+        ![desired isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    for (NSString *key in desired) {
+        if (![current[key] isEqual:desired[key]]) return NO;
+    }
+    return YES;
+}
+
 + (BOOL)authorizationRightsNeedRefresh {
     __block BOOL needsRefresh = NO;
     [self enumerateRightsUsingBlock:^(NSString *authRightName, id authRightDefault, NSString *authRightDesc) {
@@ -177,12 +186,8 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
         NSDictionary *current = CFBridgingRelease(currentDefinition);
         NSDictionary *desired = [authRightDefault isKindOfClass:[NSDictionary class]]
             ? authRightDefault : @{};
-        for (NSString *key in desired) {
-            if (![current[key] isEqual:desired[key]]) {
-                needsRefresh = YES;
-                break;
-            }
-        }
+        needsRefresh = ![self authorizationRightDefinition:current
+                                  matchesDesiredDefinition:desired];
     }];
     return needsRefresh;
 }
