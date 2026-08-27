@@ -1131,6 +1131,75 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     }
 }
 
+- (void)testTimedBreakEligibilityMatchesCommitmentProtectionAndScheduleState {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *keys = SCRecurringTelemetryDefaultsKeys(defaults);
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, keys);
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCScheduleManager *manager = SCInstallRecurringTelemetryFixture(defaults);
+        NSCalendar *london = [[NSCalendar alloc]
+            initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        london.timeZone = [NSTimeZone timeZoneWithName:@"Europe/London"];
+        [defaults setInteger:3 forKey:@"SCBreakCreditsPerDay"];
+        [defaults setInteger:1 forKey:@"SCBreakCreditsRemainingToday"];
+        [defaults setObject:[london startOfDayForDate:[NSDate date]]
+                     forKey:@"SCBreakCreditsLastResetDay"];
+        [defaults synchronize];
+
+        XCTAssertTrue(manager.canBeginTimedBreak);
+
+        [manager setValue:@YES forKey:@"timedBreakMutationInFlight"];
+        XCTAssertFalse(manager.canBeginTimedBreak);
+        NSInteger creditsBeforeDuplicate = manager.breakCreditsRemainingToday;
+        __block BOOL duplicateStartReturned = NO;
+        [manager beginTimedBreakForMinutes:5 completion:^(BOOL started, NSError *error) {
+            duplicateStartReturned = YES;
+            XCTAssertFalse(started);
+            XCTAssertEqual(error.code, 44);
+        }];
+        __block BOOL duplicateEndReturned = NO;
+        [manager endTimedBreakWithCompletion:^(BOOL ended, NSError *error) {
+            duplicateEndReturned = YES;
+            XCTAssertFalse(ended);
+            XCTAssertEqual(error.code, 44);
+        }];
+        XCTAssertTrue(duplicateStartReturned);
+        XCTAssertTrue(duplicateEndReturned);
+        XCTAssertEqual(manager.breakCreditsRemainingToday, creditsBeforeDuplicate);
+        [manager setValue:@NO forKey:@"timedBreakMutationInFlight"];
+
+        [defaults setInteger:0 forKey:@"SCBreakCreditsRemainingToday"];
+        XCTAssertFalse(manager.canBeginTimedBreak);
+        [defaults setInteger:1 forKey:@"SCBreakCreditsRemainingToday"];
+
+        [defaults setObject:@{ @"endsAt": [NSDate dateWithTimeIntervalSinceNow:5 * 60] }
+                     forKey:@"SCActiveTimedBreak"];
+        XCTAssertFalse(manager.canBeginTimedBreak);
+        [defaults removeObjectForKey:@"SCActiveTimedBreak"];
+
+        NSDateComponents *time = [london components:(NSCalendarUnitHour | NSCalendarUnitMinute)
+                                           fromDate:[NSDate date]];
+        NSInteger minuteOfDay = time.hour * 60 + time.minute;
+        [defaults setBool:YES forKey:@"SCProtectedHoursEnabled"];
+        [defaults setInteger:(minuteOfDay + 23 * 60) % (24 * 60)
+                      forKey:@"SCProtectedHoursStartMinute"];
+        [defaults setInteger:(minuteOfDay + 60) % (24 * 60)
+                      forKey:@"SCProtectedHoursEndMinute"];
+        XCTAssertTrue(manager.protectedHoursActiveNow);
+        XCTAssertFalse(manager.canBeginTimedBreak);
+        [defaults setBool:NO forKey:@"SCProtectedHoursEnabled"];
+
+        manager.bundles.firstObject.enabled = NO;
+        XCTAssertFalse(manager.canBeginTimedBreak);
+        [defaults removeObjectForKey:@"SCRecurringCommitment"];
+        XCTAssertFalse(manager.canBeginTimedBreak);
+    } @finally {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
 - (void)testRecurringCommitmentParticipatesInStructuralAndActiveTelemetryProjection {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSArray<NSString *> *keys = SCRecurringTelemetryDefaultsKeys(defaults);

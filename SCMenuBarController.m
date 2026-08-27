@@ -14,6 +14,8 @@
 #import "SCTestBlockWindowController.h"
 #import "SCSettings.h"
 #import "Common/Utility/SCBlockUtilities.h"
+#import "Common/Utility/SCMiscUtilities.h"
+#import "SCUIUtilities.h"
 #import "AppController.h"
 #import <Sparkle/Sparkle.h>
 
@@ -40,6 +42,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 @property (nonatomic, strong, nullable) SCTestBlockWindowController *testBlockWindowController;
 
 - (void)refreshCountdownWarning;
+- (void)populateMenu:(NSMenu *)menu;
 
 @end
 
@@ -145,7 +148,12 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 #pragma mark - Menu Building
 
 - (void)rebuildMenu {
-    self.statusMenu = [[NSMenu alloc] init];
+    [self populateMenu:[[NSMenu alloc] init]];
+}
+
+- (void)populateMenu:(NSMenu *)menu {
+    [menu removeAllItems];
+    self.statusMenu = menu;
     self.statusMenu.delegate = self;
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
@@ -297,6 +305,10 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     scheduleItem.target = self;
     [self.statusMenu addItem:scheduleItem];
 
+    if (manager.hasRecurringCommitment) {
+        [self.statusMenu addItem:[self timedBreakMenuItemForManager:manager]];
+    }
+
     // Try Test Block - always show when not committed, grey out if block active
     if (!manager.isCommitted) {
         NSMenuItem *testBlockMenuItem = [[NSMenuItem alloc] initWithTitle:@"Try Test Block"
@@ -416,6 +428,46 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                keyEquivalent:@"q"];
     quitItem.target = self;
     [self.statusMenu addItem:quitItem];
+}
+
+- (NSMenuItem *)timedBreakMenuItemForManager:(SCScheduleManager *)manager {
+    if (manager.timedBreakMutationInFlight) {
+        NSMenuItem *pendingItem = [[NSMenuItem alloc] initWithTitle:@"Updating Break…"
+                                                            action:nil
+                                                     keyEquivalent:@""];
+        pendingItem.enabled = NO;
+        return pendingItem;
+    }
+
+    if (manager.hasActiveTimedBreak) {
+        NSString *title = manager.protectedHoursActiveNow ? @"End Paused Break" : @"End Break";
+        NSMenuItem *endItem = [[NSMenuItem alloc] initWithTitle:title
+                                                        action:@selector(endTimedBreakClicked:)
+                                                 keyEquivalent:@""];
+        endItem.target = self;
+        return endItem;
+    }
+
+    BOOL canTakeBreak = manager.canBeginTimedBreak;
+    NSString *title = [NSString stringWithFormat:@"Take Break (%ld)",
+        (long)manager.breakCreditsRemainingToday];
+    NSMenuItem *takeBreakItem = [[NSMenuItem alloc] initWithTitle:title
+                                                           action:nil
+                                                    keyEquivalent:@""];
+    NSMenu *durationMenu = [[NSMenu alloc] initWithTitle:@"Take Break"];
+    for (NSNumber *minutes in @[@5, @15, @30]) {
+        NSMenuItem *durationItem = [[NSMenuItem alloc]
+            initWithTitle:[NSString stringWithFormat:@"%@ minutes", minutes]
+                   action:@selector(beginTimedBreakClicked:)
+            keyEquivalent:@""];
+        durationItem.target = self;
+        durationItem.representedObject = minutes;
+        durationItem.enabled = canTakeBreak;
+        [durationMenu addItem:durationItem];
+    }
+    takeBreakItem.submenu = durationMenu;
+    takeBreakItem.enabled = canTakeBreak;
+    return takeBreakItem;
 }
 
 - (NSString *)blocklistMenuTitle {
@@ -637,8 +689,8 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 
 - (void)menuWillOpen:(NSMenu *)menu {
     // Rebuild menu fresh when opened to ensure latest state
-    [self rebuildMenu];
-    self.statusItem.menu = self.statusMenu;
+    [self populateMenu:menu];
+    self.statusItem.menu = menu;
     [self refreshCountdownWarning];
 }
 
@@ -676,6 +728,50 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     if (self.onShowBlocklist) {
         self.onShowBlocklist();
     }
+}
+
+- (void)beginTimedBreakClicked:(NSMenuItem *)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (!manager.canBeginTimedBreak) return;
+    NSInteger minutes = [sender.representedObject integerValue];
+    if (!(minutes == 5 || minutes == 15 || minutes == 30)) return;
+
+    [manager beginTimedBreakForMinutes:minutes
+        completion:^(BOOL started, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateStatus];
+                if (started) return;
+                NSError *displayError = error ?: [NSError errorWithDomain:@"FenceBreakError"
+                    code:1
+                    userInfo:@{NSLocalizedDescriptionKey:
+                        @"Fence could not start the timed break."}];
+                if ([SCMiscUtilities errorIsAuthCanceled:displayError]) return;
+                [NSApp activateIgnoringOtherApps:YES];
+                [SCUIUtilities presentError:displayError];
+            });
+        }];
+    [self updateStatus];
+}
+
+- (void)endTimedBreakClicked:(id)sender {
+    #pragma unused(sender)
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.timedBreakMutationInFlight || !manager.hasActiveTimedBreak) return;
+
+    [manager endTimedBreakWithCompletion:^(BOOL ended, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updateStatus];
+            if (ended) return;
+            NSError *displayError = error ?: [NSError errorWithDomain:@"FenceBreakError"
+                code:2
+                userInfo:@{NSLocalizedDescriptionKey:
+                    @"Fence could not end the active break."}];
+            if ([SCMiscUtilities errorIsAuthCanceled:displayError]) return;
+            [NSApp activateIgnoringOtherApps:YES];
+            [SCUIUtilities presentError:displayError];
+        });
+    }];
+    [self updateStatus];
 }
 
 - (void)settingsClicked:(id)sender {

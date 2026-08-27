@@ -225,6 +225,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 @property (nonatomic, strong) NSMutableDictionary<NSString *, SCStrictifyRetryState *> *strictifyRetryStatesByToken;
 @property (nonatomic, strong) NSMutableArray<NSString *> *strictifyRetryTokenOrder;
 @property (nonatomic, copy, nullable) NSString *lastStrictifyOperationToken;
+@property (nonatomic, readwrite) BOOL timedBreakMutationInFlight;
 
 // Forward declaration for segment-based merging
 - (NSArray<SCBlockSegment *> *)calculateBlockSegmentsForBundles:(NSArray<SCBlockBundle *> *)bundles
@@ -3243,11 +3244,30 @@ static NSError *SCScheduleCommitError(NSInteger code,
     return endDate;
 }
 
+- (BOOL)canBeginTimedBreak {
+    if (self.timedBreakMutationInFlight || !self.hasRecurringCommitment || self.hasActiveTimedBreak ||
+        self.breakCreditsRemainingToday <= 0 || self.protectedHoursActiveNow) {
+        return NO;
+    }
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (bundle.enabled && bundle.entries.count > 0 &&
+            ![self wouldBundleBeAllowed:bundle.bundleID]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 - (void)beginTimedBreakForMinutes:(NSInteger)minutes
                        completion:(void (^)(BOOL, NSError *))completion {
     if (!(minutes == 5 || minutes == 15 || minutes == 30)) {
         if (completion != nil) completion(NO, SCScheduleCommitError(33, @"break",
             @"Choose a 5, 15, or 30 minute break.", YES));
+        return;
+    }
+    if (self.timedBreakMutationInFlight) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(44, @"break",
+            @"Another break change is already in progress.", NO));
         return;
     }
     NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
@@ -3288,6 +3308,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
     // Reserve before crossing the XPC boundary so a transport interruption can
     // never grant a verified break without spending its credit.
+    self.timedBreakMutationInFlight = YES;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setInteger:remaining - 1 forKey:kBreakCreditsRemainingKey];
     [defaults synchronize];
@@ -3319,6 +3340,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
                 [defaults setInteger:remaining forKey:kBreakCreditsRemainingKey];
                 [defaults synchronize];
             }
+            self.timedBreakMutationInFlight = NO;
             [self postChangeNotification];
             if (completion != nil) completion(started, error);
         });
@@ -3326,12 +3348,19 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)endTimedBreakWithCompletion:(void (^)(BOOL, NSError *))completion {
+    if (self.timedBreakMutationInFlight) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(44, @"break",
+            @"Another break change is already in progress.", NO));
+        return;
+    }
     NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
     if (commitment == nil) {
         if (completion != nil) completion(NO, SCScheduleCommitError(39, @"break",
             @"No recurring commitment is active.", NO));
         return;
     }
+    self.timedBreakMutationInFlight = YES;
+    [self postChangeNotification];
     SCXPCClient *xpc = [SCXPCClient new];
     [xpc endRecurringTimedBreakForCommitmentID:commitment[@"commitmentID"]
                                      generation:commitment[@"generation"]
@@ -3342,8 +3371,9 @@ static NSError *SCScheduleCommitError(NSInteger code,
                 NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
                 [defaults removeObjectForKey:kActiveTimedBreakKey];
                 [defaults synchronize];
-                [self postChangeNotification];
             }
+            self.timedBreakMutationInFlight = NO;
+            [self postChangeNotification];
             // Ending early never refunds the already-consumed daily credit.
             if (completion != nil) completion(ended, error);
         });

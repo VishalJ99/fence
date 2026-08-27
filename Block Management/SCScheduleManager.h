@@ -172,6 +172,8 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 @property (nonatomic, readonly) BOOL hasActiveTimedBreak;
 @property (nonatomic, readonly, nullable) NSDate *activeTimedBreakEndDate;
+@property (nonatomic, readonly) BOOL canBeginTimedBreak;
+@property (nonatomic, readonly) BOOL timedBreakMutationInFlight;
 - (void)beginTimedBreakForMinutes:(NSInteger)minutes
                        completion:(void(^)(BOOL started, NSError * _Nullable error))completion;
 - (void)endTimedBreakWithCompletion:(void(^)(BOOL ended, NSError * _Nullable error))completion;

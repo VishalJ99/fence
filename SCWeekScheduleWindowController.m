@@ -822,7 +822,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         hasRecurringCommitment || manager.hasUnexpiredLegacyCommitment;
 
     NSInteger breakCredits = manager.breakCreditsRemainingToday;
-    if (manager.hasActiveTimedBreak) {
+    if (manager.timedBreakMutationInFlight) {
+        self.breakButton.title = @"Updating Break…";
+        self.breakButton.enabled = NO;
+    } else if (manager.hasActiveTimedBreak) {
         NSTimeInterval remaining = MAX(0, [manager.activeTimedBreakEndDate timeIntervalSinceNow]);
         NSInteger remainingSeconds = (NSInteger)ceil(remaining);
         NSString *breakAction = manager.protectedHoursActiveNow ? @"End Paused Break" : @"End Break";
@@ -832,10 +835,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         self.breakButton.enabled = YES;
     } else {
         self.breakButton.title = [NSString stringWithFormat:@"Take Break (%ld)", (long)breakCredits];
-        self.breakButton.enabled = hasRecurringCommitment &&
-            breakCredits > 0 &&
-            !manager.protectedHoursActiveNow &&
-            [self hasCurrentlyBlockedRecurringBundle];
+        self.breakButton.enabled = manager.canBeginTimedBreak;
     }
 
     if (hasRecurringCommitment && manager.isRecurringCommitmentLockActive) {
@@ -871,15 +871,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
         self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
     }
-}
-
-- (BOOL)hasCurrentlyBlockedRecurringBundle {
-    SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    for (SCBlockBundle *bundle in manager.bundles) {
-        if (!bundle.enabled || bundle.entries.count == 0) continue;
-        if (![manager wouldBundleBeAllowed:bundle.bundleID]) return YES;
-    }
-    return NO;
 }
 
 #pragma mark - Actions
@@ -1216,6 +1207,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)breakButtonClicked:(id)sender {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.timedBreakMutationInFlight) return;
     if (manager.hasActiveTimedBreak) {
         self.breakButton.title = @"Ending Break…";
         self.breakButton.enabled = NO;
@@ -1234,10 +1226,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         return;
     }
 
-    if (!manager.hasRecurringCommitment ||
-        manager.breakCreditsRemainingToday <= 0 ||
-        manager.protectedHoursActiveNow ||
-        ![self hasCurrentlyBlockedRecurringBundle]) {
+    if (!manager.canBeginTimedBreak) {
         return;
     }
 
@@ -1254,7 +1243,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         if (response == NSAlertFirstButtonReturn) minutes = 5;
         else if (response == NSAlertSecondButtonReturn) minutes = 15;
         else if (response == NSAlertThirdButtonReturn) minutes = 30;
-        if (minutes == 0) return;
+        if (minutes == 0 || !manager.canBeginTimedBreak) {
+            [self reloadData];
+            return;
+        }
 
         self.breakButton.title = @"Starting Break…";
         self.breakButton.enabled = NO;
