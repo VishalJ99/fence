@@ -11,6 +11,7 @@
 #import "SCCalendarGridView.h"
 #import "SCDayScheduleEditorController.h"
 #import "SCBundleEditorController.h"
+#import "DomainListWindowController.h"
 #import "SCTimezoneInfoWindowController.h"
 #import "SCMenuBarController.h"
 #import "SCUIUtilities.h"
@@ -121,6 +122,8 @@ static BOOL const kUseCalendarUI = YES;
 // Prevent the migration choice sheet from being presented more than once at a time.
 @property (nonatomic, assign) BOOL migrationChoiceAlertPresented;
 @property (nonatomic, assign) BOOL migrationChoiceDeferred;
+
+- (void)prefetchSavedWebsiteIconsIfEditable;
 
 @end
 
@@ -454,6 +457,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
     [self.window makeKeyAndOrderFront:nil];
     [self reloadData];
+    [self prefetchSavedWebsiteIconsIfEditable];
     [self presentRecurringMigrationChoiceIfNeeded];
 }
 
@@ -462,7 +466,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [[SCTravelTimezoneManager sharedManager] requestTimeZoneRefreshIfNeeded];
     [super showWindow:sender];
     [self reloadData];
+    [self prefetchSavedWebsiteIconsIfEditable];
     [self presentRecurringMigrationChoiceIfNeeded];
+}
+
+- (void)prefetchSavedWebsiteIconsIfEditable {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice ||
+        [SCUIUtilities blockIsRunning]) return;
+    for (SCBlockBundle *bundle in manager.bundles) {
+        [DomainListWindowController prefetchWebsiteIconsForEntries:bundle.entries];
+    }
 }
 
 - (void)windowDidResize:(NSNotification *)note {
@@ -847,6 +861,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         self.commitButton.enabled = NO;
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.dateFormat = @"EEE, MMM d 'at' h:mm a";
+        formatter.timeZone = [NSTimeZone timeZoneWithName:manager.recurringTimeZoneIdentifier] ?:
+            NSTimeZone.localTimeZone;
         NSDate *endDate = manager.recurringCommitmentLockEndDate;
         self.commitmentLabel.stringValue = endDate
             ? [NSString stringWithFormat:@"End available %@; editing stays locked until you end it", [formatter stringFromDate:endDate]]
@@ -1803,6 +1819,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     } else {
         [manager updateBundle:bundle];
     }
+    [DomainListWindowController prefetchWebsiteIconsForEntries:bundle.entries];
 
     self.bundleEditorController = nil;
 }

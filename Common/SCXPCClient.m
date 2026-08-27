@@ -22,6 +22,37 @@ typedef NS_ENUM(NSInteger, SCXPCDaemonCompatibilityErrorCode) {
 
 static const NSTimeInterval SCXPCDaemonCompatibilityTimeout = 5.0;
 
+typedef void (^SCXPCDaemonUpgradeWaiter)(NSError * _Nullable error,
+                                         BOOL upgradeAttempted);
+static NSMutableArray<SCXPCDaemonUpgradeWaiter> *SCXPCDaemonUpgradeWaiters;
+static BOOL SCXPCDaemonUpgradeInFlight = NO;
+
+static void SCXPCFinishUserInitiatedDaemonUpgrade(NSError *error,
+                                                   BOOL upgradeAttempted) {
+    void (^finish)(void) = ^{
+        NSArray<SCXPCDaemonUpgradeWaiter> *waiters = nil;
+        @synchronized ([SCXPCClient class]) {
+            waiters = [SCXPCDaemonUpgradeWaiters copy];
+            [SCXPCDaemonUpgradeWaiters removeAllObjects];
+            SCXPCDaemonUpgradeInFlight = NO;
+        }
+        for (SCXPCDaemonUpgradeWaiter waiter in waiters) {
+            waiter(error, upgradeAttempted);
+        }
+    };
+    if (NSThread.isMainThread) finish();
+    else dispatch_async(dispatch_get_main_queue(), finish);
+}
+
+static NSError *SCXPCCurrentDaemonRequiredError(NSString *reason) {
+    return [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
+                               code:SCXPCDaemonCompatibilityErrorHandshake
+                           userInfo:@{
+        NSLocalizedDescriptionKey: @"Fence could not verify the updated helper.",
+        @"reason": reason ?: @"post-install-incompatible",
+    }];
+}
+
 static SEL SCXPCStartBlockAuthorizationCommand(void) {
     return @selector(startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:);
 }
@@ -50,6 +81,10 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
 + (BOOL)recordAuthorizationRejectionForCommand:(NSString*)command error:(NSError*)error;
 - (BOOL)repairManagedAuthorizationRightForCommand:(SEL)command error:(NSError **)error;
+- (nullable NSError *)prepareDaemonInstallationAuthorizationIncludingRemovalRight:(BOOL)includeRemovalRight;
+- (nullable NSError *)blessBundledDaemon;
+- (void)installDaemonPreservingExistingDaemon:(void(^)(NSError * _Nullable error))callback;
+- (void)withTrustedTravelTimeZoneDaemon:(void(^)(NSError * _Nullable error))completion;
 
 @end
 
@@ -321,17 +356,17 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     }
 }
 
-- (void)installDaemon:(void(^)(NSError*))callback {
+- (nullable NSError *)prepareDaemonInstallationAuthorizationIncludingRemovalRight:(BOOL)includeRemovalRight {
     NSError *authorizationRepairError = nil;
     if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
                                                     error:&authorizationRepairError]) {
-        callback([SCMiscUtilities errorIsAuthCanceled:authorizationRepairError]
-            ? [SCErr errorWithCode:1] : authorizationRepairError);
-        return;
+        return [SCMiscUtilities errorIsAuthCanceled:authorizationRepairError]
+            ? [SCErr errorWithCode:1] : authorizationRepairError;
     }
 
     // make sure authorization is set up (if we haven't connected yet)
     [self setupAuthorization];
+    if (self->_authRef == NULL) return [SCErr errorWithCode:501];
     
     AuthorizationItem blessRight = {
         kSMRightBlessPrivilegedHelper, 0, NULL, 0
@@ -339,81 +374,174 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     AuthorizationItem startBlockRight = {
         "org.eyebeam.SelfControl.startBlock", 0, NULL, 0
     };
-    AuthorizationItem rightsArr[] = { blessRight, startBlockRight };
+    AuthorizationItem modifyDaemonsRight = {
+        kSMRightModifySystemDaemons, 0, NULL, 0
+    };
+    AuthorizationItem rightsArr[] = {
+        blessRight,
+        startBlockRight,
+        modifyDaemonsRight,
+    };
 
     AuthorizationRights authRights;
-    authRights.count = 2;
+    authRights.count = includeRemovalRight ? 3 : 2;
     authRights.items = rightsArr;
 
     AuthorizationFlags myFlags = kAuthorizationFlagDefaults |
     kAuthorizationFlagExtendRights |
     kAuthorizationFlagInteractionAllowed;
-    OSStatus status;
-    
-    status = AuthorizationCopyRights(
-                                           self->_authRef,
-                                           &authRights,
-                                           kAuthorizationEmptyEnvironment,
-                                           myFlags,
-                                           NULL
-                                       );
+    OSStatus status = AuthorizationCopyRights(self->_authRef,
+                                              &authRights,
+                                              kAuthorizationEmptyEnvironment,
+                                              myFlags,
+                                              NULL);
 
     if(status) {
         NSError *authorizationError = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
         [SCXPCClient recordAuthorizationRejectionForCommand:@"install" error:authorizationError];
-        // if it's just the user cancelling, make that obvious
-        // to any listeners so they can ignore it appropriately
-        if (status == AUTH_CANCELLED_STATUS) {
-            callback([SCErr errorWithCode: 1]);
-        } else {
-            NSLog(@"ERROR: Failed to authorize installing selfcontrold with status %d.", status);
+        if (status == AUTH_CANCELLED_STATUS) return [SCErr errorWithCode:1];
+        NSLog(@"ERROR: Failed to authorize installing selfcontrold with status %d.", status);
+        return [SCErr errorWithCode:501];
+    }
 
-            NSError* err = [SCErr errorWithCode: 501];
-            callback(err);
-        }
+    return nil;
+}
 
+- (nullable NSError *)blessBundledDaemon {
+    CFErrorRef cfError = NULL;
+    BOOL result = (BOOL)SMJobBless(kSMDomainSystemLaunchd,
+                                   CFSTR("org.eyebeam.selfcontrold"),
+                                   self->_authRef,
+                                   &cfError);
+    if (result) return nil;
+
+    NSError *error = CFBridgingRelease(cfError);
+    NSLog(@"WARNING: Authorized installation of selfcontrold failed with error %@", error);
+    BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"install" error:error];
+    if ([SCMiscUtilities errorIsAuthCanceled:error]) return [SCErr errorWithCode:1];
+
+    NSInteger wrappedCode = authorizationFailure ? 501 : 500;
+    NSError *wrappedError = [SCErr errorWithCode:wrappedCode
+                                  subDescription:error.localizedDescription];
+    if (!authorizationFailure) [SCSentry captureError:wrappedError];
+    return wrappedError;
+}
+
+- (void)installDaemonPreservingExistingDaemon:(void(^)(NSError * _Nullable error))callback {
+    NSError *authorizationError =
+        [self prepareDaemonInstallationAuthorizationIncludingRemovalRight:NO];
+    if (authorizationError != nil) {
+        callback(authorizationError);
         return;
     }
-    
-    CFErrorRef cfError;
+
+    // SMJobBless is the supported update operation for a helper owned by this
+    // signed app. Do not remove a running legacy helper first: if blessing or
+    // the subsequent protocol check fails, its existing enforcement survives.
+    NSError *blessError = [self blessBundledDaemon];
+    if (blessError == nil) NSLog(@"Daemon installed successfully without pre-removal");
+    callback(blessError);
+}
+
+- (void)installDaemon:(void(^)(NSError*))callback {
+    NSError *authorizationError =
+        [self prepareDaemonInstallationAuthorizationIncludingRemovalRight:YES];
+    if (authorizationError != nil) {
+        callback(authorizationError);
+        return;
+    }
+
+    CFErrorRef cfError = NULL;
 
     // in some cases, SMJobBless will fail if we don't first remove the currently running daemon
     // it's not clear why exactly or what the exact cause is, but I can reproduce consistently
     // by running a 100-site whitelist block, then immediately trying to start another block
     // I consistently get the error (CFErrorDomainLaunchd error 2)
+    BOOL removed = NO;
     SILENCE_OSX10_10_DEPRECATION(
-    SMJobRemove(kSMDomainSystemLaunchd, CFSTR("org.eyebeam.selfcontrold"), self->_authRef, YES, &cfError);
+    removed = SMJobRemove(kSMDomainSystemLaunchd, CFSTR("org.eyebeam.selfcontrold"), self->_authRef, YES, &cfError);
                                  );
-    if (cfError) {
+    if (!removed && cfError != NULL) {
         NSLog(@"WARNING: Failed to remove existing selfcontrold daemon with error %@", cfError);
-        cfError = NULL;
+        CFRelease(cfError);
     }
 
-    BOOL result = (BOOL)SMJobBless(
-                                   kSMDomainSystemLaunchd,
-                                   CFSTR("org.eyebeam.selfcontrold"),
-                                   self->_authRef,
-                                   &cfError);
+    NSError *blessError = [self blessBundledDaemon];
+    if (blessError == nil) NSLog(@"Daemon installed successfully!");
+    callback(blessError);
+}
 
-    if(!result) {
-        NSError* error = CFBridgingRelease(cfError);
-        
-        NSLog(@"WARNING: Authorized installation of selfcontrold returned failure status code %d and error %@", (int)status, error);
-
-        BOOL authorizationFailure = [SCXPCClient recordAuthorizationRejectionForCommand:@"install" error:error];
-        if ([SCMiscUtilities errorIsAuthCanceled:error]) {
-            callback([SCErr errorWithCode:1]);
-        } else {
-            NSInteger wrappedCode = authorizationFailure ? 501 : 500;
-            NSError* err = [SCErr errorWithCode:wrappedCode subDescription:error.localizedDescription];
-            if (!authorizationFailure) [SCSentry captureError:err];
-            callback(err);
+- (void)ensureCurrentDaemonForUserInitiatedAction:
+    (void(^)(NSError * _Nullable error))completion {
+    SCXPCDaemonUpgradeWaiter waiter = ^(NSError *error, BOOL upgradeAttempted) {
+        if (upgradeAttempted) {
+            // Every caller may still hold its own connection to the legacy
+            // helper. Discard it before Commit, Extend, or Repair continues.
+            [self forceDisconnect];
         }
-        return;
-    } else {
-        NSLog(@"Daemon installed successfully!");
-        callback(nil);
+        completion(error);
+    };
+
+    BOOL shouldLeadUpgradeCheck = NO;
+    @synchronized ([SCXPCClient class]) {
+        if (SCXPCDaemonUpgradeWaiters == nil) {
+            SCXPCDaemonUpgradeWaiters = [NSMutableArray array];
+        }
+        [SCXPCDaemonUpgradeWaiters addObject:[waiter copy]];
+        if (!SCXPCDaemonUpgradeInFlight) {
+            SCXPCDaemonUpgradeInFlight = YES;
+            shouldLeadUpgradeCheck = YES;
+        }
     }
+    if (!shouldLeadUpgradeCheck) return;
+
+    [self getCompatibilityInfo:^(NSInteger protocolVersion,
+                                 NSString *buildVersion,
+                                 NSString *marketingVersion,
+                                 NSArray<NSString *> *capabilities,
+                                 NSError *handshakeError) {
+        #pragma unused(buildVersion)
+        #pragma unused(marketingVersion)
+        NSString *reason = nil;
+        BOOL alreadyCurrent = handshakeError == nil &&
+            [SCXPCClient isDaemonProtocolVersion:protocolVersion
+                                     capabilities:capabilities
+                    compatibleWithCurrentAppWithReason:&reason];
+        if (alreadyCurrent) {
+            SCXPCFinishUserInitiatedDaemonUpgrade(nil, NO);
+            return;
+        }
+
+        // Authorization UI must be initiated from the main thread. This path
+        // is called only after an explicit Commit, Extend, or Repair action.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self installDaemonPreservingExistingDaemon:^(NSError *installError) {
+                if (installError != nil) {
+                    SCXPCFinishUserInitiatedDaemonUpgrade(installError, YES);
+                    return;
+                }
+                [self refreshConnectionAndRun:^{
+                    [self getCompatibilityInfo:^(NSInteger repairedProtocolVersion,
+                                                 NSString *repairedBuildVersion,
+                                                 NSString *repairedMarketingVersion,
+                                                 NSArray<NSString *> *repairedCapabilities,
+                                                 NSError *repairedHandshakeError) {
+                        #pragma unused(repairedBuildVersion)
+                        #pragma unused(repairedMarketingVersion)
+                        NSString *postInstallReason = nil;
+                        BOOL current = repairedHandshakeError == nil &&
+                            [SCXPCClient isDaemonProtocolVersion:repairedProtocolVersion
+                                                     capabilities:repairedCapabilities
+                                    compatibleWithCurrentAppWithReason:&postInstallReason];
+                        NSError *resultError = current ? nil :
+                            (repairedHandshakeError ?:
+                                SCXPCCurrentDaemonRequiredError(postInstallReason));
+                        SCXPCFinishUserInitiatedDaemonUpgrade(resultError, YES);
+                    }];
+                }];
+            }];
+        });
+    }];
 }
 
 - (BOOL)authorizationRightsNeedRefresh {
@@ -677,7 +805,46 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
         if (reason != NULL) *reason = @"recurring-time-zone-missing";
         return NO;
     }
-    if (![capabilities containsObject:SCDaemonCapabilityTrustedTravelTimeZone]) {
+    if (![self isDaemonProtocolVersion:protocolVersion
+                           capabilities:capabilities
+          supportsTrustedTravelTimeZoneWithReason:reason]) return NO;
+    if (reason != NULL) *reason = @"compatible";
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>*)capabilities
+supportsLegacyRecurringRuntimeWithReason:(NSString**)reason {
+    if (protocolVersion < SCDaemonProtocolVersionRecurringScheduler) {
+        if (reason != NULL) *reason = @"recurring-scheduler-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityRecurringScheduleStore]) {
+        if (reason != NULL) *reason = @"recurring-schedule-store-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringScheduleTimer]) {
+        if (reason != NULL) *reason = @"recurring-schedule-timer-missing";
+        return NO;
+    }
+    if (![capabilities containsObject:SCDaemonCapabilityRecurringScheduleBreaks]) {
+        if (reason != NULL) *reason = @"recurring-schedule-breaks-missing";
+        return NO;
+    }
+    if (reason != NULL) *reason = @"compatible";
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>*)capabilities
+supportsTrustedTravelTimeZoneWithReason:(NSString**)reason {
+    if (protocolVersion < SCDaemonProtocolVersionTrustedTravelTimeZone) {
+        if (reason != NULL) *reason = @"trusted-travel-time-zone-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityTrustedTravelTimeZone]) {
         if (reason != NULL) *reason = @"trusted-travel-time-zone-missing";
         return NO;
     }
@@ -1003,27 +1170,12 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                              blockSettings:(NSDictionary<NSString *,id> *)blockSettings
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    NSError *authorizationRepairError = nil;
-    if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
-                                                    error:&authorizationRepairError]) {
-        reply(@{}, authorizationRepairError);
-        return;
-    }
-    [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
-                                 NSString *marketingVersion, NSArray<NSString *> *capabilities,
-                                 NSError *handshakeError) {
-        #pragma unused(buildVersion)
-        #pragma unused(marketingVersion)
-        if (handshakeError != nil) { reply(@{}, handshakeError); return; }
-        NSString *reason = nil;
-        if (![SCXPCClient isDaemonProtocolVersion:protocolVersion capabilities:capabilities
-             supportsRecurringSchedulesWithReason:&reason]) {
-            reply(@{}, [NSError errorWithDomain:SCXPCDaemonCompatibilityErrorDomain
-                                            code:SCXPCDaemonCompatibilityErrorHandshake
-                                        userInfo:@{
-                NSLocalizedDescriptionKey: @"The installed Fence helper does not support recurring schedules.",
-                @"reason": reason ?: @"recurring-scheduler-incompatible",
-            }]);
+    [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        if (daemonError != nil) { reply(@{}, daemonError); return; }
+        NSError *authorizationRepairError = nil;
+        if (![self repairManagedAuthorizationRightForCommand:SCXPCStartBlockAuthorizationCommand()
+                                                        error:&authorizationRepairError]) {
+            reply(@{}, authorizationRepairError);
             return;
         }
         [self connectAndExecuteCommandBlock:^(NSError *connectError) {
@@ -1048,38 +1200,67 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
     }];
 }
 
+- (void)withTrustedTravelTimeZoneDaemon:(void(^)(NSError * _Nullable error))completion {
+    [self getCompatibilityInfo:^(NSInteger protocolVersion,
+                                 NSString *buildVersion,
+                                 NSString *marketingVersion,
+                                 NSArray<NSString *> *capabilities,
+                                 NSError *handshakeError) {
+        #pragma unused(buildVersion)
+        #pragma unused(marketingVersion)
+        if (handshakeError != nil) {
+            completion(handshakeError);
+            return;
+        }
+        NSString *reason = nil;
+        BOOL supported = [SCXPCClient isDaemonProtocolVersion:protocolVersion
+                                                 capabilities:capabilities
+                                supportsTrustedTravelTimeZoneWithReason:&reason];
+        completion(supported ? nil : SCXPCCurrentDaemonRequiredError(reason));
+    }];
+}
+
 - (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
                                              generation:(NSString *)generation
                                      timeZoneIdentifier:(NSString *)timeZoneIdentifier
                                                   reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    [self connectAndExecuteCommandBlock:^(NSError *error) {
-        if (error != nil) { reply(@{}, error); return; }
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-            reply(@{}, proxyError);
-        }] updateLocationTimeZoneForRecurringCommitmentID:commitmentID
-                                                generation:generation
-                                        timeZoneIdentifier:timeZoneIdentifier
-                                                     reply:reply];
+    [self withTrustedTravelTimeZoneDaemon:^(NSError *capabilityError) {
+        if (capabilityError != nil) { reply(@{}, capabilityError); return; }
+        [self connectAndExecuteCommandBlock:^(NSError *error) {
+            if (error != nil) { reply(@{}, error); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] updateLocationTimeZoneForRecurringCommitmentID:commitmentID
+                                                    generation:generation
+                                            timeZoneIdentifier:timeZoneIdentifier
+                                                         reply:reply];
+        }];
     }];
 }
 
 - (void)storeTrustedTravelTimeZoneIdentifier:(NSString *)timeZoneIdentifier
                                        reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    [self connectAndExecuteCommandBlock:^(NSError *error) {
-        if (error != nil) { reply(@{}, error); return; }
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-            reply(@{}, proxyError);
-        }] storeTrustedTravelTimeZoneIdentifier:timeZoneIdentifier reply:reply];
+    [self withTrustedTravelTimeZoneDaemon:^(NSError *capabilityError) {
+        if (capabilityError != nil) { reply(@{}, capabilityError); return; }
+        [self connectAndExecuteCommandBlock:^(NSError *error) {
+            if (error != nil) { reply(@{}, error); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] storeTrustedTravelTimeZoneIdentifier:timeZoneIdentifier reply:reply];
+        }];
     }];
 }
 
 - (void)getTrustedTravelTimeZone:
     (void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    [self connectAndExecuteCommandBlock:^(NSError *error) {
-        if (error != nil) { reply(@{}, error); return; }
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-            reply(@{}, proxyError);
-        }] getTrustedTravelTimeZoneWithReply:reply];
+    [self withTrustedTravelTimeZoneDaemon:^(NSError *capabilityError) {
+        if (capabilityError != nil) { reply(@{}, capabilityError); return; }
+        [self connectAndExecuteCommandBlock:^(NSError *error) {
+            if (error != nil) { reply(@{}, error); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] getTrustedTravelTimeZoneWithReply:reply];
+        }];
     }];
 }
 
@@ -1098,14 +1279,17 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                               generation:(NSString *)generation
                                     days:(NSInteger)days
                                    reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    [self connectAndExecuteCommandBlock:^(NSError *error) {
-        if (error != nil) { reply(@{}, error); return; }
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-            reply(@{}, proxyError);
-        }] extendRecurringCommitmentWithID:commitmentID
-                                 generation:generation
-                                       days:days
-                                      reply:reply];
+    [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        if (daemonError != nil) { reply(@{}, daemonError); return; }
+        [self connectAndExecuteCommandBlock:^(NSError *error) {
+            if (error != nil) { reply(@{}, error); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] extendRecurringCommitmentWithID:commitmentID
+                                     generation:generation
+                                           days:days
+                                          reply:reply];
+        }];
     }];
 }
 

@@ -40,6 +40,13 @@
                                      recordedCommands:(NSMutableSet<NSString*>*)recordedCommands;
 @end
 
+@interface SCXPCClient (UserInitiatedDaemonUpgradeTests)
+- (void)installDaemonPreservingExistingDaemon:
+    (void(^)(NSError * _Nullable error))callback;
+- (void)withTrustedTravelTimeZoneDaemon:
+    (void(^)(NSError * _Nullable error))completion;
+@end
+
 @interface SCXPCAuthorization (RuleDefinitionTests)
 + (NSDictionary *)commandInfo;
 + (BOOL)authorizationRightDefinition:(NSDictionary *)current
@@ -171,6 +178,8 @@ static NSDictionary<NSString *, id> *SCSentryParsedEnvelopeFromRequest(NSURLRequ
                                   operationToken:(NSString *)operationToken;
 - (void)clearStrictifyRetryStateForOperationToken:(NSString *)operationToken;
 - (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state;
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state
+             daemonProtocolVersion:(NSInteger)protocolVersion;
 - (nullable NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date;
 @end
 
@@ -287,6 +296,76 @@ static SCScheduleManager *SCInstallRecurringTelemetryFixture(NSUserDefaults *def
     [defaults synchronize];
     return [[SCScheduleManager alloc] init];
 }
+
+static NSArray<NSString *> *SCLegacyRecurringDaemonCapabilities(void) {
+    return @[
+        SCDaemonCapabilityRecurringScheduleStore,
+        SCDaemonCapabilityRecurringScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleBreaks,
+    ];
+}
+
+static NSArray<NSString *> *SCCurrentDaemonCapabilities(void) {
+    return @[
+        SCDaemonCapabilityActiveBlocklistAppend,
+        SCDaemonCapabilityApprovedSchedulesAppend,
+        SCDaemonCapabilityTelemetrySpool,
+        SCDaemonCapabilityStrictApplyResults,
+        SCDaemonCapabilityScheduleOwnerBounds,
+        SCDaemonCapabilityConsistencyProjection,
+        SCDaemonCapabilityRootScheduleStore,
+        SCDaemonCapabilityRootScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleStore,
+        SCDaemonCapabilityRecurringScheduleTimer,
+        SCDaemonCapabilityRecurringScheduleBreaks,
+        SCDaemonCapabilityRecurringCommitmentExtend,
+        SCDaemonCapabilityRecurringTimeZone,
+        SCDaemonCapabilityTrustedTravelTimeZone,
+    ];
+}
+
+@interface SCUserInitiatedDaemonUpgradeTestClient : SCXPCClient
+@property (nonatomic, copy) NSArray<NSNumber *> *protocolResponses;
+@property (nonatomic, copy) NSArray<NSArray<NSString *> *> *capabilityResponses;
+@property (nonatomic, strong, nullable) NSError *installError;
+@property (nonatomic) NSInteger handshakeCount;
+@property (nonatomic) NSInteger installCount;
+@property (nonatomic) NSInteger refreshCount;
+@property (nonatomic) NSInteger forceDisconnectCount;
+@end
+
+@implementation SCUserInitiatedDaemonUpgradeTestClient
+
+- (void)getCompatibilityInfo:(void (^)(NSInteger,
+                                        NSString *,
+                                        NSString *,
+                                        NSArray<NSString *> *,
+                                        NSError *))reply {
+    NSUInteger index = MIN((NSUInteger)self.handshakeCount,
+                           self.protocolResponses.count - 1);
+    self.handshakeCount += 1;
+    reply(self.protocolResponses[index].integerValue,
+          @"test-build",
+          @"test-version",
+          self.capabilityResponses[index],
+          nil);
+}
+
+- (void)installDaemonPreservingExistingDaemon:(void (^)(NSError *))callback {
+    self.installCount += 1;
+    callback(self.installError);
+}
+
+- (void)refreshConnectionAndRun:(void (^)(void))callback {
+    self.refreshCount += 1;
+    callback();
+}
+
+- (void)forceDisconnect {
+    self.forceDisconnectCount += 1;
+}
+
+@end
 
 @interface SCUtilityTests : XCTestCase
 
@@ -678,6 +757,188 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                           compatibleWithCurrentAppWithReason:&reason]);
         XCTAssertEqualObjects(reason, expectedReasons[index]);
     }
+}
+
+- (void)testProtocolSixIsLegacyRecurringReadableButNotCurrent {
+    NSString *reason = nil;
+    NSArray<NSString *> *capabilities = SCLegacyRecurringDaemonCapabilities();
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringScheduler
+                   capabilities:capabilities
+        supportsLegacyRecurringRuntimeWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
+
+    reason = nil;
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringScheduler
+                   capabilities:capabilities
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"protocol-too-old");
+}
+
+- (void)testUserInitiatedDaemonUpgradeBlessesAndVerifiesExactlyOnce {
+    SCUserInitiatedDaemonUpgradeTestClient *client =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    client.protocolResponses = @[
+        @(SCDaemonProtocolVersionRecurringScheduler),
+        @(SCDaemonProtocolVersionCurrent),
+    ];
+    client.capabilityResponses = @[
+        SCLegacyRecurringDaemonCapabilities(),
+        SCCurrentDaemonCapabilities(),
+    ];
+    XCTestExpectation *finished = [self expectationWithDescription:@"upgrade verified"];
+
+    [client ensureCurrentDaemonForUserInitiatedAction:^(NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(client.handshakeCount, 2);
+        XCTAssertEqual(client.installCount, 1);
+        XCTAssertEqual(client.refreshCount, 1);
+        XCTAssertEqual(client.forceDisconnectCount, 1);
+        [finished fulfill];
+    }];
+
+    [self waitForExpectations:@[finished] timeout:2.0];
+}
+
+- (void)testUserInitiatedDaemonUpgradeDoesNotInstallWhenAlreadyCurrent {
+    SCUserInitiatedDaemonUpgradeTestClient *client =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    client.protocolResponses = @[@(SCDaemonProtocolVersionCurrent)];
+    client.capabilityResponses = @[SCCurrentDaemonCapabilities()];
+    XCTestExpectation *finished = [self expectationWithDescription:@"already current"];
+
+    [client ensureCurrentDaemonForUserInitiatedAction:^(NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(client.handshakeCount, 1);
+        XCTAssertEqual(client.installCount, 0);
+        XCTAssertEqual(client.refreshCount, 0);
+        XCTAssertEqual(client.forceDisconnectCount, 0);
+        [finished fulfill];
+    }];
+
+    [self waitForExpectations:@[finished] timeout:2.0];
+}
+
+- (void)testUserInitiatedDaemonUpgradeDoesNotLoopWhenVerificationStaysLegacy {
+    SCUserInitiatedDaemonUpgradeTestClient *client =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    client.protocolResponses = @[
+        @(SCDaemonProtocolVersionRecurringScheduler),
+        @(SCDaemonProtocolVersionRecurringScheduler),
+    ];
+    client.capabilityResponses = @[
+        SCLegacyRecurringDaemonCapabilities(),
+        SCLegacyRecurringDaemonCapabilities(),
+    ];
+    XCTestExpectation *finished = [self expectationWithDescription:@"upgrade not verified"];
+
+    [client ensureCurrentDaemonForUserInitiatedAction:^(NSError *error) {
+        XCTAssertNotNil(error);
+        XCTAssertEqual(client.handshakeCount, 2);
+        XCTAssertEqual(client.installCount, 1);
+        XCTAssertEqual(client.refreshCount, 1);
+        XCTAssertEqual(client.forceDisconnectCount, 1);
+        [finished fulfill];
+    }];
+
+    [self waitForExpectations:@[finished] timeout:2.0];
+}
+
+- (void)testUserInitiatedDaemonUpgradeCancellationStopsBeforeReconnectAndCompletesOnce {
+    SCUserInitiatedDaemonUpgradeTestClient *client =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    client.protocolResponses = @[@(SCDaemonProtocolVersionRecurringScheduler)];
+    client.capabilityResponses = @[SCLegacyRecurringDaemonCapabilities()];
+    client.installError = [SCErr errorWithCode:1];
+    __block NSInteger completionCount = 0;
+    XCTestExpectation *finished = [self expectationWithDescription:@"upgrade canceled"];
+
+    [client ensureCurrentDaemonForUserInitiatedAction:^(NSError *error) {
+        completionCount += 1;
+        XCTAssertEqual(completionCount, 1);
+        XCTAssertEqualObjects(error, client.installError);
+        XCTAssertEqual(client.handshakeCount, 1);
+        XCTAssertEqual(client.installCount, 1);
+        XCTAssertEqual(client.refreshCount, 0);
+        XCTAssertEqual(client.forceDisconnectCount, 1);
+        [finished fulfill];
+    }];
+
+    [self waitForExpectations:@[finished] timeout:2.0];
+    XCTAssertEqual(completionCount, 1);
+
+    SCUserInitiatedDaemonUpgradeTestClient *retryClient =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    retryClient.protocolResponses = @[
+        @(SCDaemonProtocolVersionRecurringScheduler),
+        @(SCDaemonProtocolVersionCurrent),
+    ];
+    retryClient.capabilityResponses = @[
+        SCLegacyRecurringDaemonCapabilities(),
+        SCCurrentDaemonCapabilities(),
+    ];
+    XCTestExpectation *retryFinished =
+        [self expectationWithDescription:@"later explicit retry"];
+    [retryClient ensureCurrentDaemonForUserInitiatedAction:^(NSError *error) {
+        XCTAssertNil(error);
+        [retryFinished fulfill];
+    }];
+    [self waitForExpectations:@[retryFinished] timeout:2.0];
+    XCTAssertEqual(retryClient.installCount, 1);
+}
+
+- (void)testConcurrentUserInitiatedDaemonUpgradeCoalescesAcrossClients {
+    SCUserInitiatedDaemonUpgradeTestClient *leader =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    leader.protocolResponses = @[
+        @(SCDaemonProtocolVersionRecurringScheduler),
+        @(SCDaemonProtocolVersionCurrent),
+    ];
+    leader.capabilityResponses = @[
+        SCLegacyRecurringDaemonCapabilities(),
+        SCCurrentDaemonCapabilities(),
+    ];
+    SCUserInitiatedDaemonUpgradeTestClient *waiter =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    XCTestExpectation *bothFinished =
+        [self expectationWithDescription:@"both callers resumed"];
+    bothFinished.expectedFulfillmentCount = 2;
+    __block NSInteger completionCount = 0;
+    void (^completion)(NSError *) = ^(NSError *error) {
+        XCTAssertNil(error);
+        completionCount += 1;
+        [bothFinished fulfill];
+    };
+
+    [leader ensureCurrentDaemonForUserInitiatedAction:completion];
+    [waiter ensureCurrentDaemonForUserInitiatedAction:completion];
+
+    [self waitForExpectations:@[bothFinished] timeout:2.0];
+    XCTAssertEqual(completionCount, 2);
+    XCTAssertEqual(leader.installCount + waiter.installCount, 1);
+    XCTAssertEqual(leader.handshakeCount, 2);
+    XCTAssertEqual(waiter.handshakeCount, 0);
+    XCTAssertEqual(leader.forceDisconnectCount, 1);
+    XCTAssertEqual(waiter.forceDisconnectCount, 1);
+}
+
+- (void)testTrustedTimezoneGateDoesNotUpgradeProtocolSixInBackground {
+    SCUserInitiatedDaemonUpgradeTestClient *client =
+        [SCUserInitiatedDaemonUpgradeTestClient new];
+    client.protocolResponses = @[@(SCDaemonProtocolVersionRecurringScheduler)];
+    client.capabilityResponses = @[SCLegacyRecurringDaemonCapabilities()];
+    XCTestExpectation *finished = [self expectationWithDescription:@"timezone gate"];
+
+    [client withTrustedTravelTimeZoneDaemon:^(NSError *error) {
+        XCTAssertNotNil(error);
+        XCTAssertEqual(client.handshakeCount, 1);
+        XCTAssertEqual(client.installCount, 0);
+        XCTAssertEqual(client.refreshCount, 0);
+        [finished fulfill];
+    }];
+
+    [self waitForExpectations:@[finished] timeout:2.0];
 }
 
 - (void)testSettingsSchemaValidatesTrustedTravelTimeZones {
@@ -1073,6 +1334,43 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         XCTAssertEqual([defaults integerForKey:@"SCProtectedHoursEndMinute"], 5 * 60);
         XCTAssertEqualObjects(manager.activeTimedBreakEndDate, breakEndsAt);
         XCTAssertEqual([defaults integerForKey:@"SCBreakCreditsRemainingToday"], 4);
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testProtocolSixRuntimeHydratesWithoutTimezonePairOnlyForLegacyProtocol {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys());
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    NSString *commitmentID = NSUUID.UUID.UUIDString;
+    NSString *generation = NSUUID.UUID.UUIDString;
+    NSDate *startedAt = [NSDate dateWithTimeIntervalSinceNow:-60];
+    NSDate *lockEndsAt = [NSDate dateWithTimeIntervalSinceNow:2 * 24 * 60 * 60];
+
+    @try {
+        [defaults removeObjectForKey:@"SCRecurringCommitment"];
+        NSMutableDictionary *legacyState = [SCRecurringRuntimeState(
+            commitmentID, generation, startedAt, lockEndsAt, NO, 23 * 60, 5 * 60, nil)
+            mutableCopy];
+        [legacyState removeObjectForKey:@"time_zone_identifier"];
+        [legacyState removeObjectForKey:@"follows_location_time_zone"];
+
+        XCTAssertTrue([manager applyRecurringRuntimeState:legacyState
+                                     daemonProtocolVersion:
+                                         SCDaemonProtocolVersionRecurringScheduler]);
+        NSDictionary *local = [defaults objectForKey:@"SCRecurringCommitment"];
+        XCTAssertEqualObjects(local[@"commitmentID"], commitmentID);
+        XCTAssertNil(local[@"timeZoneIdentifier"]);
+        XCTAssertNil(local[@"followsLocationTimeZone"]);
+
+        XCTAssertFalse([manager applyRecurringRuntimeState:legacyState
+                                      daemonProtocolVersion:SCDaemonProtocolVersionCurrent]);
+
+        legacyState[@"time_zone_identifier"] = @"Europe/London";
+        XCTAssertFalse([manager applyRecurringRuntimeState:legacyState
+                                      daemonProtocolVersion:
+                                          SCDaemonProtocolVersionRecurringScheduler]);
     } @finally {
         SCRestoreDefaultsSnapshot(defaults, snapshot);
     }

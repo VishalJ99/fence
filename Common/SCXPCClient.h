@@ -17,6 +17,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)connectToHelperTool;
 - (void)forceDisconnect;
 - (void)installDaemon:(void(^)(NSError*))callback;
+/// For an explicit user action that needs the current helper contract, retain
+/// an already-running legacy helper until the user authorizes an in-place
+/// SMJobBless update, then verify the replacement before returning success.
+- (void)ensureCurrentDaemonForUserInitiatedAction:
+    (void(^)(NSError * _Nullable error))completion;
 - (BOOL)authorizationRightsNeedRefresh;
 - (BOOL)refreshAuthorizationRights:(NSError **)error;
 - (BOOL)refreshAuthorizationRightsAllowingInteraction:(BOOL)allowInteraction error:(NSError **)error;
@@ -46,6 +51,16 @@ supportsRootScheduleCommitWithReason:(NSString* _Nullable * _Nullable)reason;
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
                    capabilities:(NSArray<NSString*>* _Nullable)capabilities
 supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
+
+/// Protocol 6 and later can hydrate and operate the recurring runtime that
+/// shipped in 3.4.12 even when newer timezone selectors are unavailable.
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>* _Nullable)capabilities
+supportsLegacyRecurringRuntimeWithReason:(NSString* _Nullable * _Nullable)reason;
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString*>* _Nullable)capabilities
+supportsTrustedTravelTimeZoneWithReason:(NSString* _Nullable * _Nullable)reason;
 
 // Builds the complete privacy-safe E7 payload used by AppController after an
 // initially unreachable daemon goes through its one allowed repair attempt.

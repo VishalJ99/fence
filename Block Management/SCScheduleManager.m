@@ -280,6 +280,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (nullable NSDictionary<NSString *, id> *)recurringCommitmentDictionary;
 - (NSCalendar *)recurringCalendar;
 - (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state;
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state
+             daemonProtocolVersion:(NSInteger)protocolVersion;
 - (void)saveProtectedHoursEnabled:(BOOL)enabled
                        startMinute:(NSInteger)startMinute
                          endMinute:(NSInteger)endMinute;
@@ -1809,6 +1811,19 @@ static NSError *SCScheduleCommitError(NSInteger code,
                 [defaults removeObjectForKey:kActiveTimedBreakKey];
                 [defaults synchronize];
                 [self postChangeNotification];
+
+                // Extend is one of the explicit actions that may upgrade a
+                // protocol-6 helper. Rehydrate once so the current helper's
+                // root-owned timezone fields enter the local read model.
+                [self refreshRecurringRuntimeStateWithCompletion:
+                    ^(BOOL refreshed, NSError *refreshError) {
+                    if (!refreshed) {
+                        NSLog(@"SCScheduleManager: Commitment extended but runtime refresh failed (domain=%@ code=%ld)",
+                              refreshError.domain, (long)refreshError.code);
+                    }
+                    if (completion != nil) completion(YES, error);
+                }];
+                return;
             }
             if (completion != nil) completion(persisted, error);
         });
@@ -1816,6 +1831,13 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)refreshRecurringRuntimeStateWithCompletion:
+    (void (^)(BOOL, NSError *))completion {
+    [self refreshRecurringRuntimeStateForDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                                    completion:completion];
+}
+
+- (void)refreshRecurringRuntimeStateForDaemonProtocolVersion:(NSInteger)protocolVersion
+                                                  completion:
     (void (^)(BOOL, NSError *))completion {
     SCXPCClient *xpc = [SCXPCClient new];
     [xpc getRecurringScheduleRuntimeState:^(NSDictionary<NSString *,id> *state, NSError *error) {
@@ -1825,7 +1847,8 @@ static NSError *SCScheduleCommitError(NSInteger code,
                 return;
             }
 
-            BOOL refreshed = [self applyRecurringRuntimeState:state];
+            BOOL refreshed = [self applyRecurringRuntimeState:state
+                                        daemonProtocolVersion:protocolVersion];
             NSError *stateError = refreshed ? nil : SCScheduleCommitError(
                 40, @"runtime_state", @"Fence received an invalid recurring runtime state.", NO);
             if (completion != nil) completion(refreshed, stateError);
@@ -1834,6 +1857,12 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state {
+    return [self applyRecurringRuntimeState:state
+                      daemonProtocolVersion:SCDaemonProtocolVersionCurrent];
+}
+
+- (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state
+             daemonProtocolVersion:(NSInteger)protocolVersion {
     if (![state isKindOfClass:[NSDictionary class]] ||
         ![state[@"has_commitment"] isKindOfClass:[NSNumber class]]) {
         return NO;
@@ -1881,8 +1910,17 @@ static NSError *SCScheduleCommitError(NSInteger code,
         [[NSUUID alloc] initWithUUIDString:generation] != nil;
     BOOL datesValid = startedAt != nil && lockEndsAt != nil &&
         [lockEndsAt compare:startedAt] == NSOrderedDescending;
-    BOOL timeZoneValid = [NSTimeZone timeZoneWithName:timeZoneIdentifier] != nil;
-    if (!identifiersValid || !datesValid || !timeZoneValid || followsLocationTimeZone == nil ||
+    BOOL hasTimeZoneIdentifier = timeZoneIdentifier != nil;
+    BOOL hasLocationMode = followsLocationTimeZone != nil;
+    BOOL legacyTimeZonePairMayBeAbsent =
+        protocolVersion >= SCDaemonProtocolVersionRecurringScheduler &&
+        protocolVersion < SCDaemonProtocolVersionRecurringTimeZone;
+    BOOL completeTimeZonePair = hasTimeZoneIdentifier && hasLocationMode &&
+        [NSTimeZone timeZoneWithName:timeZoneIdentifier] != nil;
+    BOOL legacyTimeZonePairAbsent = legacyTimeZonePairMayBeAbsent &&
+        !hasTimeZoneIdentifier && !hasLocationMode;
+    if (!identifiersValid || !datesValid ||
+        (!completeTimeZonePair && !legacyTimeZonePairAbsent) ||
         protectedEnabled == nil ||
         protectedStart == nil || protectedEnd == nil || breakActiveValue == nil) {
         return NO;
@@ -1894,18 +1932,20 @@ static NSError *SCScheduleCommitError(NSInteger code,
     if (rootBreakActive && breakEndsAt == nil) return NO;
 
     BOOL adoptingMissingCommitment = self.recurringCommitmentDictionary == nil;
-    NSDictionary<NSString *, id> *localCommitment = @{
+    NSMutableDictionary<NSString *, id> *localCommitment = [@{
         @"schemaVersion": @1,
         @"commitmentID": commitmentID,
         @"generation": generation,
         @"startedAt": startedAt,
         @"lockEndsAt": lockEndsAt,
-        @"timeZoneIdentifier": timeZoneIdentifier,
-        @"followsLocationTimeZone": @(followsLocationTimeZone.boolValue),
-    };
+    } mutableCopy];
+    if (completeTimeZonePair) {
+        localCommitment[@"timeZoneIdentifier"] = timeZoneIdentifier;
+        localCommitment[@"followsLocationTimeZone"] = @(followsLocationTimeZone.boolValue);
+    }
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
         protectedStart.integerValue, protectedEnd.integerValue);
-    [defaults setObject:localCommitment forKey:kRecurringCommitmentKey];
+    [defaults setObject:[localCommitment copy] forKey:kRecurringCommitmentKey];
     [defaults setBool:protectedEnabled.boolValue forKey:kProtectedHoursEnabledKey];
     [defaults setInteger:range.startMinute forKey:kProtectedHoursStartMinuteKey];
     [defaults setInteger:range.endMinute forKey:kProtectedHoursEndMinuteKey];

@@ -48,6 +48,9 @@
 @property (nonatomic, copy, nullable) NSString *readOnlyNoticeText;
 @property (nonatomic, strong, nullable) NSColor *readOnlyNoticeColor;
 
+/// Fetch and cache website icons after an editable blocklist or bundle is saved.
++ (void)prefetchWebsiteIconsForEntries:(NSArray<NSString *> * _Nonnull)entries;
+
 - (void)refreshDomainList;
 
 // Called when the add button is clicked.  Adds a new empty string to the domain

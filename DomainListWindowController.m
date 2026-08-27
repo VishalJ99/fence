@@ -26,6 +26,7 @@
 #import "SCBlockEntry.h"
 #import "SCUIUtilities.h"
 #import "NSString+IPAddress.h"
+#import <CommonCrypto/CommonDigest.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat SCReadOnlyBlocklistMinimumWidth = 620.0;
@@ -49,17 +50,72 @@ static NSString *SCFaviconDomainForBlocklistEntry(NSString *entry) {
         blockEntry.maskLen > 0 || [hostname isEqualToString:@"*"] || hostname.isValidIPAddress) {
         return nil;
     }
-    return hostname;
+    return hostname.lowercaseString;
 }
 
-static NSURL *SCFaviconURLForDomain(NSString *domain) {
+static NSURL *SCDirectFaviconURLForDomain(NSString *domain) {
     if (domain.length == 0) return nil;
-    NSURLComponents *components = [NSURLComponents componentsWithString:@"https://www.google.com/s2/favicons"];
-    components.queryItems = @[
-        [NSURLQueryItem queryItemWithName:@"domain" value:domain],
-        [NSURLQueryItem queryItemWithName:@"sz" value:@"64"],
-    ];
+    NSURLComponents *components = [[NSURLComponents alloc] init];
+    components.scheme = @"https";
+    components.host = domain;
+    components.path = @"/favicon.ico";
     return components.URL;
+}
+
+static NSURL *SCWebsiteIconCacheDirectoryURL(void) {
+    NSString *cachesDirectory = NSSearchPathForDirectoriesInDomains(NSCachesDirectory,
+                                                                     NSUserDomainMask,
+                                                                     YES).firstObject;
+    if (cachesDirectory.length == 0) return nil;
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier ?: @"org.eyebeam.Fence";
+    return [[[NSURL fileURLWithPath:cachesDirectory isDirectory:YES]
+        URLByAppendingPathComponent:bundleID isDirectory:YES]
+        URLByAppendingPathComponent:@"WebsiteIcons" isDirectory:YES];
+}
+
+static NSString *SCWebsiteIconCacheKey(NSString *domain) {
+    NSData *domainData = [domain.lowercaseString dataUsingEncoding:NSUTF8StringEncoding];
+    if (domainData.length == 0) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(domainData.bytes, (CC_LONG)domainData.length, digest);
+    NSMutableString *key = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [key appendFormat:@"%02x", digest[index]];
+    }
+    return key;
+}
+
+static NSURL *SCWebsiteIconCacheFileURL(NSString *domain) {
+    NSString *key = SCWebsiteIconCacheKey(domain);
+    NSURL *directoryURL = SCWebsiteIconCacheDirectoryURL();
+    if (key.length == 0 || directoryURL == nil) return nil;
+    return [directoryURL URLByAppendingPathComponent:[key stringByAppendingPathExtension:@"image"]];
+}
+
+static NSImage *SCCachedWebsiteIconForDomain(NSString *domain) {
+    if (domain.length == 0) return nil;
+    NSString *cacheKey = domain.lowercaseString;
+    NSImage *cachedIcon = [SCBlocklistWebsiteIconCache() objectForKey:cacheKey];
+    if (cachedIcon != nil) return cachedIcon;
+
+    NSURL *fileURL = SCWebsiteIconCacheFileURL(cacheKey);
+    NSData *data = fileURL == nil ? nil : [NSData dataWithContentsOfURL:fileURL];
+    NSImage *diskIcon = data.length > 0 ? [[NSImage alloc] initWithData:data] : nil;
+    if (diskIcon != nil) [SCBlocklistWebsiteIconCache() setObject:diskIcon forKey:cacheKey];
+    return diskIcon;
+}
+
+static NSURLSession *SCWebsiteIconSession(void) {
+    static NSURLSession *session;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        configuration.HTTPShouldSetCookies = NO;
+        configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
+        configuration.HTTPCookieStorage = nil;
+        session = [NSURLSession sessionWithConfiguration:configuration];
+    });
+    return session;
 }
 
 static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
@@ -94,9 +150,9 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
 
 - (void)layout {
     [super layout];
-    self.layer.shadowPath = [NSBezierPath bezierPathWithRoundedRect:self.bounds
-                                                            xRadius:12.0
-                                                            yRadius:12.0].CGPath;
+    CGPathRef shadowPath = CGPathCreateWithRoundedRect(self.bounds, 12.0, 12.0, NULL);
+    self.layer.shadowPath = shadowPath;
+    CGPathRelease(shadowPath);
 }
 
 @end
@@ -151,6 +207,44 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
 @end
 
 @implementation DomainListWindowController
+
++ (void)prefetchWebsiteIconsForEntries:(NSArray<NSString *> *)entries {
+    for (id value in entries) {
+        if (![value isKindOfClass:NSString.class]) continue;
+        NSString *domain = SCFaviconDomainForBlocklistEntry(value);
+        if (domain.length == 0 || SCCachedWebsiteIconForDomain(domain) != nil) continue;
+
+        NSURL *faviconURL = SCDirectFaviconURLForDomain(domain);
+        if (faviconURL == nil) continue;
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:faviconURL
+                                                               cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                           timeoutInterval:8.0];
+
+        NSURLSessionDataTask *task = [SCWebsiteIconSession()
+            dataTaskWithRequest:request
+              completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *HTTPResponse = [response isKindOfClass:NSHTTPURLResponse.class]
+                ? (NSHTTPURLResponse *)response
+                : nil;
+            if (error != nil || HTTPResponse.statusCode != 200 || data.length == 0) return;
+
+            NSImage *favicon = [[NSImage alloc] initWithData:data];
+            if (favicon == nil) return;
+            favicon.template = NO;
+            [SCBlocklistWebsiteIconCache() setObject:favicon forKey:domain];
+
+            NSURL *directoryURL = SCWebsiteIconCacheDirectoryURL();
+            NSURL *fileURL = SCWebsiteIconCacheFileURL(domain);
+            if (directoryURL == nil || fileURL == nil) return;
+            if (![[NSFileManager defaultManager] createDirectoryAtURL:directoryURL
+                                          withIntermediateDirectories:YES
+                                                           attributes:nil
+                                                                error:nil]) return;
+            [data writeToURL:fileURL options:NSDataWritingAtomic error:nil];
+        }];
+        [task resume];
+    }
+}
 
 - (DomainListWindowController*)init {
 	if(self = [super initWithWindowNibName:@"DomainList"]) {
@@ -315,10 +409,11 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
         }
     }
     
-    [defaults_ setValue: domainList_ forKey: @"Blocklist"];
-    [domainListTableView_ reloadData];
-    [[NSNotificationCenter defaultCenter] postNotificationName: @"SCConfigurationChangedNotification"
-    object: self];
+	[defaults_ setValue: domainList_ forKey: @"Blocklist"];
+	[domainListTableView_ reloadData];
+	[DomainListWindowController prefetchWebsiteIconsForEntries:cleanedEntries];
+	[[NSNotificationCenter defaultCenter] postNotificationName: @"SCConfigurationChangedNotification"
+	object: self];
 }
 
 - (void)tableView:(NSTableView *)tableView
@@ -467,6 +562,7 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
 	}
 	[defaults_ setValue: domainList_ forKey: @"Blocklist"];
 	[domainListTableView_ reloadData];
+	[DomainListWindowController prefetchWebsiteIconsForEntries:arr];
 	[[NSNotificationCenter defaultCenter] postNotificationName: @"SCConfigurationChangedNotification"
 														object: self];
 }
@@ -858,43 +954,11 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
 }
 
 - (void)loadWebsiteIconForDomain:(NSString *)domain intoImageView:(SCBlocklistIconView *)iconView {
-    NSURL *faviconURL = SCFaviconURLForDomain(domain);
-    if (faviconURL == nil) return;
-
-    NSImage *cachedIcon = [SCBlocklistWebsiteIconCache() objectForKey:domain];
-    if (cachedIcon != nil) {
-        iconView.contentTintColor = nil;
-        iconView.symbolConfiguration = nil;
-        iconView.image = cachedIcon;
-        return;
-    }
-
-    __weak SCBlocklistIconView *weakIconView = iconView;
-    NSURLRequest *request = [NSURLRequest requestWithURL:faviconURL
-                                             cachePolicy:NSURLRequestReturnCacheDataElseLoad
-                                         timeoutInterval:8.0];
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSHTTPURLResponse *HTTPResponse = [response isKindOfClass:NSHTTPURLResponse.class]
-            ? (NSHTTPURLResponse *)response
-            : nil;
-        if (error != nil || data.length == 0 || HTTPResponse.statusCode != 200) return;
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSImage *favicon = [[NSImage alloc] initWithData:data];
-            if (favicon == nil) return;
-            favicon.template = NO;
-            [SCBlocklistWebsiteIconCache() setObject:favicon forKey:domain];
-
-            SCBlocklistIconView *strongIconView = weakIconView;
-            if (strongIconView == nil) return;
-            strongIconView.contentTintColor = nil;
-            strongIconView.symbolConfiguration = nil;
-            strongIconView.image = favicon;
-        });
-    }];
-    [task resume];
+    NSImage *cachedIcon = SCCachedWebsiteIconForDomain(domain);
+    if (cachedIcon == nil) return;
+    iconView.contentTintColor = nil;
+    iconView.symbolConfiguration = nil;
+    iconView.image = cachedIcon;
 }
 
 - (SCBlocklistCardView *)emptyStateCardWithText:(NSString *)text {

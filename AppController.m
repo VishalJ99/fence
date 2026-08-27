@@ -136,6 +136,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 - (void)synchronizeTelemetryConsentAndDrain;
 - (void)drainTelemetrySpoolWithRemainingBatches:(NSUInteger)remainingBatches;
 - (void)sendDiagnosticReportFromUserAction;
+- (void)presentPermissionsRepairResult:(BOOL)repaired error:(nullable NSError *)error;
 
 @end
 
@@ -869,6 +870,30 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                 return;
             }
 
+            NSString *legacyReason = nil;
+            BOOL legacyRecurringRuntime = error == nil &&
+                protocolVersion < SCDaemonProtocolVersionCurrent &&
+                [SCXPCClient isDaemonProtocolVersion:protocolVersion
+                                         capabilities:capabilities
+                        supportsLegacyRecurringRuntimeWithReason:&legacyReason];
+            if (legacyRecurringRuntime) {
+                // Protocol 6 already owns and enforces the 3.4.12 recurring
+                // state. Keep it running until Commit, Extend, or explicit
+                // Repair gives us a user-initiated authorization context.
+                NSLog(@"AppController: Retaining legacy recurring daemon until a protected user action (protocol=%ld)",
+                      (long)protocolVersion);
+                [self synchronizeTelemetryConsentAndDrain];
+                [[SCScheduleManager sharedManager]
+                    refreshRecurringRuntimeStateForDaemonProtocolVersion:protocolVersion
+                    completion:^(BOOL refreshed, NSError *refreshError) {
+                    if (!refreshed) {
+                        NSLog(@"AppController: Legacy recurring runtime refresh unavailable (domain=%@ code=%ld)",
+                              refreshError.domain, (long)refreshError.code);
+                    }
+                }];
+                return;
+            }
+
             NSLog(@"AppController: Daemon incompatible (reason=%@, protocol=%ld, build=%@, marketing=%@)",
                   reason, (long)protocolVersion, safeBuildVersion, safeMarketingVersion);
 
@@ -1385,10 +1410,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
-- (void)repairFencePermissionsFromUserAction {
-    NSError *error = nil;
-    BOOL repaired = [self.xpc refreshAuthorizationRightsAllowingInteraction:YES error:&error];
-
+- (void)presentPermissionsRepairResult:(BOOL)repaired error:(NSError *)error {
     NSAlert *alert = [[NSAlert alloc] init];
     if (repaired) {
         alert.messageText = NSLocalizedString(@"Fence permissions repaired", @"Permissions repair success title");
@@ -1401,6 +1423,38 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
     [NSApp activateIgnoringOtherApps:YES];
     [alert runModal];
+}
+
+- (void)repairFencePermissionsFromUserAction {
+    [self.xpc ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (daemonError != nil) {
+                [self presentPermissionsRepairResult:NO error:daemonError];
+                return;
+            }
+
+            NSError *authorizationError = nil;
+            BOOL repaired = [self.xpc
+                refreshAuthorizationRightsAllowingInteraction:YES
+                                                         error:&authorizationError];
+            if (!repaired) {
+                [self presentPermissionsRepairResult:NO error:authorizationError];
+                return;
+            }
+
+            // A legacy helper's protocol-6 runtime omits timezone fields. Once
+            // an explicit Repair has installed and verified the current helper,
+            // refresh the local read model from the upgraded root authority.
+            [[SCScheduleManager sharedManager]
+                refreshRecurringRuntimeStateWithCompletion:^(BOOL refreshed, NSError *refreshError) {
+                if (!refreshed) {
+                    NSLog(@"AppController: Permissions repaired but recurring runtime refresh failed (domain=%@ code=%ld)",
+                          refreshError.domain, (long)refreshError.code);
+                }
+                [self presentPermissionsRepairResult:YES error:nil];
+            }];
+        });
+    }];
 }
 
 - (void)closeDomainList {

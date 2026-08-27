@@ -150,6 +150,12 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 - (void)refreshRecurringRuntimeStateWithCompletion:
     (void(^)(BOOL refreshed, NSError * _Nullable error))completion;
 
+/// Hydrates state from a handshake-confirmed helper. Protocol 6 responses may
+/// omit the timezone pair that was added in protocol 7.
+- (void)refreshRecurringRuntimeStateForDaemonProtocolVersion:(NSInteger)protocolVersion
+                                                  completion:
+    (void(^)(BOOL refreshed, NSError * _Nullable error))completion;
+
 #pragma mark - Break Credits and Protected Hours
 
 @property (nonatomic, readonly) NSInteger breakCreditsPerDay;
