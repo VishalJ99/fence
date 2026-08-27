@@ -23,12 +23,44 @@
 
 #import "DomainListWindowController.h"
 #import "AppController.h"
+#import "SCBlockEntry.h"
 #import "SCUIUtilities.h"
+#import "NSString+IPAddress.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat SCReadOnlyBlocklistMinimumWidth = 620.0;
 static const CGFloat SCReadOnlyBlocklistPreferredWidth = 680.0;
 static const CGFloat SCReadOnlyBlocklistRowHeight = 44.0;
+
+static NSCache<NSString *, NSImage *> *SCBlocklistWebsiteIconCache(void) {
+    static NSCache<NSString *, NSImage *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 128;
+    });
+    return cache;
+}
+
+static NSString *SCFaviconDomainForBlocklistEntry(NSString *entry) {
+    SCBlockEntry *blockEntry = [SCBlockEntry entryFromString:entry];
+    NSString *hostname = blockEntry.hostname;
+    if (blockEntry == nil || blockEntry.isAppEntry || hostname.length == 0 ||
+        blockEntry.maskLen > 0 || [hostname isEqualToString:@"*"] || hostname.isValidIPAddress) {
+        return nil;
+    }
+    return hostname;
+}
+
+static NSURL *SCFaviconURLForDomain(NSString *domain) {
+    if (domain.length == 0) return nil;
+    NSURLComponents *components = [NSURLComponents componentsWithString:@"https://www.google.com/s2/favicons"];
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"domain" value:domain],
+        [NSURLQueryItem queryItemWithName:@"sz" value:@"64"],
+    ];
+    return components.URL;
+}
 
 static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
     NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
@@ -693,12 +725,15 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
         NSImage *websiteIcon = [NSImage imageWithSystemSymbolName:@"globe"
                                         accessibilityDescription:NSLocalizedString(@"Website", @"Website icon accessibility description")];
         if (websiteIcon == nil) websiteIcon = [NSImage imageNamed:NSImageNameNetwork];
-        return @{
+        NSMutableDictionary<NSString *, id> *displayItem = [@{
             @"title": entry,
             @"rawEntry": entry,
             @"icon": websiteIcon ?: [NSImage new],
             @"isApp": @NO,
-        };
+        } mutableCopy];
+        NSString *faviconDomain = SCFaviconDomainForBlocklistEntry(entry);
+        if (faviconDomain.length > 0) displayItem[@"faviconDomain"] = faviconDomain;
+        return displayItem.copy;
     }
 
     NSString *bundleID = [entry substringFromIndex:4];
@@ -783,6 +818,7 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
         iconView.symbolConfiguration = [NSImageSymbolConfiguration
             configurationWithPointSize:15.0
                              weight:NSFontWeightSemibold];
+        [self loadWebsiteIconForDomain:item[@"faviconDomain"] intoImageView:iconView];
     }
 
     NSTextField *nameLabel = [NSTextField labelWithString:item[@"title"]];
@@ -819,6 +855,46 @@ static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
         [nameLabel.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
     ]];
     return card;
+}
+
+- (void)loadWebsiteIconForDomain:(NSString *)domain intoImageView:(SCBlocklistIconView *)iconView {
+    NSURL *faviconURL = SCFaviconURLForDomain(domain);
+    if (faviconURL == nil) return;
+
+    NSImage *cachedIcon = [SCBlocklistWebsiteIconCache() objectForKey:domain];
+    if (cachedIcon != nil) {
+        iconView.contentTintColor = nil;
+        iconView.symbolConfiguration = nil;
+        iconView.image = cachedIcon;
+        return;
+    }
+
+    __weak SCBlocklistIconView *weakIconView = iconView;
+    NSURLRequest *request = [NSURLRequest requestWithURL:faviconURL
+                                             cachePolicy:NSURLRequestReturnCacheDataElseLoad
+                                         timeoutInterval:8.0];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:request
+          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *HTTPResponse = [response isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)response
+            : nil;
+        if (error != nil || data.length == 0 || HTTPResponse.statusCode != 200) return;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSImage *favicon = [[NSImage alloc] initWithData:data];
+            if (favicon == nil) return;
+            favicon.template = NO;
+            [SCBlocklistWebsiteIconCache() setObject:favicon forKey:domain];
+
+            SCBlocklistIconView *strongIconView = weakIconView;
+            if (strongIconView == nil) return;
+            strongIconView.contentTintColor = nil;
+            strongIconView.symbolConfiguration = nil;
+            strongIconView.image = favicon;
+        });
+    }];
+    [task resume];
 }
 
 - (SCBlocklistCardView *)emptyStateCardWithText:(NSString *)text {
