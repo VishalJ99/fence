@@ -1839,6 +1839,15 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+- (void)showCommitmentExtension:(id)sender {
+    [self showWeekSchedule:sender];
+    [self.weekScheduleWindowController presentExtendCommitmentSheet];
+}
+
+- (BOOL)commitmentExtensionInFlight {
+    return self.weekScheduleWindowController.commitmentExtensionInFlight;
+}
+
 #pragma mark - Frosted Glass Appearance
 
 - (void)setupFrostedGlassAppearance {

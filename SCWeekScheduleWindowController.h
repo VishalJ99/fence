@@ -18,6 +18,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Reload all data
 - (void)reloadData;
 
+/// Present the existing recurring-commitment extension sheet.
+- (void)presentExtendCommitmentSheet;
+
+/// Whether an extension request is awaiting its daemon reply.
+@property (nonatomic, readonly) BOOL commitmentExtensionInFlight;
+
 /// Counts and booleans describing the actual calendar presentation. No bundle
 /// names, identifiers, entries, or schedule times are included.
 - (NSDictionary<NSString *, NSNumber *> *)telemetryRenderSnapshot;

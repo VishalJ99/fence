@@ -87,6 +87,7 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, strong) NSButton *breakButton;
 @property (nonatomic, strong) NSButton *emergencyUnlockButton;
 @property (nonatomic, strong) NSButton *extendCommitmentButton;
+@property (nonatomic, readwrite) BOOL commitmentExtensionInFlight;
 @property (nonatomic, strong) NSButton *commitButton;
 @property (nonatomic, strong) NSTextField *commitmentLabel;
 
@@ -815,7 +816,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     BOOL hasRecurringCommitment = manager.hasRecurringCommitment;
 
     self.extendCommitmentButton.hidden = !hasRecurringCommitment;
-    self.extendCommitmentButton.enabled = hasRecurringCommitment;
+    self.extendCommitmentButton.title = self.commitmentExtensionInFlight
+        ? @"Extending…" : @"Extend Commitment";
+    self.extendCommitmentButton.enabled = hasRecurringCommitment &&
+        !self.commitmentExtensionInFlight;
 
     [self updateEmergencyButtonTitle:@"Emergency Unlock"];
     self.emergencyUnlockButton.enabled =
@@ -977,8 +981,17 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)extendCommitmentClicked:(id)sender {
+    #pragma unused(sender)
+    [self presentExtendCommitmentSheet];
+}
+
+- (void)presentExtendCommitmentSheet {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    if (!manager.hasRecurringCommitment) return;
+    if (!manager.hasRecurringCommitment || self.commitmentExtensionInFlight) return;
+    if (self.window.attachedSheet != nil) {
+        [self.window makeKeyAndOrderFront:nil];
+        return;
+    }
 
     NSDate *now = [NSDate date];
     NSDate *base = [manager.recurringCommitmentLockEndDate compare:now] == NSOrderedDescending
@@ -1016,9 +1029,11 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode != NSAlertFirstButtonReturn) return;
         NSInteger days = durationPopUp.indexOfSelectedItem + 1;
+        self.commitmentExtensionInFlight = YES;
         self.extendCommitmentButton.title = @"Extending…";
         self.extendCommitmentButton.enabled = NO;
         [manager extendRecurringCommitmentByDays:days completion:^(BOOL extended, NSError *error) {
+            self.commitmentExtensionInFlight = NO;
             [self reloadData];
             [self.window makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];

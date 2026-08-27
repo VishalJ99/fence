@@ -140,4 +140,8 @@
 // opens the Week Schedule window (new UX)
 - (IBAction)showWeekSchedule:(id)sender;
 
+// opens the existing Extend Commitment sheet from the status menu
+- (void)showCommitmentExtension:(id)sender;
+@property (nonatomic, readonly) BOOL commitmentExtensionInFlight;
+
 @end

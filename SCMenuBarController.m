@@ -43,6 +43,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 
 - (void)refreshCountdownWarning;
 - (void)populateMenu:(NSMenu *)menu;
+- (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager;
 
 @end
 
@@ -236,19 +237,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     BOOL isTestBlock = [[[SCSettings sharedSettings] valueForKey:@"IsTestBlock"] boolValue];
 
     if (manager.isCommitted) {
-        NSString *commitmentText = @"Recurring commitment active";
-        if (!manager.hasRecurringCommitment) {
-            NSDate *legacyEnd = manager.commitmentEndDate;
-            if (legacyEnd != nil) {
-                NSDateFormatter *endFormatter = [[NSDateFormatter alloc] init];
-                endFormatter.dateFormat = @"EEEE";
-                commitmentText = [NSString stringWithFormat:@"Committed until %@",
-                    [endFormatter stringFromDate:legacyEnd]];
-            } else {
-                commitmentText = @"Commitment active";
-            }
-        }
-
+        NSString *commitmentText = [self commitmentMenuTitleForManager:manager];
         NSMenuItem *commitItem = [[NSMenuItem alloc] initWithTitle:commitmentText
                                                             action:nil
                                                      keyEquivalent:@""];
@@ -306,6 +295,16 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     [self.statusMenu addItem:scheduleItem];
 
     if (manager.hasRecurringCommitment) {
+        AppController *appController = (AppController *)NSApp.delegate;
+        BOOL extensionInFlight = appController.commitmentExtensionInFlight;
+        NSString *extendTitle = extensionInFlight
+            ? @"Extending Commitment…" : @"Extend Commitment…";
+        NSMenuItem *extendItem = [[NSMenuItem alloc] initWithTitle:extendTitle
+                                                            action:@selector(extendCommitmentClicked:)
+                                                     keyEquivalent:@""];
+        extendItem.target = self;
+        extendItem.enabled = !extensionInFlight;
+        [self.statusMenu addItem:extendItem];
         [self.statusMenu addItem:[self timedBreakMenuItemForManager:manager]];
     }
 
@@ -428,6 +427,35 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                keyEquivalent:@"q"];
     quitItem.target = self;
     [self.statusMenu addItem:quitItem];
+}
+
+- (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager {
+    if (manager.hasRecurringCommitment) {
+        NSDate *lockEnd = manager.recurringCommitmentLockEndDate;
+        if (lockEnd == nil) return @"Recurring commitment active";
+        if ([lockEnd timeIntervalSinceNow] <= 0) {
+            return manager.protectedHoursActiveNow
+                ? @"Committed — end available after Protected Hours"
+                : @"Committed — end available now";
+        }
+
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.dateStyle = NSDateFormatterMediumStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+        formatter.timeZone = [NSTimeZone timeZoneWithName:manager.recurringTimeZoneIdentifier] ?:
+            NSTimeZone.localTimeZone;
+        NSString *formattedEnd = [formatter stringFromDate:lockEnd];
+        return formattedEnd.length > 0
+            ? [NSString stringWithFormat:@"Committed — end available %@", formattedEnd]
+            : @"Recurring commitment active";
+    }
+
+    NSDate *legacyEnd = manager.commitmentEndDate;
+    if (legacyEnd == nil) return @"Commitment active";
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"EEEE";
+    return [NSString stringWithFormat:@"Committed until %@",
+        [formatter stringFromDate:legacyEnd]];
 }
 
 - (NSMenuItem *)timedBreakMenuItemForManager:(SCScheduleManager *)manager {
@@ -706,6 +734,11 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     } else {
         [self.delegate menuBarControllerDidRequestOpenApp:self];
     }
+}
+
+- (void)extendCommitmentClicked:(id)sender {
+    AppController *appController = (AppController *)NSApp.delegate;
+    [appController showCommitmentExtension:sender];
 }
 
 - (void)tryTestBlockClicked:(id)sender {
