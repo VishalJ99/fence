@@ -246,6 +246,26 @@ static BOOL SCValidAppBundleID(NSString* bundleID) {
     return [appleCrashReporter boolForKey: @"ThirdPartyDataSubmit"];
 }
 
++ (NSDictionary<NSString*, NSArray<NSString*>*>*)partitionBlocklistEntriesForDisplay:(NSArray*)entries {
+    NSMutableArray<NSString*>* apps = [NSMutableArray array];
+    NSMutableArray<NSString*>* websites = [NSMutableArray array];
+
+    for (id candidate in entries) {
+        if (![candidate isKindOfClass:NSString.class]) continue;
+        NSString* entry = (NSString*)candidate;
+        if (entry.length == 0) continue;
+
+        BOOL isApp = entry.length > 4 &&
+            [[entry substringToIndex:4] caseInsensitiveCompare:@"app:"] == NSOrderedSame;
+        [isApp ? apps : websites addObject:entry];
+    }
+
+    return @{
+        @"apps": apps.copy,
+        @"websites": websites.copy,
+    };
+}
+
 + (NSString*)canonicalBlockEntryFromString:(NSString*)rawEntry {
     if (rawEntry == nil) return nil;
 

@@ -26,6 +26,98 @@
 #import "SCUIUtilities.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+static const CGFloat SCReadOnlyBlocklistMinimumWidth = 620.0;
+static const CGFloat SCReadOnlyBlocklistPreferredWidth = 680.0;
+static const CGFloat SCReadOnlyBlocklistRowHeight = 44.0;
+
+static BOOL SCBlocklistUsesDarkAppearance(NSAppearance *appearance) {
+    NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
+    ]];
+    return [match isEqualToString:NSAppearanceNameDarkAqua];
+}
+
+@interface SCBlocklistCardView : NSView
+@end
+
+@implementation SCBlocklistCardView
+
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+
+- (void)updateLayer {
+    [super updateLayer];
+    BOOL dark = SCBlocklistUsesDarkAppearance(self.effectiveAppearance);
+    self.layer.backgroundColor = (dark
+        ? [NSColor colorWithWhite:1.0 alpha:0.075]
+        : [NSColor colorWithWhite:0.0 alpha:0.045]).CGColor;
+    self.layer.cornerRadius = 12.0;
+    self.layer.shadowColor = (dark ? NSColor.whiteColor : NSColor.blackColor).CGColor;
+    self.layer.shadowOpacity = dark ? 0.08 : 0.07;
+    self.layer.shadowRadius = dark ? 0.0 : 2.0;
+    self.layer.shadowOffset = dark ? NSZeroSize : NSMakeSize(0.0, -1.0);
+}
+
+- (void)layout {
+    [super layout];
+    self.layer.shadowPath = [NSBezierPath bezierPathWithRoundedRect:self.bounds
+                                                            xRadius:12.0
+                                                            yRadius:12.0].CGPath;
+}
+
+@end
+
+@interface SCBlocklistIconView : NSImageView
+@end
+
+@implementation SCBlocklistIconView
+
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+
+- (void)updateLayer {
+    [super updateLayer];
+    BOOL dark = SCBlocklistUsesDarkAppearance(self.effectiveAppearance);
+    self.layer.backgroundColor = (dark
+        ? [NSColor colorWithWhite:1.0 alpha:0.06]
+        : [NSColor colorWithWhite:0.0 alpha:0.035]).CGColor;
+    self.layer.borderColor = (dark
+        ? [NSColor colorWithWhite:1.0 alpha:0.10]
+        : [NSColor colorWithWhite:0.0 alpha:0.10]).CGColor;
+    self.layer.borderWidth = 1.0;
+    self.layer.cornerRadius = 7.0;
+    self.layer.masksToBounds = YES;
+}
+
+@end
+
+@interface SCBlocklistDocumentView : NSView
+@end
+
+@implementation SCBlocklistDocumentView
+
+- (BOOL)isFlipped {
+    return YES;
+}
+
+@end
+
+@interface DomainListWindowController ()
+
+@property (nonatomic, strong) NSScrollView *readOnlyScrollView;
+@property (nonatomic, strong) SCBlocklistDocumentView *readOnlyDocumentView;
+@property (nonatomic, strong) NSStackView *readOnlyColumnsStackView;
+@property (nonatomic, strong) NSLayoutConstraint *readOnlyDocumentHeightConstraint;
+@property (nonatomic) NSRect editableWindowFrame;
+@property (nonatomic) NSSize editableWindowMinimumSize;
+@property (nonatomic) NSWindowStyleMask editableWindowStyleMask;
+@property (nonatomic) BOOL preparedReadOnlyWindow;
+
+@end
+
 @implementation DomainListWindowController
 
 - (DomainListWindowController*)init {
@@ -327,6 +419,10 @@
 }
 
 - (void)updateWindowTitle {
+    if (self.readOnly) {
+        self.window.title = NSLocalizedString(@"Apps & Websites", @"Read-only committed blocklist window title");
+        return;
+    }
     NSString* listType = [defaults_ boolForKey: @"BlockAsWhitelist"] ? @"Allowlist" : @"Blocklist";
     self.window.title = NSLocalizedString(([NSString stringWithFormat: @"Domain %@", listType]), @"Domain list window title");
 }
@@ -451,19 +547,306 @@
 }
 
 - (void)setupReadOnlyAppearance {
-    // Hide editing UI and show the context-specific read-only footer.
+    // Keep the legacy editable table intact, but replace its read-only
+    // presentation with the calmer Apps & Websites layout used by Fence iOS.
     allowlistRadioMatrix_.hidden = YES;
     readOnlyMessageLabel_.stringValue = self.readOnlyNoticeText.length > 0
         ? self.readOnlyNoticeText
-        : @"Locked during the active commitment.";
+        : NSLocalizedString(@"Locked during the active commitment.", @"Read-only blocklist notice");
     readOnlyMessageLabel_.textColor = self.readOnlyNoticeColor ?: NSColor.secondaryLabelColor;
     readOnlyMessageLabel_.hidden = NO;
+    [self prepareReadOnlyWindow];
+    [self installReadOnlyBlocklistViewIfNeeded];
+    domainListTableView_.enclosingScrollView.hidden = YES;
+    self.readOnlyScrollView.hidden = NO;
+    [self rebuildReadOnlyBlocklistView];
+    [self updateWindowTitle];
 }
 
 - (void)setupEditableAppearance {
-    // Show editing UI
+    // Restore the inherited standalone blocklist editor unchanged.
     allowlistRadioMatrix_.hidden = NO;
     readOnlyMessageLabel_.hidden = YES;
+    domainListTableView_.enclosingScrollView.hidden = NO;
+    self.readOnlyScrollView.hidden = YES;
+    if (self.preparedReadOnlyWindow) {
+        self.window.styleMask = self.editableWindowStyleMask;
+        self.window.minSize = self.editableWindowMinimumSize;
+        [self.window setFrame:self.editableWindowFrame display:NO];
+        self.preparedReadOnlyWindow = NO;
+    }
+    [self updateWindowTitle];
+}
+
+- (void)prepareReadOnlyWindow {
+    if (!self.preparedReadOnlyWindow) {
+        self.editableWindowFrame = self.window.frame;
+        self.editableWindowMinimumSize = self.window.minSize;
+        self.editableWindowStyleMask = self.window.styleMask;
+        self.preparedReadOnlyWindow = YES;
+
+        NSRect targetFrame = self.window.frame;
+        targetFrame.size.width = MAX(targetFrame.size.width, SCReadOnlyBlocklistPreferredWidth);
+        if (!NSEqualSizes(targetFrame.size, self.window.frame.size)) {
+            [self.window setFrame:targetFrame display:NO];
+            [self.window center];
+        }
+    }
+    self.window.styleMask |= NSWindowStyleMaskResizable;
+    self.window.minSize = NSMakeSize(SCReadOnlyBlocklistMinimumWidth,
+                                     self.editableWindowMinimumSize.height);
+}
+
+- (void)installReadOnlyBlocklistViewIfNeeded {
+    if (self.readOnlyScrollView != nil) return;
+
+    NSScrollView *legacyScrollView = domainListTableView_.enclosingScrollView;
+    NSView *container = legacyScrollView.superview;
+
+    self.readOnlyScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.readOnlyScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.readOnlyScrollView.drawsBackground = NO;
+    self.readOnlyScrollView.borderType = NSNoBorder;
+    self.readOnlyScrollView.hasVerticalScroller = YES;
+    self.readOnlyScrollView.autohidesScrollers = YES;
+    self.readOnlyScrollView.hidden = YES;
+    [self.readOnlyScrollView setAccessibilityIdentifier:@"committed-blocklist-scroll"];
+
+    self.readOnlyDocumentView = [[SCBlocklistDocumentView alloc] initWithFrame:NSZeroRect];
+    self.readOnlyDocumentView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.readOnlyScrollView.documentView = self.readOnlyDocumentView;
+
+    self.readOnlyColumnsStackView = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.readOnlyColumnsStackView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.readOnlyColumnsStackView.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.readOnlyColumnsStackView.alignment = NSLayoutAttributeTop;
+    self.readOnlyColumnsStackView.distribution = NSStackViewDistributionFillEqually;
+    self.readOnlyColumnsStackView.spacing = 16.0;
+    [self.readOnlyColumnsStackView setAccessibilityIdentifier:@"committed-blocklist-columns"];
+    [self.readOnlyDocumentView addSubview:self.readOnlyColumnsStackView];
+
+    [container addSubview:self.readOnlyScrollView
+               positioned:NSWindowAbove
+               relativeTo:legacyScrollView];
+
+    self.readOnlyDocumentHeightConstraint =
+        [self.readOnlyDocumentView.heightAnchor constraintEqualToConstant:1.0];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.readOnlyScrollView.leadingAnchor constraintEqualToAnchor:legacyScrollView.leadingAnchor],
+        [self.readOnlyScrollView.trailingAnchor constraintEqualToAnchor:legacyScrollView.trailingAnchor],
+        [self.readOnlyScrollView.topAnchor constraintEqualToAnchor:legacyScrollView.topAnchor],
+        [self.readOnlyScrollView.bottomAnchor constraintEqualToAnchor:legacyScrollView.bottomAnchor],
+        [self.readOnlyDocumentView.widthAnchor constraintEqualToAnchor:self.readOnlyScrollView.contentView.widthAnchor],
+        self.readOnlyDocumentHeightConstraint,
+        [self.readOnlyColumnsStackView.leadingAnchor constraintEqualToAnchor:self.readOnlyDocumentView.leadingAnchor constant:18.0],
+        [self.readOnlyColumnsStackView.trailingAnchor constraintEqualToAnchor:self.readOnlyDocumentView.trailingAnchor constant:-18.0],
+        [self.readOnlyColumnsStackView.topAnchor constraintEqualToAnchor:self.readOnlyDocumentView.topAnchor constant:8.0],
+    ]];
+}
+
+- (void)rebuildReadOnlyBlocklistView {
+    for (NSView *view in self.readOnlyColumnsStackView.arrangedSubviews.copy) {
+        [self.readOnlyColumnsStackView removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+
+    NSDictionary<NSString *, NSArray<NSString *> *> *entriesByType =
+        [SCMiscUtilities partitionBlocklistEntriesForDisplay:domainList_];
+    NSArray<NSDictionary<NSString *, id> *> *apps =
+        [self displayItemsForEntries:entriesByType[@"apps"]];
+    NSArray<NSDictionary<NSString *, id> *> *websites =
+        [self displayItemsForEntries:entriesByType[@"websites"]];
+
+    NSStackView *appsColumn = [self readOnlyColumnWithTitle:NSLocalizedString(@"Apps", @"Blocklist apps section title")
+                                                     items:apps
+                                                 emptyText:NSLocalizedString(@"No apps.", @"Empty blocklist apps section")];
+    NSStackView *websitesColumn = [self readOnlyColumnWithTitle:NSLocalizedString(@"Websites", @"Blocklist websites section title")
+                                                         items:websites
+                                                     emptyText:NSLocalizedString(@"No websites.", @"Empty blocklist websites section")];
+    [self.readOnlyColumnsStackView addArrangedSubview:appsColumn];
+    [self.readOnlyColumnsStackView addArrangedSubview:websitesColumn];
+
+    NSUInteger longestColumnCount = MAX(apps.count, websites.count);
+    NSUInteger visibleRowCount = MAX(longestColumnCount, (NSUInteger)1);
+    CGFloat rowsHeight = visibleRowCount * SCReadOnlyBlocklistRowHeight;
+    if (visibleRowCount > 1) rowsHeight += (visibleRowCount - 1) * 6.0;
+    self.readOnlyDocumentHeightConstraint.constant = 8.0 + 16.0 + 6.0 + rowsHeight + 6.0;
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)displayItemsForEntries:(NSArray<NSString *> *)entries {
+    NSMutableArray<NSDictionary<NSString *, id> *> *displayItems = [NSMutableArray array];
+    for (NSString *entry in entries) {
+        [displayItems addObject:[self displayItemForEntry:entry]];
+    }
+    NSComparator alphabeticalByTitle = ^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        return [left[@"title"] localizedCaseInsensitiveCompare:right[@"title"]];
+    };
+    [displayItems sortUsingComparator:alphabeticalByTitle];
+    return displayItems.copy;
+}
+
+- (NSDictionary<NSString *, id> *)displayItemForEntry:(NSString *)entry {
+    BOOL isApp = entry.length > 4 &&
+        [[entry substringToIndex:4] caseInsensitiveCompare:@"app:"] == NSOrderedSame;
+    if (!isApp) {
+        NSImage *websiteIcon = [NSImage imageWithSystemSymbolName:@"globe"
+                                        accessibilityDescription:NSLocalizedString(@"Website", @"Website icon accessibility description")];
+        if (websiteIcon == nil) websiteIcon = [NSImage imageNamed:NSImageNameNetwork];
+        return @{
+            @"title": entry,
+            @"rawEntry": entry,
+            @"icon": websiteIcon ?: [NSImage new],
+            @"isApp": @NO,
+        };
+    }
+
+    NSString *bundleID = [entry substringFromIndex:4];
+    NSURL *appURL = [[NSWorkspace sharedWorkspace]
+        URLForApplicationWithBundleIdentifier:bundleID];
+    NSString *title = appURL.path.length > 0
+        ? [[NSFileManager defaultManager] displayNameAtPath:appURL.path]
+        : bundleID;
+    NSImage *icon = appURL.path.length > 0
+        ? [[[NSWorkspace sharedWorkspace] iconForFile:appURL.path] copy]
+        : [[NSImage imageWithSystemSymbolName:@"app"
+                    accessibilityDescription:NSLocalizedString(@"Application", @"Application icon accessibility description")] copy];
+    if (icon == nil) icon = [[NSImage imageNamed:NSImageNameApplicationIcon] copy];
+
+    return @{
+        @"title": title.length > 0 ? title : bundleID,
+        @"rawEntry": entry,
+        @"icon": icon ?: [NSImage new],
+        @"isApp": @YES,
+    };
+}
+
+- (NSStackView *)readOnlyColumnWithTitle:(NSString *)title
+                                   items:(NSArray<NSDictionary<NSString *, id> *> *)items
+                               emptyText:(NSString *)emptyText {
+    NSTextField *titleLabel = [NSTextField labelWithString:title];
+    titleLabel.font = [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold];
+    titleLabel.textColor = NSColor.labelColor;
+
+    NSTextField *countLabel = [NSTextField
+        labelWithString:[NSString stringWithFormat:@"(%lu)", (unsigned long)items.count]];
+    countLabel.font = [NSFont monospacedDigitSystemFontOfSize:12.0 weight:NSFontWeightMedium];
+    countLabel.textColor = NSColor.secondaryLabelColor;
+
+    NSStackView *header = [NSStackView stackViewWithViews:@[titleLabel, countLabel]];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    header.spacing = 5.0;
+
+    NSStackView *column = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    column.translatesAutoresizingMaskIntoConstraints = NO;
+    column.orientation = NSUserInterfaceLayoutOrientationVertical;
+    column.alignment = NSLayoutAttributeLeading;
+    column.distribution = NSStackViewDistributionFill;
+    column.spacing = 6.0;
+    [column addArrangedSubview:header];
+
+    NSStackView *rows = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    rows.translatesAutoresizingMaskIntoConstraints = NO;
+    rows.orientation = NSUserInterfaceLayoutOrientationVertical;
+    rows.alignment = NSLayoutAttributeLeading;
+    rows.distribution = NSStackViewDistributionFill;
+    rows.spacing = 6.0;
+    [column addArrangedSubview:rows];
+    [header.widthAnchor constraintEqualToAnchor:column.widthAnchor].active = YES;
+    [rows.widthAnchor constraintEqualToAnchor:column.widthAnchor].active = YES;
+
+    if (items.count == 0) {
+        SCBlocklistCardView *emptyCard = [self emptyStateCardWithText:emptyText];
+        [rows addArrangedSubview:emptyCard];
+        [emptyCard.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
+    } else {
+        for (NSDictionary<NSString *, id> *item in items) {
+            SCBlocklistCardView *card = [self cardForDisplayItem:item];
+            [rows addArrangedSubview:card];
+            [card.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
+        }
+    }
+    return column;
+}
+
+- (SCBlocklistCardView *)cardForDisplayItem:(NSDictionary<NSString *, id> *)item {
+    SCBlocklistCardView *card = [[SCBlocklistCardView alloc] initWithFrame:NSZeroRect];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+
+    SCBlocklistIconView *iconView = [[SCBlocklistIconView alloc] initWithFrame:NSZeroRect];
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    iconView.image = item[@"icon"];
+    iconView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    if (![item[@"isApp"] boolValue]) {
+        iconView.contentTintColor = NSColor.secondaryLabelColor;
+        iconView.symbolConfiguration = [NSImageSymbolConfiguration
+            configurationWithPointSize:15.0
+                             weight:NSFontWeightSemibold];
+    }
+
+    NSTextField *nameLabel = [NSTextField labelWithString:item[@"title"]];
+    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    nameLabel.font = [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold];
+    nameLabel.textColor = NSColor.labelColor;
+    nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    nameLabel.maximumNumberOfLines = 1;
+    nameLabel.toolTip = item[@"rawEntry"];
+    [nameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [card addSubview:iconView];
+    [card addSubview:nameLabel];
+    [iconView setAccessibilityElement:NO];
+    [iconView setAccessibilityHidden:YES];
+    [nameLabel setAccessibilityElement:NO];
+    [nameLabel setAccessibilityHidden:YES];
+    [card setAccessibilityElement:YES];
+    [card setAccessibilityRole:NSAccessibilityGroupRole];
+    [card setAccessibilityLabel:item[@"title"]];
+    [card setAccessibilityHelp:[item[@"isApp"] boolValue]
+        ? NSLocalizedString(@"Application", @"Application blocklist row accessibility help")
+        : NSLocalizedString(@"Website", @"Website blocklist row accessibility help")];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [card.heightAnchor constraintEqualToConstant:SCReadOnlyBlocklistRowHeight],
+        [iconView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:10.0],
+        [iconView.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [iconView.widthAnchor constraintEqualToConstant:28.0],
+        [iconView.heightAnchor constraintEqualToConstant:28.0],
+        [nameLabel.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10.0],
+        [nameLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0],
+        [nameLabel.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+    ]];
+    return card;
+}
+
+- (SCBlocklistCardView *)emptyStateCardWithText:(NSString *)text {
+    SCBlocklistCardView *card = [[SCBlocklistCardView alloc] initWithFrame:NSZeroRect];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium];
+    label.textColor = NSColor.secondaryLabelColor;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.maximumNumberOfLines = 1;
+    [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [card addSubview:label];
+    [label setAccessibilityElement:NO];
+    [label setAccessibilityHidden:YES];
+    [card setAccessibilityElement:YES];
+    [card setAccessibilityRole:NSAccessibilityGroupRole];
+    [card setAccessibilityLabel:text];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [card.heightAnchor constraintEqualToConstant:SCReadOnlyBlocklistRowHeight],
+        [label.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12.0],
+        [label.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0],
+        [label.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+    ]];
+    return card;
 }
 
 @end

@@ -401,6 +401,27 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     }
 }
 
+- (void)testCommittedBlocklistPresentationSeparatesAppsAndWebsites {
+    NSDictionary<NSString *, NSArray<NSString *> *> *sections =
+        [SCMiscUtilities partitionBlocklistEntriesForDisplay:@[
+            @"zeta.example",
+            @"app:com.example.ZebraMissingFixture",
+            @"alpha.example",
+            @"APP:com.example.AlphaMissingFixture",
+            @"",
+            @42,
+        ]];
+
+    XCTAssertEqualObjects(sections[@"apps"], (@[
+        @"app:com.example.ZebraMissingFixture",
+        @"APP:com.example.AlphaMissingFixture",
+    ]));
+    XCTAssertEqualObjects(sections[@"websites"], (@[
+        @"zeta.example",
+        @"alpha.example",
+    ]));
+}
+
 - (void) testCleanBlocklistEntries {
     // ignores weird invalid entries
     XCTAssert([SCMiscUtilities cleanBlocklistEntry: nil].count == 0);

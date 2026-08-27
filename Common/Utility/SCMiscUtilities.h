@@ -29,6 +29,11 @@
 
 + (NSArray<NSString*>*)cleanBlocklist:(NSArray<NSString*>*)blocklist;
 
+/// Separates stored blocklist entries into application and website groups for
+/// presentation. Invalid/non-string values are ignored and input order is
+/// preserved within each group.
++ (NSDictionary<NSString*, NSArray<NSString*>*>*)partitionBlocklistEntriesForDisplay:(NSArray*)entries;
+
 + (NSDictionary*) defaultsDictForUser:(uid_t)controllingUID;
 
 + (NSArray<NSURL*>*)allUserHomeDirectoryURLs:(NSError**)errPtr;
