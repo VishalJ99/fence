@@ -333,6 +333,13 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
         [self.statusMenu addItem:blocklistItem];
     }
 
+    // Keep the Protection pane discoverable from the status-menu-only UI.
+    NSMenuItem *settingsItem = [[NSMenuItem alloc] initWithTitle:@"Settings…"
+                                                         action:@selector(settingsClicked:)
+                                                  keyEquivalent:@","];
+    settingsItem.target = self;
+    [self.statusMenu addItem:settingsItem];
+
 #ifdef DEBUG
     [self.statusMenu addItem:[NSMenuItem separatorItem]];
 
@@ -669,6 +676,12 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     if (self.onShowBlocklist) {
         self.onShowBlocklist();
     }
+}
+
+- (void)settingsClicked:(id)sender {
+    [NSApp activateIgnoringOtherApps:YES];
+    AppController *appController = (AppController *)NSApp.delegate;
+    [appController openPreferences:sender];
 }
 
 - (void)quitClicked:(id)sender {
