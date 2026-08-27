@@ -18,6 +18,7 @@
 #import "SCUIUtilities.h"
 #import "AppController.h"
 #import <Sparkle/Sparkle.h>
+#import <math.h>
 
 static const NSTimeInterval SCWarningLeadTime = 90.0;
 
@@ -35,6 +36,9 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, strong) NSMenu *statusMenu;
 @property (nonatomic, strong) NSTimer *updateTimer;
+@property (nonatomic, strong, nullable) NSTimer *breakCountdownTimer;
+@property (nonatomic, weak, nullable) NSMenuItem *activeBreakStatusItem;
+@property (nonatomic) BOOL breakStatusSuspendsEnforcement;
 @property (nonatomic, strong, nullable) NSTimer *warningArmTimer;
 @property (nonatomic, strong) SCCountdownWarningController *countdownWarningController;
 @property (nonatomic, copy, nullable) NSString *dismissedWarningIdentifier;
@@ -44,6 +48,8 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 - (void)refreshCountdownWarning;
 - (void)populateMenu:(NSMenu *)menu;
 - (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager;
+- (NSString *)activeBreakMenuTitleForManager:(SCScheduleManager *)manager;
+- (void)updateActiveBreakStatusItem;
 
 @end
 
@@ -96,6 +102,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
     [self.updateTimer invalidate];
+    [self.breakCountdownTimer invalidate];
     [self.warningArmTimer invalidate];
     [self.countdownWarningController hideWarning];
 }
@@ -112,6 +119,9 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
         [self startUpdateTimer];
         [self refreshCountdownWarning];
     } else {
+        [self.breakCountdownTimer invalidate];
+        self.breakCountdownTimer = nil;
+        self.activeBreakStatusItem = nil;
         [self.warningArmTimer invalidate];
         self.warningArmTimer = nil;
         [self.countdownWarningController hideWarning];
@@ -154,6 +164,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 
 - (void)populateMenu:(NSMenu *)menu {
     [menu removeAllItems];
+    self.activeBreakStatusItem = nil;
     self.statusMenu = menu;
     self.statusMenu.delegate = self;
 
@@ -165,7 +176,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
             !manager.protectedHoursActiveNow;
         if (manager.hasActiveTimedBreak) {
             NSString *breakText = breakSuspendsEnforcement
-                ? @"● Break active"
+                ? [self activeBreakMenuTitleForManager:manager]
                 : @"● Break interrupted by Protected Hours";
             NSColor *breakColor = breakSuspendsEnforcement
                 ? NSColor.systemGreenColor
@@ -182,10 +193,16 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
             breakItem.attributedTitle = breakTitle;
             breakItem.enabled = NO;
             [self.statusMenu addItem:breakItem];
+            self.activeBreakStatusItem = breakItem;
+            self.breakStatusSuspendsEnforcement = breakSuspendsEnforcement;
+            if (breakSuspendsEnforcement) {
+                [self updateActiveBreakStatusItem];
+            }
         }
 
         NSUInteger renderedBundleCount = 0;
         for (SCBlockBundle *bundle in manager.bundles) {
+            if (breakSuspendsEnforcement) break;
             if (!bundle.enabled || bundle.entries.count == 0) continue;
 
             BOOL scheduleAllows = [manager wouldBundleBeAllowed:bundle.bundleID];
@@ -194,16 +211,9 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
             // Skip bundles with no schedule for current week
             if (statusStr.length == 0) continue;
 
-            BOOL allowed = scheduleAllows || breakSuspendsEnforcement;
-            NSString *statusWord = allowed ? @"allowed" : @"blocked";
-            NSColor *statusColor = allowed ? [NSColor systemGreenColor] : [NSColor systemRedColor];
-
-            NSString *fullText;
-            if (breakSuspendsEnforcement && !scheduleAllows) {
-                fullText = [NSString stringWithFormat:@"● %@ allowed during break", bundle.name];
-            } else {
-                fullText = [NSString stringWithFormat:@"● %@ %@ %@", bundle.name, statusWord, statusStr];
-            }
+            NSString *statusWord = scheduleAllows ? @"allowed" : @"blocked";
+            NSColor *statusColor = scheduleAllows ? [NSColor systemGreenColor] : [NSColor systemRedColor];
+            NSString *fullText = [NSString stringWithFormat:@"● %@ %@ %@", bundle.name, statusWord, statusStr];
 
             NSMenuItem *bundleItem = [[NSMenuItem alloc] initWithTitle:fullText
                                                                 action:nil
@@ -221,7 +231,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
             renderedBundleCount += 1;
         }
 
-        if (renderedBundleCount == 0) {
+        if (!breakSuspendsEnforcement && renderedBundleCount == 0) {
             NSMenuItem *noBundlesItem = [[NSMenuItem alloc] initWithTitle:@"No active bundles configured"
                                                                    action:nil
                                                             keyEquivalent:@""];
@@ -427,6 +437,54 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                keyEquivalent:@"q"];
     quitItem.target = self;
     [self.statusMenu addItem:quitItem];
+}
+
+- (NSString *)activeBreakMenuTitleForManager:(SCScheduleManager *)manager {
+    NSDate *endDate = manager.activeTimedBreakEndDate;
+    if (endDate == nil) return @"● Break active";
+
+    NSInteger totalSeconds = MAX(0, (NSInteger)ceil([endDate timeIntervalSinceNow]));
+    NSInteger minutes = totalSeconds / 60;
+    NSInteger seconds = totalSeconds % 60;
+    return [NSString stringWithFormat:@"● Break active · %ld:%02ld",
+        (long)minutes, (long)seconds];
+}
+
+- (void)updateActiveBreakStatusItem {
+    NSMenuItem *breakItem = self.activeBreakStatusItem;
+    if (breakItem == nil) return;
+
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (!manager.hasActiveTimedBreak) {
+        [self.breakCountdownTimer invalidate];
+        self.breakCountdownTimer = nil;
+        [self populateMenu:self.statusMenu];
+        return;
+    }
+
+    BOOL breakSuspendsEnforcement = !manager.protectedHoursActiveNow;
+    if (breakSuspendsEnforcement != self.breakStatusSuspendsEnforcement) {
+        [self populateMenu:self.statusMenu];
+        return;
+    }
+    if (!breakSuspendsEnforcement) return;
+
+    NSString *breakText = [self activeBreakMenuTitleForManager:manager];
+    NSMutableAttributedString *breakTitle =
+        [[NSMutableAttributedString alloc] initWithString:breakText];
+    [breakTitle addAttributes:@{
+        NSForegroundColorAttributeName: NSColor.systemGreenColor,
+        NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
+    } range:NSMakeRange(0, breakText.length)];
+    NSRange timerRange = [breakText rangeOfString:@"· " options:NSBackwardsSearch];
+    if (timerRange.location != NSNotFound) {
+        NSUInteger timerStart = NSMaxRange(timerRange);
+        [breakTitle addAttribute:NSFontAttributeName
+                          value:[NSFont monospacedDigitSystemFontOfSize:13.0
+                                                                 weight:NSFontWeightSemibold]
+                          range:NSMakeRange(timerStart, breakText.length - timerStart)];
+    }
+    breakItem.attributedTitle = breakTitle;
 }
 
 - (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager {
@@ -665,6 +723,11 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     if (!self.statusItem) return;
 
     self.statusItem.button.image = [self statusImage];
+    if (self.breakCountdownTimer != nil && self.statusMenu != nil) {
+        [self populateMenu:self.statusMenu];
+        [self refreshCountdownWarning];
+        return;
+    }
     [self rebuildMenu];
     self.statusItem.menu = self.statusMenu;
     [self refreshCountdownWarning];
@@ -719,7 +782,31 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     // Rebuild menu fresh when opened to ensure latest state
     [self populateMenu:menu];
     self.statusItem.menu = menu;
+    [self.breakCountdownTimer invalidate];
+    self.breakCountdownTimer = nil;
+    if (self.activeBreakStatusItem != nil) {
+        [self updateActiveBreakStatusItem];
+        self.breakCountdownTimer = [NSTimer timerWithTimeInterval:1.0
+                                                           target:self
+                                                         selector:@selector(breakCountdownTimerFired:)
+                                                         userInfo:nil
+                                                          repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.breakCountdownTimer
+                                  forMode:NSRunLoopCommonModes];
+    }
     [self refreshCountdownWarning];
+}
+
+- (void)menuDidClose:(NSMenu *)menu {
+    #pragma unused(menu)
+    [self.breakCountdownTimer invalidate];
+    self.breakCountdownTimer = nil;
+    self.activeBreakStatusItem = nil;
+}
+
+- (void)breakCountdownTimerFired:(NSTimer *)timer {
+    #pragma unused(timer)
+    [self updateActiveBreakStatusItem];
 }
 
 #pragma mark - Actions
