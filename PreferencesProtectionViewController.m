@@ -33,39 +33,35 @@
 }
 
 - (void)loadView {
-    NSView *rootView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 540)];
-
-    NSTextField *titleLabel = [NSTextField labelWithString:@"Protection"];
-    titleLabel.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
+    NSView *rootView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 440)];
 
     NSTextField *summaryLabel = [NSTextField wrappingLabelWithString:
         @"Choose how much flexibility a committed recurring schedule allows."];
     summaryLabel.textColor = NSColor.secondaryLabelColor;
-    summaryLabel.font = [NSFont systemFontOfSize:12];
+    summaryLabel.font = [NSFont systemFontOfSize:13];
 
     NSBox *creditsBox = [self breakCreditsBox];
     NSBox *emergencyWaitBox = [self emergencyWaitBox];
     NSBox *protectedHoursBox = [self protectedHoursBox];
 
     NSStackView *mainStack = [NSStackView stackViewWithViews:@[
-        titleLabel, summaryLabel, creditsBox, emergencyWaitBox, protectedHoursBox
+        summaryLabel, creditsBox, emergencyWaitBox, protectedHoursBox
     ]];
     mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     mainStack.alignment = NSLayoutAttributeLeading;
-    mainStack.spacing = 12;
+    mainStack.spacing = 14;
+    [mainStack setCustomSpacing:18 afterView:summaryLabel];
     mainStack.translatesAutoresizingMaskIntoConstraints = NO;
     [rootView addSubview:mainStack];
 
     [NSLayoutConstraint activateConstraints:@[
         [mainStack.leadingAnchor constraintEqualToAnchor:rootView.leadingAnchor constant:24],
         [mainStack.trailingAnchor constraintEqualToAnchor:rootView.trailingAnchor constant:-24],
-        [mainStack.topAnchor constraintEqualToAnchor:rootView.topAnchor constant:22],
+        [mainStack.topAnchor constraintEqualToAnchor:rootView.topAnchor constant:24],
+        [mainStack.bottomAnchor constraintLessThanOrEqualToAnchor:rootView.bottomAnchor constant:-24],
         [creditsBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
-        [creditsBox.heightAnchor constraintEqualToConstant:118],
         [emergencyWaitBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
-        [emergencyWaitBox.heightAnchor constraintEqualToConstant:104],
         [protectedHoursBox.widthAnchor constraintEqualToAnchor:mainStack.widthAnchor],
-        [protectedHoursBox.heightAnchor constraintEqualToConstant:188],
     ]];
 
     self.view = rootView;
@@ -74,10 +70,13 @@
 - (NSBox *)emergencyWaitBox {
     NSBox *box = [[NSBox alloc] initWithFrame:NSZeroRect];
     box.title = @"Emergency Unlock";
+    box.titleFont = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     box.boxType = NSBoxPrimary;
 
     NSTextField *waitLabel = [NSTextField labelWithString:@"Wait duration:"];
     waitLabel.font = [NSFont systemFontOfSize:13];
+    waitLabel.alignment = NSTextAlignmentRight;
+    [waitLabel.widthAnchor constraintEqualToConstant:104].active = YES;
 
     self.emergencyWaitField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.emergencyWaitField.alignment = NSTextAlignmentRight;
@@ -109,7 +108,7 @@
     waitRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     waitRow.alignment = NSLayoutAttributeCenterY;
     waitRow.spacing = 8;
-    [self.emergencyWaitField.widthAnchor constraintEqualToConstant:52].active = YES;
+    [self.emergencyWaitField.widthAnchor constraintEqualToConstant:56].active = YES;
 
     self.emergencyWaitConstraintLabel = [NSTextField wrappingLabelWithString:@""];
     self.emergencyWaitConstraintLabel.font = [NSFont systemFontOfSize:11];
@@ -125,10 +124,13 @@
 - (NSBox *)breakCreditsBox {
     NSBox *box = [[NSBox alloc] initWithFrame:NSZeroRect];
     box.title = @"Break Credits";
+    box.titleFont = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     box.boxType = NSBoxPrimary;
 
     NSTextField *allowanceLabel = [NSTextField labelWithString:@"Daily allowance:"];
     allowanceLabel.font = [NSFont systemFontOfSize:13];
+    allowanceLabel.alignment = NSTextAlignmentRight;
+    [allowanceLabel.widthAnchor constraintEqualToConstant:104].active = YES;
 
     self.creditsField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.creditsField.alignment = NSTextAlignmentRight;
@@ -157,7 +159,7 @@
     allowanceRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     allowanceRow.alignment = NSLayoutAttributeCenterY;
     allowanceRow.spacing = 8;
-    [self.creditsField.widthAnchor constraintEqualToConstant:52].active = YES;
+    [self.creditsField.widthAnchor constraintEqualToConstant:56].active = YES;
 
     self.remainingCreditsLabel = [NSTextField labelWithString:@""];
     self.remainingCreditsLabel.font = [NSFont monospacedDigitSystemFontOfSize:12
@@ -177,6 +179,7 @@
 - (NSBox *)protectedHoursBox {
     NSBox *box = [[NSBox alloc] initWithFrame:NSZeroRect];
     box.title = @"Protected Hours";
+    box.titleFont = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     box.boxType = NSBoxPrimary;
 
     self.protectedHoursToggle = [NSButton checkboxWithTitle:
@@ -222,14 +225,14 @@
 - (void)installContentStack:(NSStackView *)stack inBox:(NSBox *)box {
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 8;
+    stack.spacing = 7;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [box.contentView addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor constant:12],
-        [stack.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor constant:-12],
-        [stack.topAnchor constraintEqualToAnchor:box.contentView.topAnchor constant:10],
-        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:box.contentView.bottomAnchor constant:-10],
+        [stack.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor constant:-16],
+        [stack.topAnchor constraintEqualToAnchor:box.contentView.topAnchor constant:12],
+        [stack.bottomAnchor constraintEqualToAnchor:box.contentView.bottomAnchor constant:-12],
     ]];
 }
 

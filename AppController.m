@@ -541,8 +541,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
 		preferencesWindowController_ = [[MASPreferencesWindowController alloc] initWithViewControllers: @[generalViewController, protectionViewController, advancedViewController] title: title];
 
-        // Apply frosted glass styling to preferences window
-        [self applyFrostedGlassToPreferencesWindow];
+		[self applyPreferencesWindowStyle];
 	}
 	[preferencesWindowController_ showWindow: nil];
 }
@@ -1874,28 +1873,23 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [window invalidateShadow];
 }
 
-- (void)applyFrostedGlassToPreferencesWindow {
-    // MASPreferences windows need special handling because the content view changes
-    // when switching between preference panes. We apply to the window itself.
+- (void)applyPreferencesWindowStyle {
     NSWindow* prefsWindow = preferencesWindowController_.window;
     if (!prefsWindow) return;
+    NSSize contentSize = prefsWindow.contentView.bounds.size;
 
-    NSView* contentView = prefsWindow.contentView;
-
-    // Apply window styling for transparency
-    [SCUIUtilities applyFrostedGlassStyleToWindow:prefsWindow];
-
-    // Create frosted glass background view
-    NSVisualEffectView* frostedBackground = [SCUIUtilities createFrostedGlassViewWithFrame:contentView.bounds cornerRadius:12.0];
-    frostedBackground.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-
-    // Insert at the back so all other content appears on top
-    [contentView addSubview:frostedBackground positioned:NSWindowBelow relativeTo:nil];
-
-    // Make content view layer-backed for proper compositing
-    contentView.wantsLayer = YES;
-
-    // Force shadow recalculation
+    prefsWindow.styleMask &= ~NSWindowStyleMaskFullSizeContentView;
+    prefsWindow.titlebarAppearsTransparent = NO;
+    prefsWindow.titleVisibility = NSWindowTitleHidden;
+    prefsWindow.backgroundColor = NSColor.windowBackgroundColor;
+    prefsWindow.opaque = YES;
+    prefsWindow.hasShadow = YES;
+    if (@available(macOS 11.0, *)) {
+        prefsWindow.toolbarStyle = NSWindowToolbarStylePreference;
+    }
+    prefsWindow.toolbar.displayMode = NSToolbarDisplayModeIconAndLabel;
+    prefsWindow.toolbar.showsBaselineSeparator = YES;
+    [prefsWindow setContentSize:contentSize];
     [prefsWindow invalidateShadow];
 }
 
