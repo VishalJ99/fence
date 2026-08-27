@@ -1362,7 +1362,8 @@ static BOOL SCFileExistsAtPath(NSString *path) {
             domainListWindowController_.readOnlyNoticeColor = NSColor.systemGreenColor;
         } else {
             domainListWindowController_.readOnlyNoticeText =
-                @"Locked during the active commitment.";
+                @"Apps and websites currently being fenced";
+            domainListWindowController_.readOnlyNoticeColor = NSColor.systemRedColor;
         }
     } else {
         domainListWindowController_.displayEntries = nil;
