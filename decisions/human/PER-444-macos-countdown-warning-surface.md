@@ -2,7 +2,7 @@
 
 ## Status
 
-Pending human review.
+Approved by the user during product review on 2026-08-27.
 
 ## Context
 

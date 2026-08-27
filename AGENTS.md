@@ -55,5 +55,5 @@ Out of scope: hosted infrastructure configuration outside this repo (Railway, Cl
 - GUI smoke tests can be automated locally with `peekaboo` once the app is built and launchable.
 
 ## Decisions of record
-- Human decisions are recorded under `decisions/human/`; current records cover the Sentry-only diagnostic boundary, the PER-444 recurring-schedule and travel-timezone contracts, and the 3.4.12 GitHub Release asset trial.
+- Human decisions are recorded under `decisions/human/`; current records cover the Sentry-only diagnostic boundary, the PER-444 recurring-schedule, travel-timezone, and macOS countdown-surface contracts, and the 3.4.12 GitHub Release asset trial.
 - Treat `SYSTEM_ARCHITECTURE.md`, `SETUP.md`, and `BUILD_MACOS26.md` as supporting technical context rather than substitutes for those decision records.
