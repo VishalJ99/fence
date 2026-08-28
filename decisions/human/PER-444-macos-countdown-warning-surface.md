@@ -19,6 +19,14 @@ so the iOS Live Activity surface is not available locally on macOS.
 - Use only the copy `Break ending soon` or
   `<Bundle name(s)> blocking starting soon`; the ring is the countdown and no
   clock time or numeric countdown is shown.
+- When a new exact warning event first appears, play the built-in macOS `Ping`
+  sound once. Timer refreshes and recalculations for the same event must not
+  replay it.
+- Use the reviewed Strong entrance treatment: a short 12-point slide and
+  0.96-to-1 scale, two ring pulses, two subtle red full-pill highlights, and a
+  brief red border accent, then leave the surface static. With Reduce Motion
+  enabled, use no slide, scale, ring pulse, or border animation and show one
+  non-moving highlight instead.
 - Reveal an `x` dismiss control on hover. Dismissal is scoped to the exact event
   and never changes the break, schedule, or enforcement state.
 - Derive scheduled block starts from the recurring commitment's named timezone

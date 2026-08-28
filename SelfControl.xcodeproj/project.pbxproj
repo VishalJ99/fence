@@ -86,6 +86,7 @@
 		2283551F2EFB7C6300E77469 /* SCWeekGridView.m in Sources */ = {isa = PBXBuildFile; fileRef = 2283551E2EFB7C6300E77469 /* SCWeekGridView.m */; };
 		228355262EFB7C8100E77469 /* SCMenuBarController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355252EFB7C8100E77469 /* SCMenuBarController.m */; };
 		C90D00000000000000000003 /* SCCountdownWarningController.m in Sources */ = {isa = PBXBuildFile; fileRef = C90D00000000000000000002 /* SCCountdownWarningController.m */; };
+		C90D00000000000000000004 /* SCCountdownWarningController.m in Sources */ = {isa = PBXBuildFile; fileRef = C90D00000000000000000002 /* SCCountdownWarningController.m */; };
 		228355272EFB7C8100E77469 /* SCBundleEditorController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355212EFB7C8100E77469 /* SCBundleEditorController.m */; };
 		228355282EFB7C8100E77469 /* SCDayScheduleEditorController.m in Sources */ = {isa = PBXBuildFile; fileRef = 228355232EFB7C8100E77469 /* SCDayScheduleEditorController.m */; };
 		22AE30892F056A6D00B0FDE8 /* SCCalendarGridView.m in Sources */ = {isa = PBXBuildFile; fileRef = 22AE30882F056A6D00B0FDE8 /* SCCalendarGridView.m */; };
@@ -4113,6 +4114,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C90D00000000000000000004 /* SCCountdownWarningController.m in Sources */,
 				C44400000000000000000001 /* SCBundleEditorController.m in Sources */,
 				B44400000000000000000009 /* SCTravelTimezoneManagerTests.m in Sources */,
 				B44400000000000000000004 /* SCTravelTimezoneManager.m in Sources */,

@@ -4,11 +4,15 @@
 //
 
 #import "SCCountdownWarningController.h"
+#import <QuartzCore/QuartzCore.h>
 
 static const NSTimeInterval SCCountdownWarningDuration = 90.0;
 static const CGFloat SCCountdownPillHeight = 52.0;
-static const CGFloat SCCountdownPillMinimumWidth = 250.0;
+static const CGFloat SCCountdownPillMinimumWidth = 200.0;
 static const CGFloat SCCountdownPillMaximumWidth = 520.0;
+static const CGFloat SCCountdownPillMeasuredWidthPadding = 96.0;
+static const CGFloat SCCountdownEntranceOffset = 12.0;
+static const NSTimeInterval SCCountdownEntranceDuration = 0.30;
 
 @interface SCCountdownRingView : NSView
 @property (nonatomic, assign) CGFloat progress;
@@ -34,7 +38,7 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
 
     NSBezierPath *track = [NSBezierPath bezierPathWithOvalInRect:ringRect];
     track.lineWidth = 3.0;
-    [[NSColor secondaryLabelColor] colorWithAlphaComponent:0.28].setStroke;
+    [[[NSColor secondaryLabelColor] colorWithAlphaComponent:0.28] setStroke];
     [track stroke];
 
     if (self.progress <= 0.0) return;
@@ -46,7 +50,7 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
                                       startAngle:90.0
                                         endAngle:90.0 - (360.0 * self.progress)
                                        clockwise:YES];
-    [NSColor systemRedColor].setStroke;
+    [[NSColor systemRedColor] setStroke];
     [remaining stroke];
 }
 
@@ -58,6 +62,7 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
 @property (nonatomic, strong) SCCountdownRingView *ringView;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSButton *dismissButton;
+@property (nonatomic, strong) NSView *attentionTintView;
 @property (nonatomic, copy, nullable) void (^onDismiss)(void);
 
 @end
@@ -79,7 +84,15 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
         self.layer.borderWidth = 0.5;
         self.layer.borderColor = [NSColor separatorColor].CGColor;
 
+        _attentionTintView = [[NSView alloc] initWithFrame:NSZeroRect];
+        _attentionTintView.wantsLayer = YES;
+        _attentionTintView.layer.cornerRadius = 18.0;
+        _attentionTintView.layer.backgroundColor = [NSColor systemRedColor].CGColor;
+        _attentionTintView.layer.opacity = 0.0;
+        [self addSubview:_attentionTintView];
+
         _ringView = [[SCCountdownRingView alloc] initWithFrame:NSZeroRect];
+        _ringView.wantsLayer = YES;
         _ringView.accessibilityElement = YES;
         _ringView.accessibilityRole = NSAccessibilityProgressIndicatorRole;
         _ringView.accessibilityLabel = @"Time remaining";
@@ -110,9 +123,10 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
 
 - (void)layout {
     [super layout];
+    self.attentionTintView.frame = self.bounds;
     self.ringView.frame = NSMakeRect(14.0, 13.0, 26.0, 26.0);
     self.dismissButton.frame = NSMakeRect(NSWidth(self.bounds) - 46.0, 6.0, 40.0, 40.0);
-    self.titleLabel.frame = NSMakeRect(50.0, 16.0, NSWidth(self.bounds) - 100.0, 20.0);
+    self.titleLabel.frame = NSMakeRect(50.0, 16.0, NSWidth(self.bounds) - 96.0, 20.0);
 }
 
 - (void)updateTrackingAreas {
@@ -143,6 +157,45 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     if (self.onDismiss != nil) self.onDismiss();
 }
 
+- (void)animateStrongAttentionRespectingReduceMotion:(BOOL)reduceMotion {
+    [self.ringView.layer removeAnimationForKey:@"attentionPulse"];
+    [self.attentionTintView.layer removeAnimationForKey:@"attentionFlash"];
+    [self.layer removeAnimationForKey:@"attentionBorder"];
+    self.attentionTintView.layer.opacity = 0.0;
+
+    if (!reduceMotion) {
+        CAKeyframeAnimation *ringPulse = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        ringPulse.values = @[@1.0, @1.22, @1.0, @1.22, @1.0];
+        ringPulse.keyTimes = @[@0.0, @0.21, @0.42, @0.69, @1.0];
+        ringPulse.duration = 0.96;
+        ringPulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.ringView.layer addAnimation:ringPulse forKey:@"attentionPulse"];
+    }
+
+    CAKeyframeAnimation *flash = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+    if (reduceMotion) {
+        flash.values = @[@0.0, @0.16, @0.0];
+        flash.keyTimes = @[@0.0, @0.45, @1.0];
+        flash.duration = 0.45;
+    } else {
+        flash.values = @[@0.0, @0.18, @0.0, @0.18, @0.0];
+        flash.keyTimes = @[@0.0, @0.18, @0.42, @0.66, @1.0];
+        flash.duration = 1.05;
+    }
+    flash.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.attentionTintView.layer addAnimation:flash forKey:@"attentionFlash"];
+
+    if (!reduceMotion) {
+        CAKeyframeAnimation *border = [CAKeyframeAnimation animationWithKeyPath:@"borderColor"];
+        border.values = @[(id)[NSColor separatorColor].CGColor,
+                          (id)[[NSColor systemRedColor] colorWithAlphaComponent:0.9].CGColor,
+                          (id)[NSColor separatorColor].CGColor];
+        border.keyTimes = @[@0.0, @0.35, @1.0];
+        border.duration = 0.80;
+        [self.layer addAnimation:border forKey:@"attentionBorder"];
+    }
+}
+
 @end
 
 
@@ -152,8 +205,11 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
 @property (nonatomic, strong) SCCountdownPillView *pillView;
 @property (nonatomic, strong, nullable) NSTimer *timer;
 @property (nonatomic, copy, nullable) NSString *eventIdentifier;
+@property (nonatomic, copy, nullable) NSString *lastAnnouncedEventIdentifier;
 @property (nonatomic, strong, nullable) NSDate *targetDate;
 @property (nonatomic, strong, nullable) NSScreen *preferredScreen;
+
+- (BOOL)consumeAttentionForEventIdentifier:(NSString *)eventIdentifier;
 
 @end
 
@@ -212,7 +268,6 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     }
 
     NSString *expectedEventIdentifier = [eventIdentifier copy];
-    BOOL isNewEvent = ![self.eventIdentifier isEqualToString:expectedEventIdentifier];
     self.eventIdentifier = expectedEventIdentifier;
     self.targetDate = targetDate;
     self.preferredScreen = screen;
@@ -222,25 +277,51 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     NSDictionary *attributes = @{NSFontAttributeName: self.pillView.titleLabel.font};
     CGFloat measuredWidth = ceil([title sizeWithAttributes:attributes].width);
     CGFloat panelWidth = MAX(SCCountdownPillMinimumWidth,
-                             MIN(SCCountdownPillMaximumWidth, measuredWidth + 108.0));
+                             MIN(SCCountdownPillMaximumWidth,
+                                 measuredWidth + SCCountdownPillMeasuredWidthPadding));
     [self.panel setContentSize:NSMakeSize(panelWidth, SCCountdownPillHeight)];
     self.pillView.frame = NSMakeRect(0, 0, panelWidth, SCCountdownPillHeight);
     [self positionPanel];
 
     [self updateCountdown:nil];
     if (![self.eventIdentifier isEqualToString:expectedEventIdentifier]) return;
+    BOOL isNewEvent = [self consumeAttentionForEventIdentifier:expectedEventIdentifier];
+    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
     if (!self.panel.isVisible) {
-        BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-        self.panel.alphaValue = reduceMotion ? 1.0 : 0.0;
-        [self.panel orderFrontRegardless];
-        if (!reduceMotion) {
+        if (isNewEvent && !reduceMotion) {
+            NSPoint finalOrigin = self.panel.frame.origin;
+            [self.panel setFrameOrigin:NSMakePoint(finalOrigin.x,
+                                                   finalOrigin.y + SCCountdownEntranceOffset)];
+            self.panel.alphaValue = 0.0;
+            [self.panel orderFrontRegardless];
+
+            CABasicAnimation *scale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+            scale.fromValue = @0.96;
+            scale.toValue = @1.0;
+            scale.duration = SCCountdownEntranceDuration;
+            scale.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.0 :0.0 :1.0];
+            [self.pillView.layer addAnimation:scale forKey:@"entranceScale"];
+
             [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-                context.duration = 0.16;
+                context.duration = SCCountdownEntranceDuration;
+                context.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.0 :0.0 :1.0];
                 self.panel.animator.alphaValue = 1.0;
+                [self.panel.animator setFrameOrigin:finalOrigin];
             } completionHandler:nil];
+        } else {
+            self.panel.alphaValue = reduceMotion ? 1.0 : 0.0;
+            [self.panel orderFrontRegardless];
+            if (!reduceMotion) {
+                [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                    context.duration = 0.16;
+                    self.panel.animator.alphaValue = 1.0;
+                } completionHandler:nil];
+            }
         }
     }
     if (isNewEvent) {
+        [self.pillView animateStrongAttentionRespectingReduceMotion:reduceMotion];
+        [[NSSound soundNamed:@"Ping"] play];
         NSAccessibilityPostNotificationWithUserInfo(
             NSApp,
             NSAccessibilityAnnouncementRequestedNotification,
@@ -258,6 +339,15 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     }
 }
 
+- (BOOL)consumeAttentionForEventIdentifier:(NSString *)eventIdentifier {
+    if (eventIdentifier.length == 0 ||
+        [self.lastAnnouncedEventIdentifier isEqualToString:eventIdentifier]) {
+        return NO;
+    }
+    self.lastAnnouncedEventIdentifier = [eventIdentifier copy];
+    return YES;
+}
+
 - (void)positionPanel {
     NSScreen *screen = self.preferredScreen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     if (screen == nil) return;
@@ -267,7 +357,7 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     CGFloat safeTop = NSMaxY(screenFrame) - screen.safeAreaInsets.top;
     CGFloat usableTop = MIN(NSMaxY(visibleFrame), safeTop);
     frame.origin.x = round(NSMidX(screenFrame) - NSWidth(frame) / 2.0);
-    frame.origin.y = round(usableTop - NSHeight(frame) - 8.0);
+    frame.origin.y = round(usableTop - NSHeight(frame) - SCCountdownEntranceOffset);
     [self.panel setFrame:frame display:NO];
 }
 
@@ -297,6 +387,10 @@ static const CGFloat SCCountdownPillMaximumWidth = 520.0;
     self.targetDate = nil;
     self.eventIdentifier = nil;
     self.pillView.dismissButton.hidden = YES;
+    [self.pillView.ringView.layer removeAnimationForKey:@"attentionPulse"];
+    [self.pillView.attentionTintView.layer removeAnimationForKey:@"attentionFlash"];
+    [self.pillView.layer removeAnimationForKey:@"attentionBorder"];
+    [self.pillView.layer removeAnimationForKey:@"entranceScale"];
     [self.panel orderOut:nil];
 }
 

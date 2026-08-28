@@ -23,6 +23,7 @@
 #import "SCLogger.h"
 #import "SCCalendarGridView.h"
 #import "SCBundleEditorController.h"
+#import "SCCountdownWarningController.h"
 #import <Sentry/Sentry.h>
 #import <Sentry/Sentry-Swift.h>
 #import <zlib.h>
@@ -55,6 +56,10 @@
 
 @interface SCBundleEditorController (CommittedStateTests)
 - (void)updateButtonStatesForCommittedState;
+@end
+
+@interface SCCountdownWarningController (AttentionReplayTests)
+- (BOOL)consumeAttentionForEventIdentifier:(NSString *)eventIdentifier;
 @end
 
 @interface SCLogger (DiagnosticTelemetryTests)
@@ -3227,6 +3232,16 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertFalse([[dictionary description] containsString:@"bundle_id"]);
     XCTAssertFalse([[dictionary description] containsString:@"path"]);
     XCTAssertFalse([[dictionary description] containsString:@"canary.invalid"]);
+}
+
+- (void)testCountdownWarningAttentionIsConsumedOncePerExactEventAcrossHide {
+    SCCountdownWarningController *controller = [[SCCountdownWarningController alloc] init];
+
+    XCTAssertFalse([controller consumeAttentionForEventIdentifier:@""]);
+    XCTAssertTrue([controller consumeAttentionForEventIdentifier:@"generation-break-123"]);
+    [controller hideWarning];
+    XCTAssertFalse([controller consumeAttentionForEventIdentifier:@"generation-break-123"]);
+    XCTAssertTrue([controller consumeAttentionForEventIdentifier:@"generation-block-456"]);
 }
 
 - (void)testHostFileBlockerReportsExactDiskVerificationFailure {
