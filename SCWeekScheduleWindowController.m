@@ -118,6 +118,7 @@ static BOOL const kUseCalendarUI = YES;
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @property (nonatomic, assign) NSUInteger refreshTickCount;
 @property (nonatomic, assign) NSInteger renderedCalendarDayKey;
+@property (nonatomic, assign) BOOL statusShowsActiveTimedBreak;
 
 // Prevent the migration choice sheet from being presented more than once at a time.
 @property (nonatomic, assign) BOOL migrationChoiceAlertPresented;
@@ -496,6 +497,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)refreshTimerFired:(NSTimer *)timer {
     self.refreshTickCount++;
     [self updateCommitmentUI];
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
     NSCalendar *displayCalendar = [NSCalendar currentCalendar];
     if (self.calendarGridView.displayTimeZone != nil) {
         displayCalendar.timeZone = self.calendarGridView.displayTimeZone;
@@ -509,7 +511,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         [self reloadData];
         return;
     }
-    if (self.refreshTickCount % 300 == 0) {
+    if (manager.hasActiveTimedBreak || self.statusShowsActiveTimedBreak ||
+        self.refreshTickCount % 300 == 0) {
         [self updateStatusLabel];
     }
     [self.calendarGridView setNeedsDisplay:YES];
@@ -698,8 +701,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     }
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    BOOL hasActiveTimedBreak = manager.hasActiveTimedBreak;
+    self.statusShowsActiveTimedBreak = hasActiveTimedBreak;
 
-    if (manager.hasActiveTimedBreak) {
+    if (hasActiveTimedBreak) {
         NSInteger remainingSeconds = (NSInteger)ceil(MAX(
             0, [manager.activeTimedBreakEndDate timeIntervalSinceNow]));
         NSString *message = manager.protectedHoursActiveNow
@@ -710,7 +715,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
                 @"Break active — scheduled blocking resumes in %ld:%02ld.",
                 (long)(remainingSeconds / 60), (long)(remainingSeconds % 60)];
         NSTextField *breakLabel = [NSTextField labelWithString:message];
-        breakLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+        breakLabel.font = [NSFont monospacedDigitSystemFontOfSize:12
+                                                          weight:NSFontWeightMedium];
         breakLabel.textColor = manager.protectedHoursActiveNow
             ? NSColor.systemOrangeColor : NSColor.systemGreenColor;
         [self.statusStackView addArrangedSubview:breakLabel];
@@ -844,12 +850,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         self.breakButton.title = @"Updating Break…";
         self.breakButton.enabled = NO;
     } else if (manager.hasActiveTimedBreak) {
-        NSTimeInterval remaining = MAX(0, [manager.activeTimedBreakEndDate timeIntervalSinceNow]);
-        NSInteger remainingSeconds = (NSInteger)ceil(remaining);
         NSString *breakAction = manager.protectedHoursActiveNow ? @"End Paused Break" : @"End Break";
-        self.breakButton.title = [NSString stringWithFormat:@"%@ · %ld:%02ld", breakAction,
-                                  (long)(remainingSeconds / 60),
-                                  (long)(remainingSeconds % 60)];
+        self.breakButton.title = breakAction;
         self.breakButton.enabled = YES;
     } else {
         self.breakButton.title = [NSString stringWithFormat:@"Take Break (%ld)", (long)breakCredits];
