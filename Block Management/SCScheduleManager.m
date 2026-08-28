@@ -3174,9 +3174,11 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)setBreakCreditsPerDay:(NSInteger)allowance {
+    BOOL canStrictify = self.canMakeProtectionSettingsStricter;
+    if (!self.canEditProtectionSettings && !canStrictify) return;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSInteger resolved = SCResolveBreakCreditAllowanceUpdate(
-        allowance, self.breakCreditsPerDay, !self.canEditProtectionSettings);
+        allowance, self.breakCreditsPerDay, canStrictify);
     if (resolved == self.breakCreditsPerDay) return;
     [defaults setInteger:resolved forKey:kBreakCreditsPerDayKey];
     NSInteger remaining = MIN(self.breakCreditsRemainingToday, resolved);
@@ -3192,8 +3194,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)setEmergencyUnlockWaitMinutes:(NSInteger)minutes {
-    if (!self.canEditProtectionSettings) return;
-    NSInteger resolved = SCClampEmergencyWaitMinutes(minutes);
+    BOOL canStrictify = self.canMakeProtectionSettingsStricter;
+    if (!self.canEditProtectionSettings && !canStrictify) return;
+    NSInteger resolved = SCResolveEmergencyWaitUpdate(
+        minutes, self.emergencyUnlockWaitMinutes, canStrictify);
     if (resolved == self.emergencyUnlockWaitMinutes) return;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setInteger:resolved forKey:kEmergencyUnlockWaitMinutesKey];
@@ -3203,6 +3207,10 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
 - (BOOL)canEditProtectionSettings {
     return !self.hasRecurringCommitment && !self.hasUnexpiredLegacyCommitment;
+}
+
+- (BOOL)canMakeProtectionSettingsStricter {
+    return self.hasRecurringCommitment && !self.hasUnexpiredLegacyCommitment;
 }
 
 - (BOOL)protectedHoursEnabled {
@@ -3234,7 +3242,7 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (BOOL)canEditProtectedHours {
-    return self.canEditProtectionSettings;
+    return self.canEditProtectionSettings || self.canMakeProtectionSettingsStricter;
 }
 
 - (void)saveProtectedHoursEnabled:(BOOL)enabled
@@ -3266,6 +3274,44 @@ static NSError *SCScheduleCommitError(NSInteger code,
             @"Protection settings are locked until the current commitment ends.", YES));
         return;
     }
+
+    SCProtectedHoursRange currentRange = SCNormalizeProtectedHoursRange(
+        self.protectedHoursStartMinute, self.protectedHoursEndMinute);
+    if (!SCProtectedHoursUpdateIsNoWeaker(self.protectedHoursEnabled, currentRange,
+                                          enabled, range)) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(45, @"protected_hours",
+            @"Protected Hours can only be enabled or expanded during a commitment.", YES));
+        return;
+    }
+
+    NSDictionary<NSString *, id> *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil) {
+        if (completion != nil) completion(NO, SCScheduleCommitError(32, @"protected_hours",
+            @"Fence could not verify the active recurring commitment.", NO));
+        return;
+    }
+    NSDictionary<NSString *, id> *protectedHours = @{
+        @"enabled": @(enabled),
+        @"startMinute": @(range.startMinute),
+        @"endMinute": @(range.endMinute),
+    };
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc updateProtectedHoursForRecurringCommitmentID:commitment[@"commitmentID"]
+                                            generation:commitment[@"generation"]
+                                        protectedHours:protectedHours
+                                                 reply:^(NSDictionary<NSString *,id> *result,
+                                                         NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL persisted = [result[@"store_persisted"] boolValue] &&
+                [result[@"post_write_match"] boolValue];
+            if (persisted) {
+                [self saveProtectedHoursEnabled:enabled
+                                    startMinute:range.startMinute
+                                      endMinute:range.endMinute];
+            }
+            if (completion != nil) completion(persisted, error);
+        });
+    }];
 }
 
 - (BOOL)hasActiveTimedBreak {

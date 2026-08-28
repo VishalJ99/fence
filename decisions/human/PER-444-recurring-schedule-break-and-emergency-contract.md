@@ -8,8 +8,9 @@ Fence for macOS adopts the following Fence iOS product contract:
 2. A commitment starts with a one-to-seven-day lock. When that deadline expires, recurring enforcement continues until the user explicitly ends the commitment. While the commitment remains active, the user may extend its lock deadline by one to seven days, up to a maximum remaining lock horizon of 14 days.
 3. Regular breaks cost one daily break credit and last 5, 15, or 30 minutes. Ending a break early does not refund the credit.
 4. Protected Hours are a recurring local-wall-time interval. They prevent new breaks, temporarily override an active break, and prevent the free ending of an expired commitment.
-5. Protection settings, including the daily break allowance, Protected Hours, and emergency-unlock wait duration, are editable only when no commitment is active. They remain locked after the commitment deadline expires and become editable only after explicit End.
-6. The first migration retains the existing macOS allow-window bundle semantics and read-only committed calendar. Block-window bundles, strength-only active editing, IDK breaks, and Live Activity equivalents are follow-up work.
+5. While a recurring commitment survives, Protection settings may only become stricter: the daily break allowance may decrease, the emergency-unlock wait may increase, and Protected Hours may be enabled or expanded. The reverse changes become editable only after explicit End. Legacy finite commitments retain their existing full lock.
+6. Protected Hours expansion means that every previously protected local wall-clock minute remains protected. This set-inclusion rule applies equally to same-day and overnight ranges and is enforced against the current root-owned commitment before mutation.
+7. The first migration retains the existing macOS allow-window bundle semantics and read-only committed calendar. Block-window bundles, IDK breaks, and Live Activity equivalents are follow-up work.
 
 ## Emergency exit
 
@@ -36,7 +37,7 @@ Existing live V1 and V2 absolute commitments are not rewritten. Identical legacy
 - A timed break pauses only schedule-owned enforcement; manual and test blocks remain untouched.
 - An unexpired break can resume after Protected Hours finish, matching Fence iOS.
 - Emergency exit requires continuous foreground attention but remains recoverable without permanently weakening the commitment.
-- Protection settings remain immutable for the entire active commitment, including after its End-eligibility deadline.
+- Protection settings can only become stricter for the entire active recurring commitment, including after its End-eligibility deadline.
 
 ## Rollback
 

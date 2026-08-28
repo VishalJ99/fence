@@ -877,9 +877,9 @@ static BOOL SCFileExistsAtPath(NSString *path) {
                                          capabilities:capabilities
                         supportsLegacyRecurringRuntimeWithReason:&legacyReason];
             if (legacyRecurringRuntime) {
-                // Protocol 6 already owns and enforces the 3.4.12 recurring
-                // state. Keep it running until Commit, Extend, or explicit
-                // Repair gives us a user-initiated authorization context.
+                // A protocol 6-8 helper already owns and enforces the recurring
+                // state. Keep it running until a protected user action gives us
+                // an explicit authorization context for the upgrade.
                 NSLog(@"AppController: Retaining legacy recurring daemon until a protected user action (protocol=%ld)",
                       (long)protocolVersion);
                 [self synchronizeTelemetryConsentAndDrain];

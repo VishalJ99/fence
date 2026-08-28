@@ -162,6 +162,9 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 @property (nonatomic, readonly) NSInteger breakCreditsRemainingToday;
 @property (nonatomic, readonly) NSInteger emergencyUnlockWaitMinutes;
 @property (nonatomic, readonly) BOOL canEditProtectionSettings;
+/// Active recurring commitments may keep only monotonic stricter changes.
+/// Legacy finite commitments remain fully locked.
+@property (nonatomic, readonly) BOOL canMakeProtectionSettingsStricter;
 - (void)setBreakCreditsPerDay:(NSInteger)allowance;
 - (void)setEmergencyUnlockWaitMinutes:(NSInteger)minutes;
 - (void)reconcileBreakCreditsForDate:(NSDate *)date forceReset:(BOOL)forceReset;

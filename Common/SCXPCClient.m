@@ -476,7 +476,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
     SCXPCDaemonUpgradeWaiter waiter = ^(NSError *error, BOOL upgradeAttempted) {
         if (upgradeAttempted) {
             // Every caller may still hold its own connection to the legacy
-            // helper. Discard it before Commit, Extend, or Repair continues.
+            // helper. Discard it before the protected user action continues.
             [self forceDisconnect];
         }
         completion(error);
@@ -513,7 +513,7 @@ static NSInteger SCXPCSafeTelemetryErrorCode(NSInteger errorCode) {
         }
 
         // Authorization UI must be initiated from the main thread. This path
-        // is called only after an explicit Commit, Extend, or Repair action.
+        // is called only after an explicit action that needs the current helper.
         dispatch_async(dispatch_get_main_queue(), ^{
             [self installDaemonPreservingExistingDaemon:^(NSError *installError) {
                 if (installError != nil) {
@@ -780,7 +780,7 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
                    capabilities:(NSArray<NSString*>*)capabilities
 supportsRecurringSchedulesWithReason:(NSString**)reason {
-    if (protocolVersion < SCDaemonProtocolVersionTrustedTravelTimeZone) {
+    if (protocolVersion < SCDaemonProtocolVersionProtectedHoursStrictification) {
         if (reason != NULL) *reason = @"recurring-scheduler-protocol-too-old";
         return NO;
     }
@@ -808,6 +808,10 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
     if (![self isDaemonProtocolVersion:protocolVersion
                            capabilities:capabilities
           supportsTrustedTravelTimeZoneWithReason:reason]) return NO;
+    if (![capabilities containsObject:SCDaemonCapabilityProtectedHoursStrictification]) {
+        if (reason != NULL) *reason = @"protected-hours-strictification-missing";
+        return NO;
+    }
     if (reason != NULL) *reason = @"compatible";
     return YES;
 }
@@ -1297,14 +1301,17 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                            generation:(NSString *)generation
                                        protectedHours:(NSDictionary<NSString *,id> *)protectedHours
                                                 reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
-    [self connectAndExecuteCommandBlock:^(NSError *error) {
-        if (error != nil) { reply(@{}, error); return; }
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-            reply(@{}, proxyError);
-        }] updateProtectedHoursForRecurringCommitmentID:commitmentID
-                                              generation:generation
-                                          protectedHours:protectedHours
-                                                   reply:reply];
+    [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        if (daemonError != nil) { reply(@{}, daemonError); return; }
+        [self connectAndExecuteCommandBlock:^(NSError *error) {
+            if (error != nil) { reply(@{}, error); return; }
+            [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                reply(@{}, proxyError);
+            }] updateProtectedHoursForRecurringCommitmentID:commitmentID
+                                                  generation:generation
+                                              protectedHours:protectedHours
+                                                       reply:reply];
+        }];
     }];
 }
 

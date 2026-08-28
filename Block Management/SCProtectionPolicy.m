@@ -25,11 +25,19 @@ NSInteger SCResolveBreakCreditAllowanceUpdate(NSInteger requestedAllowance,
                                                 BOOL hasSurvivingCommitment) {
     NSInteger requested = SCClampBreakCreditAllowance(requestedAllowance);
     NSInteger current = SCClampBreakCreditAllowance(currentAllowance);
-    return hasSurvivingCommitment ? current : requested;
+    return hasSurvivingCommitment ? MIN(requested, current) : requested;
 }
 
 NSInteger SCClampEmergencyWaitMinutes(NSInteger minutes) {
     return MIN(MAX(minutes, SCEmergencyWaitMinimumMinutes), SCEmergencyWaitMaximumMinutes);
+}
+
+NSInteger SCResolveEmergencyWaitUpdate(NSInteger requestedMinutes,
+                                       NSInteger currentMinutes,
+                                       BOOL hasSurvivingCommitment) {
+    NSInteger requested = SCClampEmergencyWaitMinutes(requestedMinutes);
+    NSInteger current = SCClampEmergencyWaitMinutes(currentMinutes);
+    return hasSurvivingCommitment ? MAX(requested, current) : requested;
 }
 
 NSInteger SCReconcileBreakCredits(NSInteger allowance,
@@ -110,6 +118,23 @@ BOOL SCProtectedHoursAreActive(BOOL enabled,
     range = SCNormalizeProtectedHoursRange(range.startMinute, range.endMinute);
     return SCProtectedHoursRangeContainsMinute(
         SCProtectedHoursMinuteOfDay(date, calendar), range.startMinute, range.endMinute);
+}
+
+BOOL SCProtectedHoursUpdateIsNoWeaker(BOOL currentEnabled,
+                                      SCProtectedHoursRange currentRange,
+                                      BOOL proposedEnabled,
+                                      SCProtectedHoursRange proposedRange) {
+    if (!currentEnabled) return YES;
+    if (!proposedEnabled) return NO;
+    for (NSInteger minute = 0; minute < SCProtectedHoursMinutesPerDay; minute++) {
+        if (SCProtectedHoursRangeContainsMinute(minute, currentRange.startMinute,
+                                                currentRange.endMinute) &&
+            !SCProtectedHoursRangeContainsMinute(minute, proposedRange.startMinute,
+                                                 proposedRange.endMinute)) {
+            return NO;
+        }
+    }
+    return YES;
 }
 
 BOOL SCProtectedHoursEditLockIsActive(BOOL enabled,

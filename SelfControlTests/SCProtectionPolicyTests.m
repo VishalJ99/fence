@@ -39,11 +39,12 @@
     XCTAssertEqual(SCClampBreakCreditAllowance(11), 10);
 }
 
-- (void)testBreakAllowanceIsFrozenDuringSurvivingCommitment {
+- (void)testBreakAllowanceCanOnlyDecreaseDuringSurvivingCommitment {
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(7, 3, NO), 7);
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(7, 3, YES), 3);
-    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(2, 3, YES), 3);
-    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(-5, 3, YES), 3);
+    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(3, 3, YES), 3);
+    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(2, 3, YES), 2);
+    XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(-5, 3, YES), 0);
     XCTAssertEqual(SCResolveBreakCreditAllowanceUpdate(20, 20, YES), 10);
 }
 
@@ -51,6 +52,14 @@
     XCTAssertEqual(SCClampEmergencyWaitMinutes(0), 1);
     XCTAssertEqual(SCClampEmergencyWaitMinutes(3), 3);
     XCTAssertEqual(SCClampEmergencyWaitMinutes(11), 10);
+}
+
+- (void)testEmergencyWaitCanOnlyIncreaseDuringSurvivingCommitment {
+    XCTAssertEqual(SCResolveEmergencyWaitUpdate(2, 3, NO), 2);
+    XCTAssertEqual(SCResolveEmergencyWaitUpdate(2, 3, YES), 3);
+    XCTAssertEqual(SCResolveEmergencyWaitUpdate(3, 3, YES), 3);
+    XCTAssertEqual(SCResolveEmergencyWaitUpdate(7, 3, YES), 7);
+    XCTAssertEqual(SCResolveEmergencyWaitUpdate(20, 3, YES), 10);
 }
 
 - (void)testSameLocalDayPreservesSpentCreditsAndClampsOnlyToReducedAllowance {
@@ -151,6 +160,37 @@
         [self dateInCalendar:calendar day:2 hour:5 minute:0], calendar));
     XCTAssertFalse(SCProtectedHoursAreActive(YES, range,
         [self dateInCalendar:calendar day:2 hour:12 minute:0], calendar));
+}
+
+- (void)testProtectedHoursStrengthOnlyUpdatesHandleDisabledAndSameDayRanges {
+    SCProtectedHoursRange oldRange = SCNormalizeProtectedHoursRange(9 * 60, 17 * 60);
+    SCProtectedHoursRange widerRange = SCNormalizeProtectedHoursRange(8 * 60, 18 * 60);
+    SCProtectedHoursRange narrowerRange = SCNormalizeProtectedHoursRange(10 * 60, 16 * 60);
+
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(NO, oldRange, NO, narrowerRange));
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(NO, oldRange, YES, narrowerRange));
+    XCTAssertFalse(SCProtectedHoursUpdateIsNoWeaker(YES, oldRange, NO, widerRange));
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(YES, oldRange, YES, oldRange));
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(YES, oldRange, YES, widerRange));
+    XCTAssertFalse(SCProtectedHoursUpdateIsNoWeaker(YES, oldRange, YES, narrowerRange));
+}
+
+- (void)testProtectedHoursStrengthOnlyUpdatesHandleOvernightRanges {
+    SCProtectedHoursRange overnight = SCNormalizeProtectedHoursRange(23 * 60, 5 * 60);
+    SCProtectedHoursRange wider = SCNormalizeProtectedHoursRange(22 * 60, 6 * 60);
+    SCProtectedHoursRange losesLateEvening = SCNormalizeProtectedHoursRange(0, 6 * 60);
+    SCProtectedHoursRange nearAllDay = SCNormalizeProtectedHoursRange(6 * 60, 5 * 60 + 45);
+
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(YES, overnight, YES, wider));
+    XCTAssertFalse(SCProtectedHoursUpdateIsNoWeaker(YES, overnight, YES, losesLateEvening));
+    XCTAssertTrue(SCProtectedHoursUpdateIsNoWeaker(YES, overnight, YES, nearAllDay));
+
+    SCProtectedHoursRange losesOneMinuteAtEachEnd = {
+        .startMinute = 23 * 60 + 1,
+        .endMinute = 5 * 60 - 1,
+    };
+    XCTAssertFalse(SCProtectedHoursUpdateIsNoWeaker(
+        YES, overnight, YES, losesOneMinuteAtEachEnd));
 }
 
 - (void)testProtectedEditLockStartsTwoHoursBeforeAndEndsAtProtectedEnd {

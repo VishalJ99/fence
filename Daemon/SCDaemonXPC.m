@@ -17,6 +17,7 @@
 #import "PacketFilter.h"
 #import "HostFileBlockerSet.h"
 #import "SCBlockUtilities.h"
+#import "SCProtectionPolicy.h"
 #include <pwd.h>
 #include <math.h>
 #include <errno.h>
@@ -694,6 +695,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityRecurringCommitmentExtend,
               SCDaemonCapabilityRecurringTimeZone,
               SCDaemonCapabilityTrustedTravelTimeZone,
+              SCDaemonCapabilityProtectedHoursStrictification,
           ]);
 }
 
@@ -1995,6 +1997,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                        protectedHours:(NSDictionary<NSString *,id> *)protectedHours
                                                 reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     NSMutableDictionary *result = [@{@"outcome": @"failed", @"store_persisted": @NO,
+                                      @"post_write_match": @NO,
                                       @"reconcile_succeeded": @NO} mutableCopy];
     NSDictionary *validatedHours = SCDaemonValidatedProtectedHours(protectedHours);
     if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) ||
@@ -2010,6 +2013,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         return;
     }
     __block NSError *resultError = nil;
+    __block BOOL postWriteMatch = NO;
     @synchronized (SCDaemonScheduleStoreLock()) {
         NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
         NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
@@ -2018,12 +2022,67 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         if (commitment == nil) {
             resultError = [SCErr errorWithCode:403 subDescription:@"Recurring commitment was not found"];
         } else {
-            resultError = [SCErr errorWithCode:403
-                                 subDescription:@"Protected Hours are locked until the recurring commitment ends"];
+            NSDictionary *currentHours = SCDaemonValidatedProtectedHours(commitment[@"protectedHours"]);
+            SCProtectedHoursRange currentRange = {
+                .startMinute = [currentHours[@"startMinute"] integerValue],
+                .endMinute = [currentHours[@"endMinute"] integerValue],
+            };
+            SCProtectedHoursRange proposedRange = {
+                .startMinute = [validatedHours[@"startMinute"] integerValue],
+                .endMinute = [validatedHours[@"endMinute"] integerValue],
+            };
+            if (currentHours == nil || !SCProtectedHoursUpdateIsNoWeaker(
+                    [currentHours[@"enabled"] boolValue], currentRange,
+                    [validatedHours[@"enabled"] boolValue], proposedRange)) {
+                resultError = [SCErr errorWithCode:403
+                    subDescription:@"Protected Hours can only be enabled or expanded during a commitment"];
+            } else {
+                NSMutableDictionary *updatedCommitment = [commitment mutableCopy];
+                updatedCommitment[@"protectedHours"] = validatedHours;
+                if ([updatedCommitment isEqual:commitment]) {
+                    postWriteMatch = YES;
+                } else {
+                    NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+                    replacement[commitmentID] = [updatedCommitment copy];
+                    [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    resultError = [settings syncSettingsAndWait:5];
+                    if (resultError == nil) {
+                        NSDictionary *storedValue = [settings
+                            valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+                        NSDictionary *stored = [storedValue isKindOfClass:[NSDictionary class]]
+                            ? storedValue[commitmentID] : nil;
+                        postWriteMatch = [stored isEqual:updatedCommitment];
+                        if (!postWriteMatch) {
+                            resultError = [SCErr errorWithCode:500
+                                subDescription:@"Protected Hours did not verify after persistence"];
+                        }
+                    }
+                    if (resultError != nil) {
+                        [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                        [settings syncSettingsAndWait:5];
+                    }
+                }
+            }
         }
     }
     [SCDaemonBlockMethods.daemonMethodLock unlock];
-    reply([result copy], resultError);
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @(postWriteMatch);
+    result[@"protected_hours"] = validatedHours;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"
+                                                    completion:^(NSDictionary *schedulerResult) {
+        BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"] ||
+            [schedulerResult[@"status"] isEqual:@"deferred"];
+        result[@"reconcile_succeeded"] = @(reconciled);
+        result[@"outcome"] = reconciled ? @"verified" : @"stored";
+        reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+            subDescription:@"Protected Hours were saved but enforcement reconciliation did not verify"]);
+    }];
 }
 
 - (void)beginRecurringTimedBreakForCommitmentID:(NSString *)commitmentID

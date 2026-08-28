@@ -537,6 +537,7 @@
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
+        SCDaemonCapabilityProtectedHoursStrictification,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent

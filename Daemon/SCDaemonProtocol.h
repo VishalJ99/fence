@@ -23,7 +23,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionRecurringScheduler = 6,
     SCDaemonProtocolVersionRecurringTimeZone = 7,
     SCDaemonProtocolVersionTrustedTravelTimeZone = 8,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionTrustedTravelTimeZone,
+    SCDaemonProtocolVersionProtectedHoursStrictification = 9,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionProtectedHoursStrictification,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -41,6 +42,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityRecurringCommitmentExtend @"recurring-commitment-extend-v1"
 #define SCDaemonCapabilityRecurringTimeZone @"recurring-time-zone-v1"
 #define SCDaemonCapabilityTrustedTravelTimeZone @"trusted-travel-time-zone-v1"
+#define SCDaemonCapabilityProtectedHoursStrictification @"protected-hours-strictification-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the

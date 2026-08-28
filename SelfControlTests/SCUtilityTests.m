@@ -193,6 +193,7 @@ static NSArray<NSString *> *SCRecurringRuntimeDefaultsKeys(void) {
         @"SCBreakCreditsPerDay",
         @"SCBreakCreditsRemainingToday",
         @"SCBreakCreditsLastResetDay",
+        @"SCEmergencyUnlockWaitMinutes",
     ];
 }
 
@@ -321,6 +322,7 @@ static NSArray<NSString *> *SCCurrentDaemonCapabilities(void) {
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
+        SCDaemonCapabilityProtectedHoursStrictification,
     ];
 }
 
@@ -684,6 +686,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
+        SCDaemonCapabilityProtectedHoursStrictification,
         @"future-safe-capability-v1",
     ];
 
@@ -713,6 +716,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringCommitmentExtend,
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
+        SCDaemonCapabilityProtectedHoursStrictification,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -733,6 +737,9 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
             return ![capability isEqualToString:SCDaemonCapabilityTrustedTravelTimeZone];
         }]],
+        [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
+            return ![capability isEqualToString:SCDaemonCapabilityProtectedHoursStrictification];
+        }]],
     ];
     NSArray<NSString*>* expectedReasons = @[
         @"recurring-schedule-store-missing",
@@ -741,6 +748,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         @"recurring-commitment-extend-missing",
         @"recurring-time-zone-missing",
         @"trusted-travel-time-zone-missing",
+        @"protected-hours-strictification-missing",
     ];
 
     NSString *reason = nil;
@@ -771,6 +779,30 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     reason = nil;
     XCTAssertFalse([SCXPCClient
         isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringScheduler
+                   capabilities:capabilities
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"protocol-too-old");
+}
+
+- (void)testProtocolEightRemainsReadableButRequiresUpgradeBeforeProtectedHoursEditing {
+    NSArray<NSString *> *capabilities = [SCCurrentDaemonCapabilities()
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
+            ^BOOL(NSString *capability, NSDictionary *bindings) {
+                #pragma unused(bindings)
+                return ![capability isEqualToString:
+                    SCDaemonCapabilityProtectedHoursStrictification];
+            }]];
+    NSString *reason = nil;
+
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionTrustedTravelTimeZone
+                   capabilities:capabilities
+        supportsLegacyRecurringRuntimeWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
+
+    reason = nil;
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionTrustedTravelTimeZone
                    capabilities:capabilities
         compatibleWithCurrentAppWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"protocol-too-old");
@@ -1492,6 +1524,39 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         XCTAssertFalse(manager.canBeginTimedBreak);
         [defaults removeObjectForKey:@"SCRecurringCommitment"];
         XCTAssertFalse(manager.canBeginTimedBreak);
+    } @finally {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testProtectionSettingsOnlyStrengthenDuringRecurringCommitment {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *keys = SCRecurringTelemetryDefaultsKeys(defaults);
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, keys);
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCScheduleManager *manager = SCInstallRecurringTelemetryFixture(defaults);
+        [defaults setInteger:3 forKey:@"SCBreakCreditsPerDay"];
+        [defaults setInteger:3 forKey:@"SCBreakCreditsRemainingToday"];
+        [defaults setObject:[[NSCalendar currentCalendar] startOfDayForDate:[NSDate date]]
+                     forKey:@"SCBreakCreditsLastResetDay"];
+        [defaults setInteger:3 forKey:@"SCEmergencyUnlockWaitMinutes"];
+        [defaults synchronize];
+
+        XCTAssertFalse(manager.canEditProtectionSettings);
+        XCTAssertTrue(manager.canMakeProtectionSettingsStricter);
+
+        [manager setBreakCreditsPerDay:5];
+        XCTAssertEqual(manager.breakCreditsPerDay, 3);
+        [manager setBreakCreditsPerDay:2];
+        XCTAssertEqual(manager.breakCreditsPerDay, 2);
+        XCTAssertEqual(manager.breakCreditsRemainingToday, 2);
+
+        [manager setEmergencyUnlockWaitMinutes:2];
+        XCTAssertEqual(manager.emergencyUnlockWaitMinutes, 3);
+        [manager setEmergencyUnlockWaitMinutes:5];
+        XCTAssertEqual(manager.emergencyUnlockWaitMinutes, 5);
     } @finally {
         SCClearRecurringTelemetryDefaults(defaults);
         SCRestoreDefaultsSnapshot(defaults, snapshot);

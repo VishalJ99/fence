@@ -15,7 +15,8 @@ FOUNDATION_EXPORT NSInteger const SCBreakCreditMaximumAllowance;
 /// Clamps a daily break allowance to the supported 0...10 range.
 FOUNDATION_EXPORT NSInteger SCClampBreakCreditAllowance(NSInteger allowance);
 
-/// An active commitment freezes the allowance until the commitment is ended.
+/// During an active commitment the allowance may stay equal or decrease, but
+/// may not increase.
 FOUNDATION_EXPORT NSInteger SCResolveBreakCreditAllowanceUpdate(NSInteger requestedAllowance,
                                                                  NSInteger currentAllowance,
                                                                  BOOL hasSurvivingCommitment);
@@ -26,6 +27,12 @@ FOUNDATION_EXPORT NSInteger const SCEmergencyWaitMaximumMinutes;
 
 /// Clamps the emergency-unlock wait to the supported 1...10 minute range.
 FOUNDATION_EXPORT NSInteger SCClampEmergencyWaitMinutes(NSInteger minutes);
+
+/// During an active commitment the wait may stay equal or increase, but may
+/// not decrease.
+FOUNDATION_EXPORT NSInteger SCResolveEmergencyWaitUpdate(NSInteger requestedMinutes,
+                                                         NSInteger currentMinutes,
+                                                         BOOL hasSurvivingCommitment);
 
 /// Reconciles the remaining daily credits against an injected local calendar.
 /// A missing/different reset day or `forceReset` refills to the allowance.
@@ -62,6 +69,15 @@ FOUNDATION_EXPORT BOOL SCProtectedHoursAreActive(BOOL enabled,
                                                  SCProtectedHoursRange range,
                                                  NSDate *date,
                                                  NSCalendar *calendar);
+
+/// Returns YES when every currently protected wall-clock minute remains
+/// protected by the proposed setting. Callers provide valid half-open minute
+/// ranges. Disabled-to-disabled changes are inert; disabling an enabled range
+/// is never allowed during a commitment.
+FOUNDATION_EXPORT BOOL SCProtectedHoursUpdateIsNoWeaker(BOOL currentEnabled,
+                                                        SCProtectedHoursRange currentRange,
+                                                        BOOL proposedEnabled,
+                                                        SCProtectedHoursRange proposedRange);
 
 /// Tests the half-open edit lock from two hours before protected start through
 /// protected end. Very long protected ranges whose lock covers a full day are
