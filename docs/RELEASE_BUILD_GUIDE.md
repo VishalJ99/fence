@@ -5,10 +5,11 @@ This document describes how to build, sign, notarize, and distribute Fence.app (
 ## Prerequisites
 
 1. **Xcode** installed with command-line tools
-2. **Developer ID Application certificate** from Apple Developer portal
-3. **App-specific password** for notarization (from appleid.apple.com)
+2. **Developer ID Application identity** plus a matching Direct Distribution profile
+3. **App Store Connect API key** for headless notarization, or an interactive saved notarytool profile
 4. **CocoaPods** installed (`gem install cocoapods`)
 5. **create-dmg** installed (`brew install create-dmg`)
+6. **Sparkle Ed25519 private-key file** matching `Info.plist:SUPublicEDKey`
 
 ## One-Time Setup
 
@@ -18,18 +19,53 @@ This document describes how to build, sign, notarize, and distribute Fence.app (
 pod install
 ```
 
-### 2. Store Notarization Credentials
+### 2. Configure release credentials
 
-Generate an app-specific password at https://appleid.apple.com → Sign-In & Security → App-Specific Passwords.
-
-Then store it in your keychain:
+The release script requires the exact SHA-1 fingerprint of the Developer ID
+certificate, an authorized provisioning profile, and the Sparkle private-key
+file. Use absolute paths:
 
 ```bash
-xcrun notarytool store-credentials "AC_PASSWORD" \
-    --apple-id "your@email.com" \
-    --team-id "YOUR_TEAM_ID" \
-    --password "xxxx-xxxx-xxxx-xxxx"
+export FENCE_DEVELOPER_ID_SHA1=0123456789ABCDEF0123456789ABCDEF01234567
+export FENCE_RELEASE_PROFILE_PATH=/absolute/path/FenceDirectDistribution.provisionprofile
+export FENCE_SPARKLE_PRIVATE_KEY_PATH=/absolute/path/sparkle-ed25519.key
 ```
+
+For an isolated release Keychain, configure its absolute path. A mode-`600`
+password file inside a mode-`700` directory enables non-interactive unlock; the
+script re-locks the Keychain on exit:
+
+```bash
+export FENCE_RELEASE_KEYCHAIN_PATH=/absolute/path/release.keychain-db
+export FENCE_RELEASE_KEYCHAIN_PASSWORD_FILE=/absolute/path/release-keychain-password
+```
+
+Headless releases also require App Store Connect API-key variables and the
+non-GUI DMG mode:
+
+```bash
+export ASC_KEY_PATH=/absolute/path/AuthKey_XXXXXXXXXX.p8
+export ASC_KEY_ID=XXXXXXXXXX
+export ASC_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+export FENCE_DMG_HEADLESS=1
+```
+
+The configured Fence Mac mini keeps these non-secret path selections in
+`/Users/dross/.private/fence-release/release.env`. Its release Keychain is on
+the user's Keychain search list because `codesign` requires that, but it is not
+the default Keychain and remains locked outside release runs. Load the three
+private environments without printing them:
+
+```bash
+source /Users/dross/.private/appstoreconnect/env
+source /Users/dross/.private/fence-release/sentry.env
+source /Users/dross/.private/fence-release/release.env
+```
+
+No MacBook credential lookup is expected on this configured path. Its isolated
+Keychain has passed a headless sign-and-verify after transfer-file cleanup; the
+complete post-migration build, notarization, stapling, DMG, and launch sequence
+must still be checked on the next authorized release.
 
 ## Building a Release
 
@@ -38,12 +74,14 @@ xcrun notarytool store-credentials "AC_PASSWORD" \
 ```
 
 This script:
-1. Builds the Release configuration using the workspace
-2. Signs all nested components with Developer ID + hardened runtime
-3. Creates a ZIP and submits for notarization
-4. Staples the notarization ticket
-5. Creates and notarizes a DMG
-6. Outputs both DMG and ZIP to `dist/`
+1. Validates the exact Developer ID against both the Keychain and profile
+2. Validates the Sparkle private key against `Info.plist`
+3. Builds the Release configuration using the workspace
+4. Signs all nested components with Developer ID + hardened runtime
+5. Creates a ZIP and submits it for notarization
+6. Staples the app, then creates, signs, notarizes, and staples a DMG
+7. Creates the final ZIP and prints its Sparkle signature/appcast attributes
+8. Outputs both DMG and ZIP to `dist/`
 
 ## Hurdles We Overcame
 
@@ -112,11 +150,9 @@ codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$APP_PATH
 
 ## Sparkle Updates
 
-After building, generate the Sparkle signature for your appcast:
-
-```bash
-./Sparkle/bin/sign_update "dist/Fence-1.0.zip"
-```
+The release script signs the final ZIP with
+`FENCE_SPARKLE_PRIVATE_KEY_PATH` and prints the `sparkle:edSignature` and
+`length` attributes for the appcast. Do not regenerate the ZIP after this step.
 
 ## Troubleshooting
 

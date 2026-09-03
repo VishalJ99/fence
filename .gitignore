@@ -34,6 +34,9 @@ xcuserdata/**/*
 
 # Secret configuration (license key)
 Secrets.xcconfig
+*.p12
+*.keychain
+*.keychain-db
 
 # Private handover docs (contains API keys)
 docs/WEB_LAUNCH_HANDOVER.md

@@ -102,7 +102,9 @@ To create a signed, notarized release with a DMG installer:
 ./scripts/build-release.sh 1.0
 ```
 
-This will create a distributable DMG in the `build/` directory.
+Configure the fingerprint, matching profile, Sparkle key, and notarization
+credentials described in `docs/RELEASE_BUILD_GUIDE.md` first. The script creates
+the distributable ZIP and DMG in `dist/`.
 
 ### Troubleshooting
 

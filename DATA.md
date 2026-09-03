@@ -8,6 +8,9 @@
 - `server/` — Node/Express license activation and trial API. Runtime configuration comes from environment variables such as `DATABASE_URL` and `WEBHOOK_SECRET`.
 - `web/functions/api/` — Cloudflare Pages Functions used for checkout webhooks, license generation, and email delivery.
 - `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
+- `scripts/unlock-release-keychain.swift` — reads a mode-`600` password file and unlocks the explicitly selected release Keychain without placing its password in process arguments.
+- `scripts/sparkle-public-key.swift` — derives the public Ed25519 key from the configured Sparkle seed so release preflight can compare it with `Info.plist`.
+- `/Users/dross/.private/fence-release/dependencies/` — owner-only Mac-mini recovery copies for the unavailable pinned `ArgumentParser` commit and ignored Sparkle.framework 2.8.1; the adjacent `reproduction.txt` records checksums and restore commands.
 - `dist/` — ignored local ZIP/DMG release artifacts produced by `scripts/build-release.sh`; the retained current release set includes a `reproduction.txt` recipe.
 - `docs/TELEMETRY.md` — PER-355 privacy contract, event schema, cross-process transport design, consistency invariants, and verification plan for Fence diagnostics.
 - `docs/dictionary/root-owned-schedule.md` — PER-383 term and lifecycle reference for immutable root commitment envelopes, daemon-timed V2 segments, and the bounded V1 drain path.
