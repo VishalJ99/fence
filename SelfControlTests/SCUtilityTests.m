@@ -58,7 +58,7 @@
 - (void)updateButtonStatesForCommittedState;
 @end
 
-@interface SCCountdownWarningController (AttentionReplayTests)
+@interface SCCountdownWarningController (Testing)
 - (BOOL)consumeAttentionForEventIdentifier:(NSString *)eventIdentifier;
 @end
 
@@ -3242,6 +3242,45 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     [controller hideWarning];
     XCTAssertFalse([controller consumeAttentionForEventIdentifier:@"generation-break-123"]);
     XCTAssertTrue([controller consumeAttentionForEventIdentifier:@"generation-block-456"]);
+}
+
+- (void)testCountdownWarningPanelLayoutFitsShortTitlesAndCapsLongTitles {
+    SCCountdownWarningController *controller = [[SCCountdownWarningController alloc] init];
+    NSString *eventIdentifier = @"countdown-layout-test";
+    [controller consumeAttentionForEventIdentifier:eventIdentifier];
+
+    [controller showWarningWithTitle:@"Break ending soon"
+                          targetDate:[NSDate dateWithTimeIntervalSinceNow:60.0]
+                     eventIdentifier:eventIdentifier
+                              screen:nil];
+
+    NSPanel *panel = [controller valueForKey:@"panel"];
+    NSView *pillView = [controller valueForKey:@"pillView"];
+    NSTextField *titleLabel = [pillView valueForKey:@"titleLabel"];
+    [pillView layoutSubtreeIfNeeded];
+
+    CGFloat shortTitleFittingWidth = ceil(titleLabel.fittingSize.width);
+    XCTAssertGreaterThan(NSWidth(panel.frame), 200.0);
+    XCTAssertLessThan(NSWidth(panel.frame), 520.0);
+    XCTAssertGreaterThanOrEqual(NSWidth(titleLabel.frame), shortTitleFittingWidth);
+
+    NSString *longTitle = [@"" stringByPaddingToLength:200
+                                            withString:@"W"
+                                       startingAtIndex:0];
+    [controller showWarningWithTitle:longTitle
+                          targetDate:[NSDate dateWithTimeIntervalSinceNow:60.0]
+                     eventIdentifier:eventIdentifier
+                              screen:nil];
+    [pillView layoutSubtreeIfNeeded];
+    XCTAssertEqualWithAccuracy(NSWidth(panel.frame), 520.0, 0.001);
+    XCTAssertLessThan(NSWidth(titleLabel.frame), ceil(titleLabel.fittingSize.width));
+
+    [controller showWarningWithTitle:@"A"
+                          targetDate:[NSDate dateWithTimeIntervalSinceNow:60.0]
+                     eventIdentifier:eventIdentifier
+                              screen:nil];
+    XCTAssertEqualWithAccuracy(NSWidth(panel.frame), 200.0, 0.001);
+    [controller hideWarning];
 }
 
 - (void)testHostFileBlockerReportsExactDiskVerificationFailure {

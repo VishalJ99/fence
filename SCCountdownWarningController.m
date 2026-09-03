@@ -10,7 +10,7 @@ static const NSTimeInterval SCCountdownWarningDuration = 90.0;
 static const CGFloat SCCountdownPillHeight = 52.0;
 static const CGFloat SCCountdownPillMinimumWidth = 200.0;
 static const CGFloat SCCountdownPillMaximumWidth = 520.0;
-static const CGFloat SCCountdownPillMeasuredWidthPadding = 96.0;
+static const CGFloat SCCountdownPillTitleReservedWidth = 96.0;
 static const CGFloat SCCountdownEntranceOffset = 12.0;
 static const NSTimeInterval SCCountdownEntranceDuration = 0.30;
 
@@ -126,7 +126,10 @@ static const NSTimeInterval SCCountdownEntranceDuration = 0.30;
     self.attentionTintView.frame = self.bounds;
     self.ringView.frame = NSMakeRect(14.0, 13.0, 26.0, 26.0);
     self.dismissButton.frame = NSMakeRect(NSWidth(self.bounds) - 46.0, 6.0, 40.0, 40.0);
-    self.titleLabel.frame = NSMakeRect(50.0, 16.0, NSWidth(self.bounds) - 96.0, 20.0);
+    self.titleLabel.frame = NSMakeRect(50.0,
+                                       16.0,
+                                       NSWidth(self.bounds) - SCCountdownPillTitleReservedWidth,
+                                       20.0);
 }
 
 - (void)updateTrackingAreas {
@@ -210,11 +213,19 @@ static const NSTimeInterval SCCountdownEntranceDuration = 0.30;
 @property (nonatomic, strong, nullable) NSScreen *preferredScreen;
 
 - (BOOL)consumeAttentionForEventIdentifier:(NSString *)eventIdentifier;
++ (CGFloat)preferredPanelWidthForTitleLabel:(NSTextField *)titleLabel;
 
 @end
 
 
 @implementation SCCountdownWarningController
+
++ (CGFloat)preferredPanelWidthForTitleLabel:(NSTextField *)titleLabel {
+    CGFloat fittingWidth = ceil(titleLabel.fittingSize.width);
+    return MAX(SCCountdownPillMinimumWidth,
+               MIN(SCCountdownPillMaximumWidth,
+                   fittingWidth + SCCountdownPillTitleReservedWidth));
+}
 
 - (instancetype)init {
     self = [super init];
@@ -274,11 +285,8 @@ static const NSTimeInterval SCCountdownEntranceDuration = 0.30;
     self.pillView.titleLabel.stringValue = title;
     self.panel.accessibilityLabel = title;
 
-    NSDictionary *attributes = @{NSFontAttributeName: self.pillView.titleLabel.font};
-    CGFloat measuredWidth = ceil([title sizeWithAttributes:attributes].width);
-    CGFloat panelWidth = MAX(SCCountdownPillMinimumWidth,
-                             MIN(SCCountdownPillMaximumWidth,
-                                 measuredWidth + SCCountdownPillMeasuredWidthPadding));
+    CGFloat panelWidth = [SCCountdownWarningController
+        preferredPanelWidthForTitleLabel:self.pillView.titleLabel];
     [self.panel setContentSize:NSMakeSize(panelWidth, SCCountdownPillHeight)];
     self.pillView.frame = NSMakeRect(0, 0, panelWidth, SCCountdownPillHeight);
     [self positionPanel];
