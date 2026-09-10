@@ -205,6 +205,29 @@ static NSError *SCScheduleCommitError(NSInteger code,
     }];
 }
 
+static NSError *SCRecurringCalendarUpdateError(NSInteger code,
+                                                NSString *stage,
+                                                NSString *description,
+                                                NSDictionary<NSString *, id> *result,
+                                                BOOL localMirrored,
+                                                NSError *underlyingError) {
+    NSMutableDictionary *info = [underlyingError.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+    info[NSLocalizedDescriptionKey] = description;
+    info[@"stage"] = stage;
+    info[@"failed_stage"] = stage;
+    info[@"store_persisted"] = @([result[@"store_persisted"] boolValue]);
+    info[@"post_write_match"] = @([result[@"post_write_match"] boolValue]);
+    info[@"reconcile_succeeded"] = @([result[@"reconcile_succeeded"] boolValue]);
+    info[@"local_mirrored"] = @(localMirrored);
+    info[@"outcome"] = [result[@"store_persisted"] boolValue] ? @"partial" : @"failed";
+    if (underlyingError != nil) info[NSUnderlyingErrorKey] = underlyingError;
+    // Retain transport/authorization error identity so existing cancellation
+    // handling still recognizes a user-cancelled authorization prompt.
+    return [NSError errorWithDomain:underlyingError.domain ?: SCScheduleCommitErrorDomain
+                               code:underlyingError != nil ? underlyingError.code : code
+                           userInfo:info];
+}
+
 @class SCBlockSegment;
 
 @interface SCStrictifyRetryState : NSObject
@@ -285,6 +308,9 @@ static NSError *SCScheduleCommitError(NSInteger code,
 - (NSArray<SCWeeklySchedule *> *)decodedSchedulesFromValue:(id)value;
 - (void)loadRecurringSchedules;
 - (void)saveRecurringSchedules;
+- (void)submitRecurringCalendarSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             commitment:(NSDictionary<NSString *, id> *)commitment
+                                  reply:(void (^)(NSDictionary<NSString *, id> *, NSError * _Nullable))reply;
 - (void)ensureRecurringScheduleMigration;
 - (nullable NSDictionary<NSString *, id> *)recurringCommitmentDictionary;
 - (NSCalendar *)recurringCalendar;
@@ -1664,6 +1690,184 @@ static NSError *SCScheduleCommitError(NSInteger code,
     }
     [self saveRecurringSchedules];
     [self postChangeNotification];
+}
+
+- (void)updateRecurringSchedules:(NSArray<SCWeeklySchedule *> *)schedules
+                      completion:(void (^)(BOOL, NSError *))completion {
+    if (![NSThread isMainThread]) {
+        NSMutableArray *snapshot = [schedules isKindOfClass:[NSArray class]]
+            ? [NSMutableArray arrayWithCapacity:schedules.count] : nil;
+        for (id candidate in (snapshot != nil ? schedules : @[])) {
+            [snapshot addObject:[candidate isKindOfClass:[SCWeeklySchedule class]]
+                ? [candidate copy] : candidate];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updateRecurringSchedules:snapshot completion:completion];
+        });
+        return;
+    }
+    void (^finish)(BOOL, NSError *) = ^(BOOL updated, NSError *error) {
+        if (completion != nil) completion(updated, error);
+    };
+    NSDictionary *commitment = [self.recurringCommitmentDictionary copy];
+    if (commitment == nil || self.recurringScheduleMigrationNeedsChoice) {
+        finish(NO, SCScheduleCommitError(50, @"validate",
+            @"An existing recurring commitment is required to save an active calendar edit.", NO));
+        return;
+    }
+
+    NSMutableDictionary<NSString *, SCWeeklySchedule *> *baselineByBundle = [NSMutableDictionary dictionary];
+    for (SCWeeklySchedule *baseline in self.mutableRecurringSchedules) {
+        if (baseline.bundleID.length == 0 || baselineByBundle[baseline.bundleID] != nil ||
+            [self bundleWithID:baseline.bundleID] == nil) {
+            finish(NO, SCScheduleCommitError(51, @"validate",
+                @"Fence could not resolve the existing calendar. Close and reopen the calendar before editing.", NO));
+            return;
+        }
+        baselineByBundle[baseline.bundleID] = [baseline copy];
+    }
+    NSMutableSet<NSString *> *proposedBundleIDs = [NSMutableSet set];
+    NSMutableArray<SCWeeklySchedule *> *draft = [NSMutableArray array];
+    BOOL validDraft = [schedules isKindOfClass:[NSArray class]] &&
+        schedules.count == baselineByBundle.count;
+    for (id candidate in (validDraft ? schedules : @[])) {
+        if (![candidate isKindOfClass:[SCWeeklySchedule class]]) { validDraft = NO; break; }
+        SCWeeklySchedule *schedule = candidate;
+        if (schedule.bundleID.length == 0) { validDraft = NO; break; }
+        SCWeeklySchedule *baseline = baselineByBundle[schedule.bundleID];
+        if (baseline == nil || [proposedBundleIDs containsObject:schedule.bundleID] ||
+            ![schedule isValidActiveEditOfSchedule:baseline]) {
+            validDraft = NO;
+            break;
+        }
+        [proposedBundleIDs addObject:schedule.bundleID];
+        [draft addObject:[schedule copy]];
+    }
+    if (!validDraft || proposedBundleIDs.count != baselineByBundle.count) {
+        finish(NO, SCScheduleCommitError(52, @"validate",
+            @"While committed, keep the same bundles and only shorten or remove existing Allow windows.", NO));
+        return;
+    }
+    NSArray *baselineSnapshot = [SCRecurringScheduleCompiler
+        canonicalDictionariesForSchedules:baselineByBundle.allValues];
+    NSArray *draftSnapshot = [SCRecurringScheduleCompiler canonicalDictionariesForSchedules:draft];
+    if ([draftSnapshot isEqual:baselineSnapshot]) {
+        finish(YES, nil);
+        return;
+    }
+
+    NSMutableArray<SCBlockBundle *> *bundles = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *bundleSnapshot = [NSMutableArray array];
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        SCBlockBundle *snapshot = [bundle copy];
+        [bundles addObject:snapshot];
+        [bundleSnapshot addObject:snapshot.toDictionary];
+    }
+    NSArray<NSDictionary<NSString *, id> *> *compiled = [SCRecurringScheduleCompiler
+        segmentsForBundles:bundles schedules:draft];
+    NSMutableArray<NSDictionary<NSString *, id> *> *segments = [NSMutableArray array];
+    NSUInteger aggregateEntryCount = 0;
+    for (NSDictionary *candidate in compiled) {
+        NSMutableOrderedSet<NSString *> *entries = [NSMutableOrderedSet orderedSet];
+        for (id rawEntry in candidate[SCRecurringSegmentBlocklistKey]) {
+            NSString *canonical = [rawEntry isKindOfClass:[NSString class]]
+                ? [SCMiscUtilities canonicalBlockEntryFromString:rawEntry] : nil;
+            if (canonical == nil) {
+                finish(NO, SCScheduleCommitError(53, @"validate",
+                    @"A scheduled bundle contains an invalid block entry.", NO));
+                return;
+            }
+            [entries addObject:canonical];
+        }
+        if (entries.count == 0) continue;
+        if (entries.count > SCScheduleMaximumCommitmentEntries ||
+            aggregateEntryCount > SCScheduleMaximumCommitmentEntries - entries.count ||
+            segments.count >= SCScheduleMaximumCommitmentSegments) {
+            finish(NO, SCScheduleCommitError(54, @"validate",
+                @"The recurring schedule is too large to save.", NO));
+            return;
+        }
+        aggregateEntryCount += entries.count;
+        NSMutableDictionary *segment = [candidate mutableCopy];
+        segment[SCRecurringSegmentBlocklistKey] = entries.array;
+        segment[@"isAllowlist"] = @NO;
+        [segments addObject:segment];
+    }
+    if (segments.count == 0) {
+        finish(NO, SCScheduleCommitError(55, @"validate",
+            @"The active calendar must continue blocking its existing entries.", NO));
+        return;
+    }
+
+    [self submitRecurringCalendarSegments:segments commitment:commitment
+                                    reply:^(NSDictionary<NSString *, id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL rootStored = [result[@"store_persisted"] boolValue] &&
+                [result[@"post_write_match"] boolValue];
+            BOOL rootVerified = rootStored && error == nil &&
+                [result[@"reconcile_succeeded"] boolValue] &&
+                [result[@"outcome"] isEqualToString:@"verified"];
+            NSString *stage = [result[@"failed_stage"] isKindOfClass:[NSString class]]
+                ? result[@"failed_stage"] : @"transport";
+            if (!rootStored) {
+                finish(NO, SCRecurringCalendarUpdateError(56, stage,
+                    [result[@"store_persisted"] boolValue]
+                        ? @"The calendar may have been saved, but Fence could not verify its root store. Close and reopen the calendar before editing again."
+                        : @"Fence could not confirm that the calendar was saved. Its local calendar has not changed.",
+                    result, NO, error));
+                return;
+            }
+
+            NSDictionary *currentCommitment = self.recurringCommitmentDictionary;
+            NSMutableArray *currentBundles = [NSMutableArray array];
+            for (SCBlockBundle *bundle in self.mutableBundles) [currentBundles addObject:bundle.toDictionary];
+            NSArray *currentSchedules = [SCRecurringScheduleCompiler
+                canonicalDictionariesForSchedules:self.mutableRecurringSchedules];
+            if (![currentCommitment[@"commitmentID"] isEqual:commitment[@"commitmentID"]] ||
+                ![currentCommitment[@"generation"] isEqual:commitment[@"generation"]] ||
+                ![currentBundles isEqual:bundleSnapshot] ||
+                ![currentSchedules isEqual:baselineSnapshot]) {
+                finish(NO, SCRecurringCalendarUpdateError(57, @"commitment_resolution",
+                    @"The root calendar was saved, but your commitment or bundles changed before confirmation. Fence kept the newer local state; close and reopen the calendar before editing again.",
+                    result, NO, error));
+                return;
+            }
+
+            // Store verification is authoritative even if immediate enforcement
+            // reconciliation failed. Never mirror a captured draft into a new
+            // commitment or overwrite a newer calendar/bundle update.
+            self.mutableRecurringSchedules = draft;
+            [self saveRecurringSchedules];
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            NSArray *persisted = [defaults objectForKey:kRecurringSchedulesKey];
+            NSMutableArray *expected = [NSMutableArray array];
+            for (SCWeeklySchedule *schedule in draft) [expected addObject:schedule.toDictionary];
+            BOOL localMirrored = [defaults synchronize] && [persisted isEqual:expected];
+            [self postChangeNotification];
+            if (!localMirrored) {
+                finish(NO, SCRecurringCalendarUpdateError(58, @"manifest",
+                    @"The root calendar was saved, but Fence could not verify its local calendar copy.",
+                    result, NO, error));
+            } else if (!rootVerified) {
+                finish(YES, SCRecurringCalendarUpdateError(59,
+                    [stage isEqualToString:@"none"] ? @"evaluate" : stage,
+                    @"The calendar was saved, but immediate enforcement verification did not finish.",
+                    result, YES, error));
+            } else {
+                finish(YES, nil);
+            }
+        });
+    }];
+}
+
+- (void)submitRecurringCalendarSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             commitment:(NSDictionary<NSString *, id> *)commitment
+                                  reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc updateRecurringScheduleForCommitmentID:commitment[@"commitmentID"]
+                                    generation:commitment[@"generation"]
+                                      segments:segments
+                                         reply:reply];
 }
 
 - (SCWeeklySchedule *)createRecurringScheduleForBundle:(SCBlockBundle *)bundle {

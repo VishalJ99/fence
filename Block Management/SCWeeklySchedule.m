@@ -5,6 +5,51 @@
 
 #import "SCWeeklySchedule.h"
 
+static BOOL SCActiveEditTimeIsCanonical(NSString *time) {
+    if (![time isKindOfClass:NSString.class] || time.length != 5 || [time characterAtIndex:2] != ':') return NO;
+    for (NSNumber *index in @[@0, @1, @3, @4]) {
+        unichar character = [time characterAtIndex:index.unsignedIntegerValue];
+        if (character < '0' || character > '9') return NO;
+    }
+    NSInteger hour = [[time substringToIndex:2] integerValue];
+    NSInteger minute = [[time substringFromIndex:3] integerValue];
+    return hour <= 24 && minute < 60 && (hour < 24 || minute == 0);
+}
+
+static BOOL SCActiveEditRangeFitsOriginal(SCTimeRange *range, SCTimeRange *original) {
+    if (![range isKindOfClass:SCTimeRange.class] || ![original isKindOfClass:SCTimeRange.class] ||
+        !SCActiveEditTimeIsCanonical(range.startTime) || !SCActiveEditTimeIsCanonical(range.endTime) ||
+        !SCActiveEditTimeIsCanonical(original.startTime) || !SCActiveEditTimeIsCanonical(original.endTime) ||
+        !range.isValid || !original.isValid || range.durationMinutes <= 0) return NO;
+    BOOL unchanged = [range.startTime isEqualToString:original.startTime] && [range.endTime isEqualToString:original.endTime];
+    return (unchanged || range.durationMinutes >= 15) &&
+        range.startMinutes >= original.startMinutes && range.endMinutes <= original.endMinutes;
+}
+
+// An augmenting-path match handles overlapping legacy originals without
+// accepting two new entries derived from the same original.
+static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
+                                    NSArray<SCTimeRange *> *proposed,
+                                    NSArray<SCTimeRange *> *originals,
+                                    NSMutableArray<NSNumber *> *owners,
+                                    NSMutableIndexSet *visited) {
+    SCTimeRange *range = proposed[proposedIndex];
+    for (NSUInteger pass = 0; pass < 2; pass++) {
+        for (NSUInteger index = 0; index < originals.count; index++) {
+            SCTimeRange *original = originals[index];
+            BOOL equal = [range.startTime isEqualToString:original.startTime] && [range.endTime isEqualToString:original.endTime];
+            if ((pass == 0) != equal || [visited containsIndex:index] || !SCActiveEditRangeFitsOriginal(range, original)) continue;
+            [visited addIndex:index];
+            NSInteger previous = owners[index].integerValue;
+            if (previous < 0 || SCMatchActiveEditWindow((NSUInteger)previous, proposed, originals, owners, visited)) {
+                owners[index] = @(proposedIndex);
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 @implementation SCWeeklySchedule
 
 + (BOOL)supportsSecureCoding {
@@ -79,6 +124,33 @@
 }
 
 #pragma mark - Day Access
+
+- (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule {
+    if (![self.bundleID isEqualToString:baselineSchedule.bundleID]) return NO;
+    for (SCDayOfWeek day = SCDayOfWeekSunday; day <= SCDayOfWeekSaturday; day++) {
+        if ([self activeEditBaselineWindowIndexesForDay:day baselineSchedule:baselineSchedule] == nil) return NO;
+    }
+    return YES;
+}
+
+- (NSArray<NSNumber *> *)activeEditBaselineWindowIndexesForDay:(SCDayOfWeek)day
+                                            baselineSchedule:(SCWeeklySchedule *)baselineSchedule {
+    if (baselineSchedule == nil || ![self.bundleID isEqualToString:baselineSchedule.bundleID]) return nil;
+    NSArray<SCTimeRange *> *proposed = [self allowedWindowsForDay:day];
+    NSArray<SCTimeRange *> *originals = [baselineSchedule allowedWindowsForDay:day];
+    if (proposed.count > originals.count) return nil;
+    NSMutableArray<NSNumber *> *owners = [NSMutableArray arrayWithCapacity:originals.count];
+    for (NSUInteger index = 0; index < originals.count; index++) [owners addObject:@(-1)];
+    for (NSUInteger index = 0; index < proposed.count; index++) {
+        if (!SCMatchActiveEditWindow(index, proposed, originals, owners, [NSMutableIndexSet indexSet])) return nil;
+    }
+    NSMutableArray<NSNumber *> *indexes = [NSMutableArray arrayWithCapacity:proposed.count];
+    for (NSUInteger index = 0; index < proposed.count; index++) [indexes addObject:@(-1)];
+    [owners enumerateObjectsUsingBlock:^(NSNumber *owner, NSUInteger originalIndex, BOOL *stop) {
+        if (owner.integerValue >= 0) indexes[owner.unsignedIntegerValue] = @(originalIndex);
+    }];
+    return indexes;
+}
 
 - (NSArray<SCTimeRange *> *)allowedWindowsForDay:(SCDayOfWeek)day {
     NSString *key = [SCWeeklySchedule stringForDay:day];

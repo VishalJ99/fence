@@ -697,6 +697,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
               SCDaemonCapabilityTrustedTravelTimeZone,
               SCDaemonCapabilityProtectedHoursStrictification,
               SCDaemonCapabilityRecurringBundleAppend,
+              SCDaemonCapabilityRecurringCalendarStrictification,
           ]);
 }
 
@@ -2629,6 +2630,140 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
     [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"];
     reply(nil);
 #endif
+}
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    NSMutableDictionary *result = [@{@"outcome": @"failed", @"failed_stage": @"validate",
+        @"store_persisted": @NO, @"post_write_match": @NO, @"reconcile_succeeded": @NO} mutableCopy];
+    if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation) ||
+        ![segments isKindOfClass:[NSArray class]] || segments.count == 0 ||
+        segments.count > SCDaemonConsistencyMaximumSchedules) {
+        reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid recurring calendar update"]);
+        return;
+    }
+    NSMutableArray *validated = [NSMutableArray array];
+    for (id value in segments) {
+        NSDictionary *segment = SCDaemonValidatedRecurringSegment(value);
+        if (segment == nil) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid recurring calendar segment"]);
+            return;
+        }
+        [validated addObject:segment];
+    }
+    [validated sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+        return [left[@"startMinuteOfWeek"] compare:right[@"startMinuteOfWeek"]];
+    }];
+    if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) {
+        result[@"failed_stage"] = @"lock";
+        reply([result copy], error);
+    }]) return;
+    SCSettings *settings = [SCSettings sharedSettings];
+    if (!settings.settingsStateAvailableForEnforcement) {
+        [SCDaemonBlockMethods.daemonMethodLock unlock];
+        result[@"failed_stage"] = @"settings";
+        reply([result copy], [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        return;
+    }
+
+    __block NSError *resultError = nil;
+    @synchronized (SCDaemonScheduleStoreLock()) {
+        NSDictionary *oldValue = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+        NSDictionary *oldRecurring = [oldValue isKindOfClass:[NSDictionary class]] ? oldValue : @{};
+        NSDictionary *commitment = SCDaemonOwnedRecurringCommitment(oldRecurring, self.clientUID,
+            commitmentID, generation);
+        NSDictionary *updated = commitment == nil ? nil : [SCDaemonScheduler recurringCommitment:commitment
+            strictifyingSegments:validated maximumEntries:SCDaemonConsistencyMaximumEntries];
+        if (updated == nil) {
+            resultError = [SCErr errorWithCode:403
+                subDescription:@"The calendar would weaken the current commitment or is out of date"];
+        } else {
+            NSDate *now = [NSDate date];
+            NSDate *activeEnd = [settings valueForKey:@"BlockEndDate"];
+            BOOL activeRecurring = [SCBlockUtilities modernBlockIsRunning] &&
+                [[settings valueForKey:@"ActiveBlockSource"] isEqual:SCDaemonActiveBlockSourceSchedulerRecurring] &&
+                [[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue] == self.clientUID;
+            BOOL ownsActive = activeRecurring &&
+                [[settings valueForKey:@"ActiveScheduleCommitmentID"] isEqual:commitmentID] &&
+                [[settings valueForKey:@"ActiveScheduleGeneration"] isEqual:generation];
+            NSDictionary *desired = [SCDaemonScheduler recurringRecordAtDate:now commitment:updated
+                activeBreaks:[settings valueForKey:@"ActiveScheduleBreaks"]];
+            BOOL coupleActive = ownsActive && desired != nil &&
+                [activeEnd isKindOfClass:[NSDate class]] && [activeEnd compare:now] == NSOrderedDescending;
+            if (activeRecurring && !ownsActive) {
+                resultError = [SCErr errorWithCode:403 subDescription:@"The active recurring commitment changed"];
+            }
+            if (coupleActive && resultError == nil) {
+                // Append before replacing root/provenance. A failed storage
+                // write may leave an extra strict physical union, never a gap.
+                // This also physically verifies exact retries.
+                result[@"failed_stage"] = @"active_apply";
+                NSArray *activeEntries = [settings valueForKey:@"ActiveBlocklist"];
+                [SCDaemonBlockMethods appendEntriesToActiveBlocklistWhileHoldingDaemonLock:desired[@"blocklist"]
+                    matchingExistingBlocklist:activeEntries
+                    resultReply:^(NSDictionary *activeResult, NSError *error) {
+                        resultError = error;
+                    }];
+            }
+            if (resultError == nil) {
+                NSArray *provenanceKeys = @[@"ActiveScheduleID", @"ActiveSchedulePolicyRevision",
+                    @"ActiveScheduleWeekKey", @"BlockEndDate"];
+                NSMutableDictionary *oldProvenance = [NSMutableDictionary dictionary];
+                for (NSString *key in provenanceKeys) oldProvenance[key] = [settings valueForKey:key] ?: NSNull.null;
+                NSMutableDictionary *replacement = [oldRecurring mutableCopy];
+                replacement[commitmentID] = updated;
+                [settings setValue:replacement forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                if (coupleActive) {
+                    // The new approved end may be earlier when an interval is
+                    // split. Root validation preserves every old blocked minute
+                    // in the following occurrence; turnover uses normal expiry.
+                    [settings setValue:desired[@"scheduleID"] forKey:@"ActiveScheduleID"];
+                    [settings setValue:desired[SCDaemonSchedulePolicyRevisionKey] forKey:@"ActiveSchedulePolicyRevision"];
+                    [settings setValue:desired[SCDaemonScheduleWeekKey] forKey:@"ActiveScheduleWeekKey"];
+                    [settings setValue:desired[@"approvedEndDate"] forKey:@"BlockEndDate"];
+                }
+                result[@"failed_stage"] = @"persist";
+                resultError = [settings syncSettingsAndWait:5];
+                if (resultError == nil) {
+                    NSDictionary *stored = [settings valueForKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    BOOL matches = [stored[commitmentID] isEqual:updated];
+                    if (coupleActive) {
+                        matches = matches && [[settings valueForKey:@"ActiveScheduleID"] isEqual:desired[@"scheduleID"]] &&
+                            [[settings valueForKey:@"ActiveSchedulePolicyRevision"] isEqual:desired[SCDaemonSchedulePolicyRevisionKey]] &&
+                            [[settings valueForKey:@"BlockEndDate"] isEqual:desired[@"approvedEndDate"]];
+                    }
+                    if (!matches) resultError = [SCErr errorWithCode:500
+                        subDescription:@"Recurring calendar persistence did not verify"];
+                }
+                if (resultError != nil) {
+                    [settings setValue:oldRecurring forKey:SCDaemonApprovedRecurringCommitmentsKey];
+                    if (coupleActive) for (NSString *key in provenanceKeys) {
+                        id value = oldProvenance[key];
+                        [settings setValue:(value == NSNull.null ? nil : value) forKey:key];
+                    }
+                    [settings syncSettingsAndWait:5];
+                }
+            }
+        }
+    }
+    [SCDaemonBlockMethods.daemonMethodLock unlock];
+    if (resultError != nil) {
+        reply([result copy], resultError);
+        return;
+    }
+    result[@"store_persisted"] = @YES;
+    result[@"post_write_match"] = @YES;
+    [[SCDaemon sharedDaemon] scheduleStateDidChangeWithTrigger:@"mutation"
+        completion:^(NSDictionary *schedulerResult) {
+            BOOL reconciled = [schedulerResult[@"status"] isEqual:@"verified"];
+            result[@"reconcile_succeeded"] = @(reconciled);
+            result[@"outcome"] = reconciled ? @"verified" : @"stored";
+            result[@"failed_stage"] = reconciled ? @"none" : @"reconcile";
+            reply([result copy], reconciled ? nil : [SCErr errorWithCode:500
+                subDescription:@"Calendar saved but immediate enforcement did not verify"]);
+        }];
 }
 
 - (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID

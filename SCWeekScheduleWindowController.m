@@ -18,6 +18,7 @@
 #import "Block Management/SCScheduleManager.h"
 #import "Block Management/SCBlockBundle.h"
 #import "Block Management/SCWeeklySchedule.h"
+#import "Block Management/SCRecurringScheduleCompiler.h"
 #import "Common/SCLicenseManager.h"
 #import "Common/SCSentry.h"
 #import "SCMiscUtilities.h"
@@ -70,7 +71,8 @@
 // Feature flag to switch between old grid and new calendar UI
 static BOOL const kUseCalendarUI = YES;
 
-@interface SCWeekScheduleWindowController () <SCWeekGridViewDelegate,
+@interface SCWeekScheduleWindowController () <NSWindowDelegate,
+                                               SCWeekGridViewDelegate,
                                                SCBundleSidebarViewDelegate,
                                                SCCalendarGridViewDelegate,
                                                SCDayScheduleEditorDelegate,
@@ -80,6 +82,14 @@ static BOOL const kUseCalendarUI = YES;
 // UI Elements
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSButton *settingsButton;
+@property (nonatomic, strong) NSButton *editScheduleButton;
+@property (nonatomic, strong) NSButton *cancelScheduleEditButton;
+@property (nonatomic, strong) NSView *scheduleEditRulesView;
+@property (nonatomic, strong) NSButton *resetScheduleEditButton;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, SCWeeklySchedule *> *scheduleEditBaseline;
+@property (nonatomic, strong, nullable) NSMutableDictionary<NSString *, SCWeeklySchedule *> *scheduleEditDraft;
+@property (nonatomic, copy, nullable) NSString *scheduleEditGeneration;
+@property (nonatomic) BOOL scheduleEditSaving;
 @property (nonatomic, strong) NSView *statusView;
 @property (nonatomic, strong) NSStackView *statusStackView;
 @property (nonatomic, strong) SCWeekGridView *weekGridView;
@@ -169,6 +179,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
     self = [super initWithWindow:window];
     if (self) {
+        window.delegate = self;
         [self setupUI];
         [self setupMenuBar];
         [self setupNotifications];
@@ -229,6 +240,20 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.settingsButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
     [contentView addSubview:self.settingsButton];
 
+    self.editScheduleButton = [NSButton buttonWithTitle:@"Edit Schedule" target:self
+                                               action:@selector(editScheduleClicked:)];
+    self.editScheduleButton.frame = NSMakeRect(NSMinX(self.settingsButton.frame) - 148, y - 8, 140, 40);
+    self.editScheduleButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    self.editScheduleButton.bezelStyle = NSBezelStyleRounded;
+    self.editScheduleButton.toolTip = @"Commitment active. Only changes that increase blocking are allowed.";
+    [contentView addSubview:self.editScheduleButton];
+    self.cancelScheduleEditButton = [NSButton buttonWithTitle:@"Cancel" target:self
+                                                      action:@selector(cancelScheduleEdit:)];
+    self.cancelScheduleEditButton.frame = NSMakeRect(NSMinX(self.editScheduleButton.frame) - 88, y - 8, 80, 40);
+    self.cancelScheduleEditButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    self.cancelScheduleEditButton.hidden = YES;
+    [contentView addSubview:self.cancelScheduleEditButton];
+
     // Status view - use semi-transparent background to work with frosted glass
     y -= 66; // 50px height + 16px gap
     self.statusView = [[NSView alloc] initWithFrame:NSMakeRect(padding, y, contentView.bounds.size.width - padding * 2, 50)];
@@ -247,6 +272,29 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.statusStackView.distribution = NSStackViewDistributionFill; // Pills size to content
     self.statusStackView.autoresizingMask = NSViewWidthSizable;
     [self.statusView addSubview:self.statusStackView];
+
+    // The iOS Edit rules strip, adapted to a wide native Mac calendar.
+    self.scheduleEditRulesView = [[NSView alloc] initWithFrame:self.statusView.bounds];
+    self.scheduleEditRulesView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.scheduleEditRulesView.hidden = YES;
+    NSTextField *rulesLabel = [NSTextField labelWithString:@"Commitment active · Stricter edits only"];
+    rulesLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    rulesLabel.textColor = NSColor.systemRedColor;
+    rulesLabel.frame = NSMakeRect(12, 15, 282, 20);
+    [self.scheduleEditRulesView addSubview:rulesLabel];
+    NSButton *rulesInfo = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"info.circle"
+                                                          accessibilityDescription:@"About stricter edits"]
+                                           target:self action:@selector(showScheduleEditRules:)];
+    rulesInfo.bordered = NO;
+    rulesInfo.frame = NSMakeRect(294, 5, 40, 40);
+    rulesInfo.toolTip = @"About stricter edits";
+    [self.scheduleEditRulesView addSubview:rulesInfo];
+    self.resetScheduleEditButton = [NSButton buttonWithTitle:@"Reset" target:self
+                                                     action:@selector(resetScheduleEdit:)];
+    self.resetScheduleEditButton.frame = NSMakeRect(NSWidth(self.statusView.bounds) - 92, 5, 80, 40);
+    self.resetScheduleEditButton.autoresizingMask = NSViewMinXMargin;
+    [self.scheduleEditRulesView addSubview:self.resetScheduleEditButton];
+    [self.statusView addSubview:self.scheduleEditRulesView];
 
     // Main content area - either old grid or new calendar UI
     CGFloat bottomControlsHeight = 85; // Space for buttons at bottom
@@ -374,6 +422,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)setupNotifications {
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scheduleWindowWillClose:)
+                                                 name:NSWindowWillCloseNotification object:self.window];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(scheduleDidChange:)
                                                  name:SCScheduleManagerDidChangeNotification
@@ -383,12 +433,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
                                                  name:SCScheduleStrictifyDidCompleteNotification
                                                object:nil];
 
-    // Observe window resize to update grid layout
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(windowDidResize:)
-                                                 name:NSWindowDidResizeNotification
-                                               object:self.window];
-
+    // Resize is delivered through NSWindowDelegate (also used to guard Save).
     // Observe request to show this window (from test block completion)
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(showWeekScheduleWindowRequested:)
@@ -532,6 +577,11 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     self.currentWeekOffset = 0;
     BOOL editingLocked = manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
+    if (self.scheduleEditBaseline != nil &&
+        (!manager.hasRecurringCommitment ||
+         ![self.scheduleEditGeneration isEqualToString:manager.recurringCommitmentGeneration])) {
+        [self clearScheduleEditState];
+    }
 
     if (kUseCalendarUI) {
         // Build the single recurring schedule dictionary used by both views.
@@ -542,6 +592,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
                 scheduleDict[bundle.bundleID] = schedule;
             }
         }
+        if (self.scheduleEditDraft != nil) scheduleDict = self.scheduleEditDraft;
 
         self.bundleSidebar.bundles = manager.bundles;
         self.bundleSidebar.selectedBundleID = self.focusedBundleID;
@@ -553,6 +604,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         self.calendarGridView.schedules = scheduleDict;
         self.calendarGridView.focusedBundleID = self.focusedBundleID;
         self.calendarGridView.isCommitted = editingLocked;
+        self.calendarGridView.activeEditBaselineSchedules = self.scheduleEditSaving ? nil : self.scheduleEditBaseline;
         self.calendarGridView.displayTimeZone = manager.hasRecurringCommitment
             ? [NSTimeZone timeZoneWithName:manager.recurringTimeZoneIdentifier] : nil;
         NSCalendar *displayCalendar = [NSCalendar currentCalendar];
@@ -875,8 +927,8 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
             NSTimeZone.localTimeZone;
         NSDate *endDate = manager.recurringCommitmentLockEndDate;
         self.commitmentLabel.stringValue = endDate
-            ? [NSString stringWithFormat:@"End available %@; editing stays locked until you end it", [formatter stringFromDate:endDate]]
-            : @"Editing is locked";
+            ? [NSString stringWithFormat:@"End available %@", [formatter stringFromDate:endDate]]
+            : @"Only stricter edits are allowed";
         self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
     } else if (hasRecurringCommitment) {
         self.commitButton.title = @"End Commitment";
@@ -901,9 +953,140 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
         self.commitmentLabel.textColor = [NSColor secondaryLabelColor];
     }
+    [self updateScheduleEditUI];
 }
 
 #pragma mark - Actions
+
+- (BOOL)hasScheduleEditChanges {
+    if (self.scheduleEditBaseline == nil) return NO;
+    return ![[SCRecurringScheduleCompiler canonicalDictionariesForSchedules:self.scheduleEditBaseline.allValues]
+        isEqual:[SCRecurringScheduleCompiler canonicalDictionariesForSchedules:self.scheduleEditDraft.allValues]];
+}
+
+- (void)updateScheduleEditUI {
+    BOOL editing = self.scheduleEditBaseline != nil;
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    self.titleLabel.stringValue = editing ? @"Edit Schedule" : @"Fence";
+    self.editScheduleButton.hidden = !manager.hasRecurringCommitment;
+    self.editScheduleButton.title = self.scheduleEditSaving ? @"Saving…" : (editing ? @"Save Changes" : @"Edit Schedule");
+    self.editScheduleButton.enabled = !self.scheduleEditSaving &&
+        !manager.recurringScheduleMigrationNeedsChoice && (!editing || self.hasScheduleEditChanges);
+    self.cancelScheduleEditButton.hidden = !editing;
+    self.cancelScheduleEditButton.enabled = !self.scheduleEditSaving;
+    self.scheduleEditRulesView.hidden = !editing;
+    self.statusStackView.hidden = editing;
+    self.resetScheduleEditButton.enabled = self.hasScheduleEditChanges && !self.scheduleEditSaving;
+    self.settingsButton.enabled = !editing;
+    // Keep the draft surface focused on editing, as on iOS. Session actions
+    // return when Save or Cancel takes the user back to the schedule.
+    self.commitButton.hidden = editing;
+    self.extendCommitmentButton.hidden = editing || !manager.hasRecurringCommitment;
+    self.breakButton.hidden = editing;
+    self.emergencyUnlockButton.hidden = editing;
+    self.commitmentLabel.hidden = editing;
+    self.travelingButton.hidden = editing;
+    if (editing) {
+        self.commitButton.enabled = NO;
+        self.extendCommitmentButton.enabled = NO;
+        self.breakButton.enabled = NO;
+        self.emergencyUnlockButton.enabled = NO;
+    }
+}
+
+- (void)clearScheduleEditState {
+    self.scheduleEditBaseline = nil;
+    self.scheduleEditDraft = nil;
+    self.scheduleEditGeneration = nil;
+    self.scheduleEditSaving = NO;
+    self.calendarGridView.activeEditBaselineSchedules = nil;
+    [self.calendarGridView.undoManager removeAllActions];
+    [self.calendarGridView clearAllSelections];
+}
+
+- (void)editScheduleClicked:(id)sender {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (self.scheduleEditSaving || !manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) return;
+    if (self.scheduleEditBaseline == nil) {
+        NSMutableDictionary *baseline = [NSMutableDictionary dictionary];
+        NSMutableDictionary *draft = [NSMutableDictionary dictionary];
+        for (SCWeeklySchedule *schedule in manager.recurringSchedules) {
+            baseline[schedule.bundleID] = [schedule copy];
+            draft[schedule.bundleID] = [schedule copy];
+        }
+        self.scheduleEditBaseline = baseline;
+        self.scheduleEditDraft = draft;
+        self.scheduleEditGeneration = manager.recurringCommitmentGeneration;
+        [self.calendarGridView.undoManager removeAllActions];
+        [self reloadData];
+        return;
+    }
+    if (!self.hasScheduleEditChanges) return;
+    self.scheduleEditSaving = YES;
+    self.calendarGridView.activeEditBaselineSchedules = nil;
+    [self updateScheduleEditUI];
+    [manager updateRecurringSchedules:self.scheduleEditDraft.allValues completion:^(BOOL updated, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.scheduleEditSaving = NO;
+            if (updated || [error.userInfo[@"store_persisted"] boolValue]) [self clearScheduleEditState];
+            [self reloadData];
+            if (!updated || error != nil) {
+                NSAlert *alert = [NSAlert new];
+                alert.messageText = (updated || [error.userInfo[@"store_persisted"] boolValue])
+                    ? @"Schedule saved, but the update wasn’t fully verified"
+                    : @"Schedule changes were not saved";
+                alert.informativeText = error.localizedDescription ?: @"Your existing commitment remains in place.";
+                [alert addButtonWithTitle:@"OK"];
+                [alert beginSheetModalForWindow:self.window completionHandler:nil];
+            }
+        });
+    }];
+}
+
+- (void)cancelScheduleEdit:(id)sender {
+    if (self.scheduleEditSaving) return;
+    [self clearScheduleEditState];
+    [self reloadData];
+}
+
+- (void)scheduleWindowWillClose:(NSNotification *)notification {
+    if (!self.scheduleEditSaving) [self clearScheduleEditState];
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    // Keep the save result attached to its editor while the helper replies.
+    if (self.scheduleEditSaving) {
+        NSBeep();
+        return NO;
+    }
+    return YES;
+}
+
+- (void)resetScheduleEdit:(id)sender {
+    if (!self.hasScheduleEditChanges || self.scheduleEditSaving) return;
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Reset your edits?";
+    alert.informativeText = @"Restore the schedule you started editing. Your saved commitment will not change.";
+    [alert addButtonWithTitle:@"Reset"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn || self.scheduleEditBaseline == nil) return;
+        NSMutableDictionary *draft = [NSMutableDictionary dictionary];
+        for (NSString *bundleID in self.scheduleEditBaseline) draft[bundleID] = [self.scheduleEditBaseline[bundleID] copy];
+        self.scheduleEditDraft = draft;
+        [self.calendarGridView.undoManager removeAllActions];
+        [self.calendarGridView clearAllSelections];
+        [self reloadData];
+    }];
+}
+
+- (void)showScheduleEditRules:(id)sender {
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Stricter edits only";
+    alert.informativeText = @"Your commitment is active. You can only make changes that increase blocking.\n\nAllow windows · dashed border\nDrag an edge inward to shorten a window, or select it and press Delete. You can’t move windows or add allowed time. Removing the last window blocks that bundle all day.\n\nYour original schedule\nFaint outlines show where you started. Reset restores this draft; Cancel discards it. Changes take effect only when you save.";
+    [alert addButtonWithTitle:@"Got it"];
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+}
 
 - (void)presentRecurringMigrationChoiceIfNeeded {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
@@ -947,7 +1130,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         alert.messageText = @"Schedule Locked";
         alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
             ? @"Choose which legacy schedule should repeat before editing bundles."
-            : @"Bundles cannot be added or edited while a recurring commitment exists.";
+            : @"End your commitment before creating a new bundle. You can still add apps and websites to existing bundles.";
         [alert runModal];
         return;
     }
@@ -1140,7 +1323,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
             commitTimeZoneIdentifier ?: @"your current timezone"];
     }
     alert.informativeText = [NSString stringWithFormat:
-        @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. You can add apps and websites to existing bundles, but schedule edits and removals stay locked until you end it; the selected period controls when End first becomes available. %@",
+        @"Your seven-day schedule repeats until you explicitly end the commitment. During the commitment, only changes that increase blocking are allowed. The selected period controls when End first becomes available. %@",
         timezoneSummary];
 
     CGFloat accessoryHeight = bundlesWithNoAllowBlocks.count > 0 ? 78 : 30;
@@ -1541,7 +1724,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         alert.messageText = @"Schedule Locked";
         alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
             ? @"Choose which legacy schedule should repeat before editing."
-            : @"The recurring schedule cannot be modified while a commitment exists.";
+            : @"Click Edit Schedule to make changes that increase blocking.";
         [alert runModal];
         return;
     }
@@ -1593,7 +1776,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.calendarGridView.focusedBundleID = self.focusedBundleID;
     [self.calendarGridView reloadData];
 
-    if (bundle != nil && [SCScheduleManager sharedManager].hasRecurringCommitment) {
+    if (self.scheduleEditBaseline == nil && bundle != nil && [SCScheduleManager sharedManager].hasRecurringCommitment) {
         [self bundleSidebar:sidebar didRequestEditBundle:bundle];
     }
 }
@@ -1603,6 +1786,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)bundleSidebar:(SCBundleSidebarView *)sidebar didRequestEditBundle:(SCBlockBundle *)bundle {
+    if (self.scheduleEditBaseline != nil) return;
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     if (manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];
@@ -1623,6 +1807,16 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 #pragma mark - SCCalendarGridViewDelegate
 
 - (void)calendarGrid:(SCCalendarGridView *)grid didUpdateSchedule:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {
+    if (self.scheduleEditBaseline != nil) {
+        if (self.scheduleEditSaving || ![schedule isValidActiveEditOfSchedule:self.scheduleEditBaseline[bundleID]]) {
+            [self reloadData];
+            return;
+        }
+        self.scheduleEditDraft[bundleID] = [schedule copy];
+        self.bundleSidebar.schedules = self.scheduleEditDraft;
+        [self updateScheduleEditUI];
+        return;
+    }
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
     SCWeeklySchedule *oldSchedule = [manager recurringScheduleForBundleID:bundleID];
@@ -1670,6 +1864,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)calendarGrid:(SCCalendarGridView *)grid didRequestEditBundle:(SCBlockBundle *)bundle forDay:(SCDayOfWeek)day {
+    if (self.scheduleEditBaseline != nil) {
+        [self showScheduleEditRules:nil];
+        return;
+    }
     // Open the day editor sheet for detailed editing
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
@@ -1680,7 +1878,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         alert.messageText = @"Schedule Locked";
         alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
             ? @"Choose which legacy schedule should repeat before editing."
-            : @"The recurring schedule cannot be modified while a commitment exists.";
+            : @"Click Edit Schedule to make changes that increase blocking.";
         [alert runModal];
         return;
     }
@@ -1703,16 +1901,29 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [self showSelectBundleWarning];
 }
 
+- (void)calendarGridDidAttemptRestrictedEdit:(SCCalendarGridView *)grid {
+    [self showCalendarWarningWithMessage:@"Stricter edits only — shorten or remove Allow windows."];
+}
+
 #pragma mark - Warning UI
 
 - (void)showSelectBundleWarning {
+    NSString *message = ([SCScheduleManager sharedManager].bundles.count == 0)
+        ? @"To create allow block — create a bundle first"
+        : @"To create allow block — select a bundle first";
+    [self showCalendarWarningWithMessage:message];
+}
+
+- (void)showCalendarWarningWithMessage:(NSString *)message {
     // Don't show multiple warnings at once
     static BOOL isShowingWarning = NO;
     if (isShowingWarning) return;
     isShowingWarning = YES;
 
     // Create frosted glass toast (like status pills but grey)
-    CGFloat toastWidth = 420;
+    NSFont *messageFont = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    CGFloat toastWidth = MIN(self.calendarGridView.bounds.size.width - 24,
+        ceil([message sizeWithAttributes:@{NSFontAttributeName: messageFont}].width) + 32);
     CGFloat toastHeight = 42;
 
     // Container view holds the shadow (decoupled from blur clipping)
@@ -1748,15 +1959,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     [toastContainer addSubview:toast];
 
     // Add label with contextual message
-    SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    NSString *message = (manager.bundles.count == 0)
-        ? @"To create allow block — create a bundle first"
-        : @"To create allow block — select a bundle first";
     NSTextField *label = [NSTextField labelWithString:message];
-    label.font = [NSFont systemFontOfSize:17 weight:NSFontWeightMedium];
+    label.font = messageFont;
     label.textColor = [NSColor labelColor];
     label.alignment = NSTextAlignmentCenter;
-    label.frame = NSMakeRect(0, (toastHeight - 24) / 2, toastWidth, 24);
+    label.frame = NSMakeRect(12, (toastHeight - 32) / 2, toastWidth - 24, 32);
+    label.maximumNumberOfLines = 2;
     [toast addSubview:label];
 
     // Position toast near top center of calendar grid

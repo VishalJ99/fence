@@ -105,6 +105,18 @@ typedef NS_ENUM(NSInteger, SCDayOfWeek) {
 /// Checks if any day has any allowed windows
 - (BOOL)hasAnyWindows;
 
+/// Active Allow editing can only shrink or delete existing windows on the same
+/// day. Each proposed window must belong to a distinct original window; equal
+/// total duration or coverage assembled across separate originals is not enough.
+/// Changed windows need at least 15 minutes; unchanged legacy shorter windows
+/// remain valid. Neither schedule is mutated.
+- (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule;
+
+/// Original-window indexes, in this schedule's window order, or nil when the
+/// day is not a valid active edit. Used by the calendar to retain entry identity.
+- (nullable NSArray<NSNumber *> *)activeEditBaselineWindowIndexesForDay:(SCDayOfWeek)day
+                                                   baselineSchedule:(SCWeeklySchedule *)baselineSchedule;
+
 #pragma mark - Copy Operations
 
 /// Copies schedule from one day to another

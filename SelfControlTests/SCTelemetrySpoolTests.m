@@ -539,12 +539,26 @@
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
         SCDaemonCapabilityRecurringBundleAppend,
+        SCDaemonCapabilityRecurringCalendarStrictification,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
                                           capabilities:required
                     compatibleWithCurrentAppWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"compatible");
+
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+        capabilities:required supportsRecurringCalendarStrictificationWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-calendar-strictify-protocol-too-old");
+    NSMutableArray *withoutCalendar = [required mutableCopy];
+    [withoutCalendar removeObject:SCDaemonCapabilityRecurringCalendarStrictification];
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+        capabilities:withoutCalendar supportsRecurringCalendarStrictificationWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-calendar-strictify-missing");
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+        capabilities:withoutCalendar compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+        capabilities:required supportsRecurringCalendarStrictificationWithReason:&reason]);
 
     // Existing v9 helpers remain valid for runtime inspection, but the new
     // user-initiated append action requires an upgrade before its selector.

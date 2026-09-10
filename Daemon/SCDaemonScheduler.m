@@ -318,6 +318,59 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
     return [updated copy];
 }
 
++ (NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                               strictifyingSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                     maximumEntries:(NSUInteger)maximumEntries {
+    if (![commitment isKindOfClass:[NSDictionary class]] ||
+        !SCDaemonSchedulerRecurringCommitmentIsValid(commitment[@"commitmentID"], commitment, 0) ||
+        ![segments isKindOfClass:[NSArray class]]) return nil;
+    NSMutableDictionary *updated = [commitment mutableCopy];
+    updated[@"segments"] = [segments copy];
+    if (!SCDaemonSchedulerRecurringCommitmentIsValid(commitment[@"commitmentID"], updated, 0)) return nil;
+    NSUInteger aggregate = 0;
+    for (NSDictionary *segment in segments) {
+        NSUInteger count = [segment[@"blocklist"] count];
+        if (!SCDaemonScheduleEntryCountCanAdd(aggregate, count, maximumEntries)) return nil;
+        aggregate += count;
+    }
+    // Sweep interval intersections instead of comparing totals: equal totals
+    // can hide a newly allowed minute, or lost bundle provenance in an overlap.
+    NSUInteger newIndex = 0;
+    for (NSDictionary *old in commitment[@"segments"]) {
+        NSInteger cursor = [old[@"startMinuteOfWeek"] integerValue];
+        NSInteger end = [old[@"endMinuteOfWeek"] integerValue];
+        NSSet *oldEntries = [NSSet setWithArray:old[@"blocklist"]];
+        NSSet *oldSources = [NSSet setWithArray:old[SCDaemonScheduleSourceBundleIDsKey]];
+        while (cursor < end) {
+            while (newIndex < segments.count &&
+                   [segments[newIndex][@"endMinuteOfWeek"] integerValue] <= cursor) newIndex++;
+            if (newIndex == segments.count) return nil;
+            NSDictionary *candidate = segments[newIndex];
+            if ([candidate[@"startMinuteOfWeek"] integerValue] > cursor ||
+                ![oldEntries isSubsetOfSet:[NSSet setWithArray:candidate[@"blocklist"]]] ||
+                ![oldSources isSubsetOfSet:[NSSet setWithArray:candidate[SCDaemonScheduleSourceBundleIDsKey]]]) return nil;
+            cursor = MIN(end, [candidate[@"endMinuteOfWeek"] integerValue]);
+        }
+    }
+    return [updated copy];
+}
+
++ (NSDictionary<NSString *, id> *)recurringRecordAtDate:(NSDate *)date
+                                           commitment:(NSDictionary<NSString *, id> *)commitment
+                                          activeBreaks:(id)activeBreaks {
+    if (![date isKindOfClass:[NSDate class]] ||
+        ![commitment isKindOfClass:[NSDictionary class]] ||
+        !SCDaemonSchedulerRecurringCommitmentIsValid(commitment[@"commitmentID"], commitment, 0)) return nil;
+    NSCalendar *calendar = [self calendarForRecurringCommitment:commitment
+                                             fallbackTimeZone:NSTimeZone.localTimeZone];
+    NSDictionary *activeBreak = [self activeBreakAtDate:date value:activeBreaks
+        ownerUID:[commitment[@"controllingUID"] unsignedIntValue] commitment:commitment];
+    if (activeBreak != nil && ![self protectedHoursAreActiveAtDate:date
+        commitment:commitment calendar:calendar]) return nil;
+    return [self desiredScheduleRecordAtDate:date records:[self recurringOccurrenceRecordsAtDate:date
+        commitments:@[commitment] calendar:calendar]];
+}
+
 + (NSCalendar *)calendarForRecurringCommitment:(NSDictionary<NSString *,id> *)commitment
                               fallbackTimeZone:(NSTimeZone *)fallbackTimeZone {
     NSTimeZone *timeZone = SCDaemonSchedulerTimeZoneFromIdentifier(
@@ -696,7 +749,11 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
     // A policy replacement needs a staged PF/hosts/AppBlocker primitive. Keep
     // the currently enforced schedule until its approved end instead of
     // weakening enforcement with remove-then-add during a V2 mutation.
-    if (blockRunning && schedulerOwnsActive && desired != nil) {
+    NSDate *activeEnd = [state[@"block_end_date"] isKindOfClass:[NSDate class]]
+        ? state[@"block_end_date"] : nil;
+    BOOL recurringApprovedEndReached = [source isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring] &&
+        activeEnd != nil && [activeEnd compare:now] != NSOrderedDescending;
+    if (blockRunning && schedulerOwnsActive && desired != nil && !recurringApprovedEndReached) {
         [self finishEvaluation:@{@"status": @"deferred", @"stage": @"select", @"trigger": trigger}];
         return;
     }

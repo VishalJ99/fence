@@ -55,6 +55,9 @@ supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
                    capabilities:(NSArray<NSString *> *)capabilities
 supportsRecurringBundleAppendWithReason:(NSString* _Nullable * _Nullable)reason;
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString *> *)capabilities
+supportsRecurringCalendarStrictificationWithReason:(NSString * _Nullable * _Nullable)reason;
 
 /// Protocol 6 and later can hydrate and operate the recurring runtime that
 /// shipped in 3.4.12 even when newer timezone selectors are unavailable.
@@ -199,6 +202,12 @@ supportsTrustedTravelTimeZoneWithReason:(NSString* _Nullable * _Nullable)reason;
                            reply:(void(^)(NSError* error))reply;
 
 - (void)clearAllApprovedSchedules:(void(^)(NSError* error))reply;
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                         NSError * _Nullable error))reply;
 
 - (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID
                                       generation:(NSString *)generation

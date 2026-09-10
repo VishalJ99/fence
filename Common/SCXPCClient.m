@@ -773,6 +773,9 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
     if (![self isDaemonProtocolVersion:protocolVersion
                            capabilities:capabilities
           supportsRecurringBundleAppendWithReason:reason]) return NO;
+    if (![self isDaemonProtocolVersion:protocolVersion
+                           capabilities:capabilities
+          supportsRecurringCalendarStrictificationWithReason:reason]) return NO;
 
     if (reason != NULL) {
         *reason = @"compatible";
@@ -813,6 +816,22 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
           supportsTrustedTravelTimeZoneWithReason:reason]) return NO;
     if (![capabilities containsObject:SCDaemonCapabilityProtectedHoursStrictification]) {
         if (reason != NULL) *reason = @"protected-hours-strictification-missing";
+        return NO;
+    }
+    if (reason != NULL) *reason = @"compatible";
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString *> *)capabilities
+supportsRecurringCalendarStrictificationWithReason:(NSString **)reason {
+    if (protocolVersion < SCDaemonProtocolVersionRecurringCalendarStrictification) {
+        if (reason != NULL) *reason = @"recurring-calendar-strictify-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityRecurringCalendarStrictification]) {
+        if (reason != NULL) *reason = @"recurring-calendar-strictify-missing";
         return NO;
     }
     if (reason != NULL) *reason = @"compatible";
@@ -1510,6 +1529,32 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                 reply(error);
             }];
         }
+    }];
+}
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        if (daemonError != nil) { reply(@{}, daemonError); return; }
+        [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
+                                     NSString *marketingVersion, NSArray<NSString *> *capabilities,
+                                     NSError *handshakeError) {
+            NSString *reason = nil;
+            if (handshakeError != nil || ![SCXPCClient isDaemonProtocolVersion:protocolVersion
+                capabilities:capabilities supportsRecurringCalendarStrictificationWithReason:&reason]) {
+                reply(@{}, handshakeError ?: SCXPCCurrentDaemonRequiredError(reason));
+                return;
+            }
+            [self connectAndExecuteCommandBlock:^(NSError *error) {
+                if (error != nil) { reply(@{}, error); return; }
+                [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                    reply(@{}, proxyError);
+                }] updateRecurringScheduleForCommitmentID:commitmentID generation:generation
+                                                  segments:segments reply:reply];
+            }];
+        }];
     }];
 }
 

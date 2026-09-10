@@ -275,7 +275,7 @@
 
     // Warning label for committed state (hidden by default)
     self.committedWarningLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 90, y - 20, 190, 60)];
-    self.committedWarningLabel.stringValue = @"You can add apps and websites. End your commitment before removing them.";
+    self.committedWarningLabel.stringValue = @"Commitment active. Add apps and websites only; end it before removing them.";
     self.committedWarningLabel.font = [NSFont systemFontOfSize:10];
     self.committedWarningLabel.textColor = [NSColor systemRedColor];
     self.committedWarningLabel.bezeled = NO;

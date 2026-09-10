@@ -102,6 +102,15 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 
 - (nullable SCWeeklySchedule *)recurringScheduleForBundleID:(NSString *)bundleID;
 - (void)updateRecurringSchedule:(SCWeeklySchedule *)schedule;
+/// Explicitly saves a full calendar draft during an existing recurring
+/// commitment. Every existing bundle schedule must remain present, and its
+/// Allow windows may only shrink inside or be removed from their originals.
+/// The direct single-schedule setter remains locked during commitments.
+/// `updated` means root storage and its local mirror were verified (or no
+/// changes were needed); an error may still report incomplete enforcement.
+/// Errors expose store_persisted/local_mirrored to distinguish partial saves.
+- (void)updateRecurringSchedules:(NSArray<SCWeeklySchedule *> *)schedules
+                      completion:(void (^)(BOOL updated, NSError * _Nullable error))completion;
 - (SCWeeklySchedule *)createRecurringScheduleForBundle:(SCBlockBundle *)bundle;
 
 #pragma mark - Commitment

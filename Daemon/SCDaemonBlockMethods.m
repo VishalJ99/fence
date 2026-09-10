@@ -155,6 +155,17 @@ static BOOL SCRemoveBlockWithTelemetry(void) {
 NSTimeInterval METHOD_LOCK_TIMEOUT = 5.0;
 NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for checkups, because we'd prefer not to have tons pile up
 
+@interface SCDaemonBlockMethods ()
++ (void)startBlockWithControllingUID:(uid_t)controllingUID
+                          blocklist:(NSArray<NSString *> *)blocklist
+                        isAllowlist:(BOOL)isAllowlist
+                            endDate:(NSDate *)endDate
+                      blockSettings:(NSDictionary *)blockSettings
+                      authorization:(NSData * _Nullable)authData
+                    scheduledRecord:(NSDictionary * _Nullable)scheduledRecord
+                              reply:(void (^)(NSError * _Nullable error))reply;
+@end
+
 @implementation SCDaemonBlockMethods
 
 + (NSLock*)daemonMethodLock {
@@ -250,11 +261,6 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         return;
     }
 
-    if ([self activeSettingsMatchScheduledRecord:record scheduleID:scheduleID]) {
-        reply(nil);
-        return;
-    }
-
     NSNumber *owner = [record[@"controllingUID"] isKindOfClass:[NSNumber class]] ? record[@"controllingUID"] : nil;
     NSArray *blocklist = [record[@"blocklist"] isKindOfClass:[NSArray class]] ? record[@"blocklist"] : nil;
     NSDictionary *blockSettings = [record[@"blockSettings"] isKindOfClass:[NSDictionary class]] ? record[@"blockSettings"] : nil;
@@ -264,38 +270,16 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         return;
     }
 
+    NSMutableDictionary *request = [record mutableCopy];
+    request[@"scheduleID"] = scheduleID;
     [self startBlockWithControllingUID:owner.unsignedIntValue
                               blocklist:blocklist
                             isAllowlist:[record[@"isAllowlist"] boolValue]
                                 endDate:endDate
                           blockSettings:blockSettings
                           authorization:nil
-                                  reply:^(NSError *error) {
-        SCSettings *settings = [SCSettings sharedSettings];
-        NSArray *requested = [self comparableExistingBlocklistEntries:blocklist];
-        NSArray *active = [self comparableExistingBlocklistEntries:[settings valueForKey:@"ActiveBlocklist"] ?: @[]];
-        NSSet *requestedSet = [NSSet setWithArray:requested];
-        NSSet *activeSet = [NSSet setWithArray:active];
-        BOOL policyBecameActive = [SCBlockUtilities modernBlockIsRunning] &&
-            requestedSet.count == activeSet.count && [requestedSet isSubsetOfSet:activeSet] &&
-            [[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue] == owner.unsignedIntValue;
-        if (policyBecameActive) {
-            NSInteger schemaVersion = [record[SCDaemonScheduleSchemaVersionKey] integerValue];
-            NSString *source = schemaVersion >= 3 ? SCDaemonActiveBlockSourceSchedulerRecurring
-                : (schemaVersion >= 2 ? SCDaemonActiveBlockSourceSchedulerV2
-                                      : SCDaemonActiveBlockSourceLegacySchedule);
-            [settings setValue:source
-                        forKey:@"ActiveBlockSource"];
-            [settings setValue:scheduleID forKey:@"ActiveScheduleID"];
-            [settings setValue:record[SCDaemonScheduleCommitmentIDKey] forKey:@"ActiveScheduleCommitmentID"];
-            [settings setValue:record[SCDaemonScheduleGenerationKey] forKey:@"ActiveScheduleGeneration"];
-            [settings setValue:record[SCDaemonSchedulePolicyRevisionKey] forKey:@"ActiveSchedulePolicyRevision"];
-            [settings setValue:record[SCDaemonScheduleWeekKey] forKey:@"ActiveScheduleWeekKey"];
-            NSError *syncError = [settings syncSettingsAndWait:5];
-            if (error == nil && syncError != nil) error = syncError;
-        }
-        reply(error);
-    }];
+                        scheduledRecord:[request copy]
+                                  reply:reply];
 }
 
 + (void)endScheduledBlockWithReply:(void (^)(NSError * _Nullable))reply {
@@ -317,6 +301,28 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         return;
     }
 
+    if ([source isEqualToString:SCDaemonActiveBlockSourceSchedulerRecurring]) {
+        // A boundary evaluation may wait behind a calendar edit which adopts
+        // a later end. Recheck the current root policy after taking the lock;
+        // never let that stale teardown remove the newly coupled occurrence.
+        NSDate *now = [NSDate date];
+        NSDate *activeEnd = [settings valueForKey:@"BlockEndDate"];
+        if ([activeEnd isKindOfClass:[NSDate class]] && [activeEnd compare:now] == NSOrderedDescending) {
+            for (NSDictionary *commitment in [SCDaemonScheduler validRecurringCommitmentsFromValue:
+                [settings valueForKey:@"ApprovedRecurringScheduleCommitments"]
+                ownerUID:[[settings valueForKey:@"ActiveBlockControllingUID"] unsignedIntValue]]) {
+                if (![commitment[@"commitmentID"] isEqual:[settings valueForKey:@"ActiveScheduleCommitmentID"]] ||
+                    ![commitment[@"generation"] isEqual:[settings valueForKey:@"ActiveScheduleGeneration"]]) continue;
+                if ([SCDaemonScheduler recurringRecordAtDate:now commitment:commitment
+                    activeBreaks:[settings valueForKey:@"ActiveScheduleBreaks"]] != nil) {
+                    reply([SCErr errorWithCode:403 subDescription:@"Recurring occurrence changed before teardown"]);
+                    [self.daemonMethodLock unlock];
+                    return;
+                }
+            }
+        }
+    }
+
     BOOL removed = SCRemoveBlockWithTelemetry();
     if (removed) [[SCDaemon sharedDaemon] stopCheckupTimer];
     reply(removed ? nil : [SCErr errorWithCode:500 subDescription:@"Scheduled block teardown did not verify"]);
@@ -326,18 +332,53 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
 
 + (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData * _Nullable)authData reply:(void(^)(NSError* _Nullable error))reply {
+    [self startBlockWithControllingUID:controllingUID blocklist:blocklist isAllowlist:isAllowlist
+        endDate:endDate blockSettings:blockSettings authorization:authData scheduledRecord:nil reply:reply];
+}
+
++ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString *> *)blocklist
+                        isAllowlist:(BOOL)isAllowlist endDate:(NSDate *)endDate
+                      blockSettings:(NSDictionary *)blockSettings authorization:(NSData * _Nullable)authData
+                    scheduledRecord:(NSDictionary * _Nullable)scheduledRecord
+                              reply:(void (^)(NSError * _Nullable))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
         return;
     }
-
-    // A corrupt or unreadable secured plist may be the only remaining record
-    // of an active block. Never replace that unknown authoritative state with
-    // a new request; preserve the file and physical layers for repair.
+    // Fail closed before resolving any schedule from the secured store.
     SCSettings *settings = [SCSettings sharedSettings];
     if (!settings.settingsStateAvailableForEnforcement) {
-        NSLog(@"ERROR: Refusing block start because secured settings are unavailable");
-        NSError *err = [SCErr errorWithCode:SCSettingsStateUnavailableErrorCode];
-        reply(err);
+        reply([SCErr errorWithCode:SCSettingsStateUnavailableErrorCode]);
+        [self.daemonMethodLock unlock];
+        return;
+    }
+
+    if ([scheduledRecord[SCDaemonScheduleSchemaVersionKey] integerValue] >= 3) {
+        // The scheduler selected a snapshot before it acquired the daemon
+        // lock. Resolve the current root template here, including its break
+        // state, so a calendar replacement cannot start an obsolete segment.
+        NSDictionary *currentRecord = nil;
+        for (NSDictionary *commitment in [SCDaemonScheduler validRecurringCommitmentsFromValue:
+            [settings valueForKey:@"ApprovedRecurringScheduleCommitments"] ownerUID:controllingUID]) {
+            if (![commitment[@"commitmentID"] isEqual:scheduledRecord[SCDaemonScheduleCommitmentIDKey]] ||
+                ![commitment[@"generation"] isEqual:scheduledRecord[SCDaemonScheduleGenerationKey]]) continue;
+            currentRecord = [SCDaemonScheduler recurringRecordAtDate:[NSDate date] commitment:commitment
+                activeBreaks:[settings valueForKey:@"ActiveScheduleBreaks"]];
+            break;
+        }
+        if (currentRecord == nil) {
+            reply([SCErr errorWithCode:403 subDescription:@"Recurring occurrence is no longer active"]);
+            [self.daemonMethodLock unlock];
+            return;
+        }
+        scheduledRecord = currentRecord;
+        blocklist = currentRecord[@"blocklist"];
+        isAllowlist = [currentRecord[@"isAllowlist"] boolValue];
+        endDate = currentRecord[@"approvedEndDate"];
+        blockSettings = currentRecord[@"blockSettings"];
+    }
+    if (scheduledRecord != nil && [self activeSettingsMatchScheduledRecord:scheduledRecord
+        scheduleID:scheduledRecord[@"scheduleID"]]) {
+        reply(nil);
         [self.daemonMethodLock unlock];
         return;
     }
@@ -421,6 +462,17 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     [settings setValue:nil forKey:@"ActiveScheduleGeneration"];
     [settings setValue:nil forKey:@"ActiveSchedulePolicyRevision"];
     [settings setValue:nil forKey:@"ActiveScheduleWeekKey"];
+    if (scheduledRecord != nil) {
+        NSInteger schemaVersion = [scheduledRecord[SCDaemonScheduleSchemaVersionKey] integerValue];
+        [settings setValue:(schemaVersion >= 3 ? SCDaemonActiveBlockSourceSchedulerRecurring :
+            (schemaVersion >= 2 ? SCDaemonActiveBlockSourceSchedulerV2 : SCDaemonActiveBlockSourceLegacySchedule))
+            forKey:@"ActiveBlockSource"];
+        [settings setValue:scheduledRecord[@"scheduleID"] forKey:@"ActiveScheduleID"];
+        [settings setValue:scheduledRecord[SCDaemonScheduleCommitmentIDKey] forKey:@"ActiveScheduleCommitmentID"];
+        [settings setValue:scheduledRecord[SCDaemonScheduleGenerationKey] forKey:@"ActiveScheduleGeneration"];
+        [settings setValue:scheduledRecord[SCDaemonSchedulePolicyRevisionKey] forKey:@"ActiveSchedulePolicyRevision"];
+        [settings setValue:scheduledRecord[SCDaemonScheduleWeekKey] forKey:@"ActiveScheduleWeekKey"];
+    }
 
     NSUInteger appEntryCount = 0;
     for (NSString *entry in canonicalBlocklist) {

@@ -25,7 +25,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionTrustedTravelTimeZone = 8,
     SCDaemonProtocolVersionProtectedHoursStrictification = 9,
     SCDaemonProtocolVersionRecurringBundleAppend = 10,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringBundleAppend,
+    SCDaemonProtocolVersionRecurringCalendarStrictification = 11,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringCalendarStrictification,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -45,6 +46,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityTrustedTravelTimeZone @"trusted-travel-time-zone-v1"
 #define SCDaemonCapabilityProtectedHoursStrictification @"protected-hours-strictification-v1"
 #define SCDaemonCapabilityRecurringBundleAppend @"recurring-bundle-append-v1"
+#define SCDaemonCapabilityRecurringCalendarStrictification @"recurring-calendar-strictify-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -343,6 +345,14 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
 
 // XPC method to append stricter entries to selected pre-approved schedules.
 // Each selected schedule must contain the provided existing entries before it is changed.
+/// Replaces only the recurring template after root-owned pointwise strictness
+/// validation. Commitment metadata and timed breaks are never replaced.
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                         NSError * _Nullable error))reply;
+
 - (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID
                                       generation:(NSString *)generation
                                         bundleID:(NSString *)bundleID

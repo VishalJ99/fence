@@ -581,6 +581,170 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecurringCommitment(uid_t ow
                                               ownerUID:502 commitment:commitment]);
 }
 
+- (NSDictionary *)calendarCommitmentAtDate:(NSDate *)date {
+    NSMutableDictionary *commitment = [SCSchedulerTestRecurringCommitment(501,
+        [date dateByAddingTimeInterval:-86400], [date dateByAddingTimeInterval:-1],
+        @{@"enabled": @NO, @"startMinute": @1380, @"endMinute": @300}) mutableCopy];
+    commitment[SCDaemonRecurringTimeZoneIdentifierKey] = @"UTC";
+    commitment[SCDaemonRecurringFollowsLocationTimeZoneKey] = @NO;
+    NSMutableDictionary *segment = [commitment[@"segments"][0] mutableCopy];
+    segment[@"endMinuteOfWeek"] = @720;
+    commitment[@"segments"] = @[segment];
+    return [commitment copy];
+}
+
+- (NSArray *)splitCalendarSegmentsForCommitment:(NSDictionary *)commitment {
+    NSMutableArray *segments = [NSMutableArray array];
+    for (NSInteger index = 0; index < 3; index++) {
+        NSMutableDictionary *segment = [commitment[@"segments"][0] mutableCopy];
+        segment[@"segmentID"] = NSUUID.UUID.UUIDString;
+        segment[SCDaemonSchedulePolicyRevisionKey] = NSUUID.UUID.UUIDString;
+        segment[@"startMinuteOfWeek"] = @(540 + 60 * index);
+        segment[@"endMinuteOfWeek"] = @(600 + 60 * index);
+        if (index == 1) {
+            segment[@"blocklist"] = @[@"example.com", @"added.example"];
+            segment[SCDaemonScheduleSourceBundleIDsKey] = @[SCSchedulerTestBundleID, SCSchedulerTestScheduleID3];
+        }
+        [segments addObject:[segment copy]];
+    }
+    return [segments copy];
+}
+
+- (void)testCalendarStrictificationPreservesEnvelopeAndExpiredButSurvivingCommitment {
+    NSDate *date = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSDictionary *original = [self calendarCommitmentAtDate:date];
+    NSArray *segments = [self splitCalendarSegmentsForCommitment:original];
+    NSDictionary *updated = [SCDaemonScheduler recurringCommitment:original
+        strictifyingSegments:segments maximumEntries:4096];
+    XCTAssertNotNil(updated);
+    for (NSString *key in original) {
+        if (![key isEqual:@"segments"]) XCTAssertEqualObjects(updated[key], original[key]);
+    }
+    XCTAssertEqualObjects(updated[@"segments"], segments);
+    XCTAssertEqual([original[@"segments"] count], 1U, @"No in-place mutation of the root record");
+    XCTAssertEqualObjects(updated, [SCDaemonScheduler recurringCommitment:updated
+        strictifyingSegments:segments maximumEntries:4096], @"Exact retries remain valid");
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:updated
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    NSDictionary *restored = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:NULL error:nil];
+    XCTAssertEqualObjects(restored, updated);
+    NSDate *nextWeek = [date dateByAddingTimeInterval:7 * 86400 + 3600];
+    XCTAssertEqualObjects([SCDaemonScheduler recurringRecordAtDate:nextWeek commitment:restored
+        activeBreaks:@{}][@"blocklist"], (@[@"example.com", @"added.example"]));
+}
+
+- (void)testCalendarStrictificationRejectsLostMinutesEntriesSourcesAndInvalidLimits {
+    NSDate *date = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSDictionary *original = [self calendarCommitmentAtDate:date];
+    NSArray *segments = [self splitCalendarSegmentsForCommitment:original];
+    for (NSDictionary *change in @[
+        @{@"startMinuteOfWeek": @601}, // one uncovered minute
+        @{@"blocklist": @[@"added.example"]},
+        @{SCDaemonScheduleSourceBundleIDsKey: @[SCSchedulerTestScheduleID3]},
+        @{@"startMinuteOfWeek": @599}, // overlap
+        @{@"isAllowlist": @YES},
+        @{@"segmentID": segments[0][@"segmentID"]},
+    ]) {
+        NSMutableArray *candidate = [segments mutableCopy];
+        NSMutableDictionary *middle = [candidate[1] mutableCopy];
+        [middle addEntriesFromDictionary:change];
+        candidate[1] = middle;
+        XCTAssertNil([SCDaemonScheduler recurringCommitment:original
+            strictifyingSegments:candidate maximumEntries:4096], @"Rejected %@", change);
+    }
+    XCTAssertNil([SCDaemonScheduler recurringCommitment:original strictifyingSegments:@[] maximumEntries:4096]);
+    XCTAssertNil([SCDaemonScheduler recurringCommitment:original strictifyingSegments:segments maximumEntries:3]);
+    XCTAssertNotNil([SCDaemonScheduler recurringCommitment:original strictifyingSegments:segments maximumEntries:4]);
+}
+
+- (void)testCalendarStrictificationRejectsStaleProposalAfterConcurrentBundleAddition {
+    NSDate *date = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSDictionary *original = [self calendarCommitmentAtDate:date];
+    NSArray *stale = [self splitCalendarSegmentsForCommitment:original];
+    NSDictionary *current = [SCDaemonScheduler recurringCommitment:original
+        appendingEntries:@[@"concurrent.example"] forBundleID:SCSchedulerTestBundleID maximumEntries:4096];
+    XCTAssertNil([SCDaemonScheduler recurringCommitment:current strictifyingSegments:stale maximumEntries:4096]);
+    XCTAssertTrue([current[@"segments"][0][@"blocklist"] containsObject:@"concurrent.example"]);
+}
+
+- (void)testCalendarCurrentRootResolverRejectsStaleOccurrenceAndPreservesBreak {
+    NSDate *date = [self dateWithYear:2026 month:7 day:13 hour:10 minute:15];
+    NSDictionary *original = [self calendarCommitmentAtDate:date];
+    NSDictionary *stale = [SCDaemonScheduler recurringRecordAtDate:date commitment:original activeBreaks:@{}];
+    NSDictionary *updated = [SCDaemonScheduler recurringCommitment:original
+        strictifyingSegments:[self splitCalendarSegmentsForCommitment:original] maximumEntries:4096];
+    NSDictionary *current = [SCDaemonScheduler recurringRecordAtDate:date commitment:updated activeBreaks:@{}];
+    XCTAssertNotEqualObjects(stale[@"scheduleID"], current[@"scheduleID"]);
+    XCTAssertNotEqualObjects(stale[@"approvedEndDate"], current[@"approvedEndDate"]);
+    XCTAssertEqualObjects(current[@"blocklist"], (@[@"example.com", @"added.example"]));
+    NSDictionary *breaks = @{SCSchedulerTestCommitmentID: @{
+        @"schemaVersion": @1, @"commitmentID": SCSchedulerTestCommitmentID,
+        @"generation": SCSchedulerTestGenerationID, @"controllingUID": @501,
+        @"startedAt": [date dateByAddingTimeInterval:-60], @"endsAt": [date dateByAddingTimeInterval:60],
+    }};
+    XCTAssertNil([SCDaemonScheduler recurringRecordAtDate:date commitment:updated activeBreaks:breaks]);
+    XCTAssertNotNil([SCDaemonScheduler recurringRecordAtDate:[date dateByAddingTimeInterval:60]
+        commitment:updated activeBreaks:breaks]);
+    NSMutableDictionary *protected = [updated mutableCopy];
+    protected[@"protectedHours"] = @{@"enabled": @YES, @"startMinute": @600, @"endMinute": @660};
+    XCTAssertNotNil([SCDaemonScheduler recurringRecordAtDate:date commitment:protected activeBreaks:breaks]);
+}
+
+- (void)testCalendarSplitBoundariesUseApprovedEndTurnoverAndNeverEarlyTeardown {
+    NSDate *date = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSDictionary *original = [self calendarCommitmentAtDate:date];
+    NSDictionary *updated = [SCDaemonScheduler recurringCommitment:original
+        strictifyingSegments:[self splitCalendarSegmentsForCommitment:original] maximumEntries:4096];
+    NSDictionary *first = [SCDaemonScheduler recurringRecordAtDate:date commitment:updated activeBreaks:@{}];
+    NSMutableDictionary *state = [self idleStateAtDate:date approvedSchedules:@{}];
+    [state addEntriesFromDictionary:@{
+        @"approved_recurring_commitments": @{SCSchedulerTestCommitmentID: updated},
+        @"block_running": @YES, @"active_owner_uid": @501,
+        @"active_block_source": SCDaemonActiveBlockSourceSchedulerRecurring,
+        @"active_schedule_id": first[@"scheduleID"],
+        @"active_policy_revision": first[SCDaemonSchedulePolicyRevisionKey],
+        @"block_end_date": first[@"approvedEndDate"],
+    }];
+    __block NSUInteger ends = 0;
+    __block NSUInteger starts = 0;
+    __block BOOL failEnd = NO;
+    SCDaemonScheduler *scheduler = [[SCDaemonScheduler alloc]
+        initWithStateProvider:^NSDictionary *{ return [state copy]; }
+        reconcileHandler:^(NSString *scheduleID, NSDictionary *record, void (^completion)(NSError *)) {
+            starts++;
+            state[@"block_running"] = @YES;
+            state[@"active_schedule_id"] = scheduleID;
+            state[@"active_policy_revision"] = record[SCDaemonSchedulePolicyRevisionKey];
+            state[@"block_end_date"] = record[@"approvedEndDate"];
+            state[@"active_blocklist"] = record[@"blocklist"];
+            completion(nil);
+        } endHandler:^(void (^completion)(NSError *)) {
+            ends++;
+            if (failEnd) {
+                completion([NSError errorWithDomain:@"test" code:1 userInfo:nil]);
+                return;
+            }
+            state[@"block_running"] = @NO;
+            completion(nil);
+        } anomalyHandler:nil];
+    XCTAssertEqualObjects([self evaluateScheduler:scheduler trigger:@"mutation"][@"status"], @"verified");
+    XCTAssertEqual(ends, 0U);
+    state[@"now"] = [self dateWithYear:2026 month:7 day:13 hour:10 minute:0];
+    XCTAssertEqualObjects([self evaluateScheduler:scheduler trigger:@"timer"][@"status"], @"verified");
+    XCTAssertEqual(ends, 1U);
+    XCTAssertEqual(starts, 1U);
+    XCTAssertEqualObjects(state[@"active_blocklist"], (@[@"example.com", @"added.example"]));
+    state[@"now"] = [self dateWithYear:2026 month:7 day:13 hour:11 minute:0];
+    failEnd = YES;
+    XCTAssertEqualObjects([self evaluateScheduler:scheduler trigger:@"timer"][@"status"], @"failed");
+    XCTAssertEqual(starts, 1U, @"Failed teardown never starts a replacement");
+    failEnd = NO;
+    XCTAssertEqualObjects([self evaluateScheduler:scheduler trigger:@"timer"][@"status"], @"verified");
+    XCTAssertEqual(starts, 2U);
+    XCTAssertEqualObjects(state[@"active_blocklist"], (@[@"example.com"]));
+}
+
 - (void)testRecurringActiveMatchRequiresRecurringProvenanceAndOccurrenceEnd {
     NSDate *start = [self dateWithYear:2026 month:7 day:13 hour:9 minute:0];
     NSDictionary *commitment = SCSchedulerTestRecurringCommitment(501,

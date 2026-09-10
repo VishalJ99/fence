@@ -78,6 +78,18 @@ typedef void (^SCDaemonSchedulerAnomalyHandler)(NSDictionary<NSString *, id> *fi
                                                forBundleID:(NSString *)bundleID
                                             maximumEntries:(NSUInteger)maximumEntries;
 
+/// Replaces a template only if each old blocked entry AND source bundle is
+/// still present at every old blocked minute. All other root fields survive.
++ (nullable NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                                       strictifyingSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                             maximumEntries:(NSUInteger)maximumEntries;
+
+/// Resolves a fresh effective occurrence from an authoritative commitment,
+/// respecting its timezone, timed break, and protected-hours override.
++ (nullable NSDictionary<NSString *, id> *)recurringRecordAtDate:(NSDate *)date
+                                                    commitment:(NSDictionary<NSString *, id> *)commitment
+                                                   activeBreaks:(id)activeBreaks;
+
 /// Returns a Monday-first Gregorian calendar rooted in the commitment's
 /// accepted timezone. Legacy records without timezone fields use the supplied
 /// fallback solely until the startup pinning migration persists them.

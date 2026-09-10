@@ -18,6 +18,7 @@
 #import "HostFileBlocker.h"
 #import "SCBlockBundle.h"
 #import "SCWeeklySchedule.h"
+#import "SCRecurringScheduleCompiler.h"
 #import "SCTimeRange.h"
 #import "SCScheduleManager.h"
 #import "SCLogger.h"
@@ -71,6 +72,26 @@
 }
 - (void)bundleEditorDidCancel:(SCBundleEditorController *)editor { self.cancelled = YES; }
 - (void)bundleEditor:(SCBundleEditorController *)editor didDeleteBundle:(SCBlockBundle *)bundle {}
+@end
+
+@interface SCCalendarGridView (ActiveCalendarTests)
+- (void)handleScheduleUpdate:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID;
+@end
+
+@interface SCActiveCalendarGridRecorder : NSObject <SCCalendarGridViewDelegate>
+@property (nonatomic) NSUInteger updateCount;
+@property (nonatomic) NSUInteger restrictedCount;
+@property (nonatomic, strong) SCWeeklySchedule *lastSchedule;
+@end
+
+@implementation SCActiveCalendarGridRecorder
+- (void)calendarGrid:(SCCalendarGridView *)grid didUpdateSchedule:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {
+    self.updateCount++;
+    self.lastSchedule = [schedule copy];
+}
+- (void)calendarGridDidAttemptRestrictedEdit:(SCCalendarGridView *)grid { self.restrictedCount++; }
+- (void)calendarGridDidClickEmptyArea:(SCCalendarGridView *)grid {}
+- (void)calendarGrid:(SCCalendarGridView *)grid didRequestEditBundle:(SCBlockBundle *)bundle forDay:(SCDayOfWeek)day {}
 @end
 
 @interface SCCountdownWarningController (Testing)
@@ -205,6 +226,9 @@ static NSDictionary<NSString *, id> *SCSentryParsedEnvelopeFromRequest(NSURLRequ
                    toBundleID:(NSString *)bundleID
                    commitment:(NSDictionary<NSString *, id> *)commitment
                         reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply;
+- (void)submitRecurringCalendarSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             commitment:(NSDictionary<NSString *, id> *)commitment
+                                  reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply;
 @end
 
 @interface SCRecurringBundleAppendTestManager : SCScheduleManager
@@ -222,6 +246,23 @@ static NSDictionary<NSString *, id> *SCSentryParsedEnvelopeFromRequest(NSURLRequ
     self.appendedBundleID = bundleID;
     if (self.appendReplies == nil) self.appendReplies = [NSMutableArray array];
     [self.appendReplies addObject:[reply copy]];
+}
+@end
+
+@interface SCRecurringCalendarTestManager : SCRecurringBundleAppendTestManager
+@property (nonatomic, strong) NSMutableArray *calendarReplies;
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, id> *> *submittedCalendarSegments;
+@property (nonatomic, copy) NSDictionary<NSString *, id> *submittedCalendarCommitment;
+@end
+
+@implementation SCRecurringCalendarTestManager
+- (void)submitRecurringCalendarSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             commitment:(NSDictionary<NSString *, id> *)commitment
+                                  reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    self.submittedCalendarSegments = [segments copy];
+    self.submittedCalendarCommitment = [commitment copy];
+    if (self.calendarReplies == nil) self.calendarReplies = [NSMutableArray array];
+    [self.calendarReplies addObject:[reply copy]];
 }
 @end
 
@@ -340,6 +381,18 @@ static SCScheduleManager *SCInstallRecurringTelemetryFixture(NSUserDefaults *def
     return [[SCScheduleManager alloc] init];
 }
 
+static SCRecurringCalendarTestManager *SCInstallRecurringCalendarFixture(NSUserDefaults *defaults) {
+    SCScheduleManager *original = SCInstallRecurringTelemetryFixture(defaults);
+    SCWeeklySchedule *schedule = [original.recurringSchedules.firstObject copy];
+    [schedule setAllowedWindows:@[
+        [SCTimeRange rangeWithStart:@"09:00" end:@"17:00"],
+        [SCTimeRange rangeWithStart:@"18:00" end:@"20:00"],
+    ] forDay:SCDayOfWeekMonday];
+    [defaults setObject:@[schedule.toDictionary] forKey:@"SCRecurringSchedules"];
+    [defaults synchronize];
+    return [SCRecurringCalendarTestManager new];
+}
+
 static NSArray<NSString *> *SCLegacyRecurringDaemonCapabilities(void) {
     return @[
         SCDaemonCapabilityRecurringScheduleStore,
@@ -366,6 +419,7 @@ static NSArray<NSString *> *SCCurrentDaemonCapabilities(void) {
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
         SCDaemonCapabilityRecurringBundleAppend,
+        SCDaemonCapabilityRecurringCalendarStrictification,
     ];
 }
 
@@ -515,7 +569,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertEqualObjects(doneButton.title, @"Done");
     XCTAssertFalse(warningLabel.hidden);
     XCTAssertEqualObjects(warningLabel.stringValue,
-                          @"You can add apps and websites. End your commitment before removing them.");
+                          @"Commitment active. Add apps and websites only; end it before removing them.");
     XCTAssertEqualObjects(warningLabel.textColor, NSColor.systemRedColor);
 
     for (NSView *colorView in [editor valueForKey:@"colorViews"]) {
@@ -760,6 +814,256 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     }
 }
 
+- (void)testRecurringCalendarSaveMirrorsOnlyVerifiedRootStorageAndReportsPartialEnforcement {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        NSArray<NSDictionary *> *results = @[
+            @{@"outcome": @"verified", @"store_persisted": @YES, @"post_write_match": @YES,
+              @"reconcile_succeeded": @YES, @"failed_stage": @"none"},
+            @{@"outcome": @"failed", @"store_persisted": @NO, @"post_write_match": @NO,
+              @"reconcile_succeeded": @NO, @"failed_stage": @"persist"},
+            @{@"outcome": @"partial", @"store_persisted": @YES, @"post_write_match": @YES,
+              @"reconcile_succeeded": @NO, @"failed_stage": @"evaluate"},
+            @{@"outcome": @"partial", @"store_persisted": @YES, @"post_write_match": @NO,
+              @"reconcile_succeeded": @NO, @"failed_stage": @"verification"},
+            @{},
+        ];
+        for (NSDictionary *result in results) {
+            SCClearRecurringTelemetryDefaults(defaults);
+            SCRecurringCalendarTestManager *manager = SCInstallRecurringCalendarFixture(defaults);
+            [defaults setObject:@{@"endsAt": [NSDate dateWithTimeIntervalSinceNow:300]}
+                         forKey:@"SCActiveTimedBreak"];
+            [defaults setInteger:2 forKey:@"SCBreakCreditsRemainingToday"];
+            NSDictionary *runtimeBefore = SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys());
+            NSArray *bundlesBefore = [defaults objectForKey:@"SCScheduleBundles"];
+            NSArray *schedulesBefore = [defaults objectForKey:@"SCRecurringSchedules"];
+            SCWeeklySchedule *draft = [manager.recurringSchedules.firstObject copy];
+            [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"16:00"]]
+                              forDay:SCDayOfWeekMonday];
+            NSArray *expectedSchedules = @[draft.toDictionary];
+            XCTestExpectation *completed = [self expectationWithDescription:@"calendar save response"];
+            __block BOOL updated = NO;
+            __block NSError *saveError = nil;
+            [manager updateRecurringSchedules:@[draft] completion:^(BOOL saved, NSError *error) {
+                updated = saved;
+                saveError = error;
+                [completed fulfill];
+            }];
+            XCTAssertEqual(manager.calendarReplies.count, 1);
+            XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"], schedulesBefore);
+            XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary, schedulesBefore.firstObject);
+            XCTAssertEqualObjects(manager.submittedCalendarCommitment,
+                                  [defaults objectForKey:@"SCRecurringCommitment"]);
+            XCTAssertEqual(manager.submittedCalendarSegments.count, 2);
+            XCTAssertEqualObjects(manager.submittedCalendarSegments[0][SCRecurringSegmentStartMinuteKey], @0);
+            XCTAssertEqualObjects(manager.submittedCalendarSegments[0][SCRecurringSegmentEndMinuteKey], @600);
+            XCTAssertEqualObjects(manager.submittedCalendarSegments[1][SCRecurringSegmentStartMinuteKey], @960);
+            XCTAssertEqualObjects(manager.submittedCalendarSegments[1][SCRecurringSegmentEndMinuteKey], @10080);
+            for (NSDictionary *segment in manager.submittedCalendarSegments) {
+                XCTAssertEqualObjects(segment[SCRecurringSegmentBlocklistKey], (@[@"example.com"]));
+                XCTAssertEqualObjects(segment[SCRecurringSegmentSourceBundleIDsKey],
+                                      (@[manager.bundles.firstObject.bundleID]));
+                XCTAssertEqualObjects(segment[@"isAllowlist"], @NO);
+            }
+            // A caller can continue mutating its own draft while the request is
+            // pending; those later mutations must not enter the saved copy.
+            [draft clearDay:SCDayOfWeekMonday];
+            BOOL verified = [result[@"outcome"] isEqualToString:@"verified"];
+            BOOL rootStored = [result[@"store_persisted"] boolValue] && [result[@"post_write_match"] boolValue];
+            void (^reply)(NSDictionary *, NSError *) = manager.calendarReplies.firstObject;
+            reply(result, verified ? nil : [NSError errorWithDomain:@"Fixture" code:1 userInfo:nil]);
+            [self waitForExpectations:@[completed] timeout:2];
+            XCTAssertEqual(updated, rootStored);
+            XCTAssertEqual(saveError == nil, verified);
+            if (!verified) {
+                XCTAssertEqualObjects(saveError.userInfo[@"store_persisted"],
+                                      @([result[@"store_persisted"] boolValue]));
+                XCTAssertEqualObjects(saveError.userInfo[@"local_mirrored"], @(rootStored));
+            }
+            XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"],
+                                  rootStored ? expectedSchedules : schedulesBefore);
+            XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary,
+                                  (rootStored ? expectedSchedules : schedulesBefore).firstObject);
+            XCTAssertEqualObjects([defaults objectForKey:@"SCScheduleBundles"], bundlesBefore);
+            XCTAssertEqualObjects(SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys()), runtimeBefore);
+        }
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringCalendarUnchangedDraftSkipsDaemonAndDirectSetterStaysLocked {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRecurringCalendarTestManager *manager = SCInstallRecurringCalendarFixture(defaults);
+        SCWeeklySchedule *original = [manager.recurringSchedules.firstObject copy];
+        __block BOOL updated = NO;
+        [manager updateRecurringSchedules:@[[original copy]] completion:^(BOOL saved, NSError *error) {
+            updated = saved;
+            XCTAssertNil(error);
+        }];
+        XCTAssertTrue(updated);
+        XCTAssertEqual(manager.calendarReplies.count, 0);
+        SCWeeklySchedule *draft = [original copy];
+        [draft clearDay:SCDayOfWeekMonday];
+        [manager updateRecurringSchedule:draft];
+        XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary, original.toDictionary);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"], (@[original.toDictionary]));
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringCalendarRejectsWeakerNewSplitOrMissingWindowsEvenAfterDeadline {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRecurringCalendarTestManager *manager = SCInstallRecurringCalendarFixture(defaults);
+        NSMutableDictionary *expired = [[defaults objectForKey:@"SCRecurringCommitment"] mutableCopy];
+        expired[@"startedAt"] = [NSDate dateWithTimeIntervalSinceNow:-3600];
+        expired[@"lockEndsAt"] = [NSDate dateWithTimeIntervalSinceNow:-60];
+        [defaults setObject:expired forKey:@"SCRecurringCommitment"];
+        XCTAssertTrue(manager.hasRecurringCommitment);
+        XCTAssertFalse(manager.isRecurringCommitmentLockActive);
+        SCWeeklySchedule *original = [manager.recurringSchedules.firstObject copy];
+        NSMutableArray<NSArray<SCWeeklySchedule *> *> *invalidDrafts = [NSMutableArray array];
+        for (NSArray<SCTimeRange *> *windows in @[
+            @[[SCTimeRange rangeWithStart:@"08:00" end:@"17:00"]],
+            @[[SCTimeRange rangeWithStart:@"09:00" end:@"20:00"]],
+            @[[SCTimeRange rangeWithStart:@"09:00" end:@"12:00"],
+              [SCTimeRange rangeWithStart:@"13:00" end:@"17:00"]],
+            @[[SCTimeRange rangeWithStart:@"10:00" end:@"10:10"]],
+        ]) {
+            SCWeeklySchedule *draft = [original copy];
+            [draft setAllowedWindows:windows forDay:SCDayOfWeekMonday];
+            [invalidDrafts addObject:@[draft]];
+        }
+        SCWeeklySchedule *newDay = [original copy];
+        [newDay addAllowedWindow:[SCTimeRange rangeWithStart:@"10:00" end:@"11:00"]
+                          toDay:SCDayOfWeekTuesday];
+        [invalidDrafts addObject:@[newDay]];
+        [invalidDrafts addObject:@[]];
+        [invalidDrafts addObject:@[original, [original copy]]];
+        [invalidDrafts addObject:@[[SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString]]];
+        for (NSArray *drafts in invalidDrafts) {
+            __block BOOL completed = NO;
+            [manager updateRecurringSchedules:drafts completion:^(BOOL saved, NSError *error) {
+                completed = YES;
+                XCTAssertFalse(saved);
+                XCTAssertNotNil(error);
+                XCTAssertEqualObjects(error.userInfo[@"store_persisted"], @NO);
+            }];
+            XCTAssertTrue(completed);
+            XCTAssertEqual(manager.calendarReplies.count, 0);
+            XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary, original.toDictionary);
+        }
+        // An expired deadline permits End; it does not turn off the active
+        // commitment's monotonic save rule or the explicit daemon route.
+        SCWeeklySchedule *stronger = [original copy];
+        [stronger clearDay:SCDayOfWeekMonday];
+        XCTestExpectation *completed = [self expectationWithDescription:@"stronger calendar after deadline"];
+        [manager updateRecurringSchedules:@[stronger] completion:^(BOOL saved, NSError *error) {
+            XCTAssertTrue(saved);
+            XCTAssertNil(error);
+            [completed fulfill];
+        }];
+        XCTAssertEqual(manager.calendarReplies.count, 1);
+        void (^reply)(NSDictionary *, NSError *) = manager.calendarReplies.firstObject;
+        reply(@{@"outcome": @"verified", @"store_persisted": @YES, @"post_write_match": @YES,
+                @"reconcile_succeeded": @YES, @"failed_stage": @"none"}, nil);
+        [self waitForExpectations:@[completed] timeout:2];
+        XCTAssertTrue(manager.hasRecurringCommitment);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringCommitment"], expired);
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringCalendarAcknowledgmentPreservesNewerCommitmentOrBundleContents {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        for (NSString *mutation in @[@"generation", @"commitmentID", @"bundle", @"ended"]) {
+            SCClearRecurringTelemetryDefaults(defaults);
+            SCRecurringCalendarTestManager *manager = SCInstallRecurringCalendarFixture(defaults);
+            NSArray *originalSchedules = [defaults objectForKey:@"SCRecurringSchedules"];
+            SCWeeklySchedule *draft = [manager.recurringSchedules.firstObject copy];
+            [draft clearDay:SCDayOfWeekMonday];
+            XCTestExpectation *completed = [self expectationWithDescription:mutation];
+            [manager updateRecurringSchedules:@[draft] completion:^(BOOL saved, NSError *error) {
+                XCTAssertFalse(saved);
+                XCTAssertEqualObjects(error.userInfo[@"store_persisted"], @YES);
+                XCTAssertEqualObjects(error.userInfo[@"local_mirrored"], @NO);
+                XCTAssertEqualObjects(error.userInfo[@"failed_stage"], @"commitment_resolution");
+                [completed fulfill];
+            }];
+            XCTAssertEqual(manager.calendarReplies.count, 1);
+            if ([mutation isEqualToString:@"bundle"]) {
+                [manager.bundles.firstObject addEntry:@"newer.example"];
+                [manager save];
+            } else if ([mutation isEqualToString:@"ended"]) {
+                [defaults removeObjectForKey:@"SCRecurringCommitment"];
+            } else {
+                NSMutableDictionary *newCommitment = [[defaults objectForKey:@"SCRecurringCommitment"] mutableCopy];
+                newCommitment[mutation] = NSUUID.UUID.UUIDString;
+                [defaults setObject:newCommitment forKey:@"SCRecurringCommitment"];
+            }
+            NSDictionary *stateBeforeReply = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+            void (^reply)(NSDictionary *, NSError *) = manager.calendarReplies.firstObject;
+            reply(@{@"outcome": @"verified", @"store_persisted": @YES, @"post_write_match": @YES,
+                    @"reconcile_succeeded": @YES, @"failed_stage": @"none"}, nil);
+            [self waitForExpectations:@[completed] timeout:2];
+            XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"], originalSchedules);
+            XCTAssertEqualObjects(SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults)), stateBeforeReply);
+        }
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringCalendarOutOfOrderAcknowledgmentCannotReplaceNewerCalendar {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCRecurringCalendarTestManager *manager = SCInstallRecurringCalendarFixture(defaults);
+        SCWeeklySchedule *first = [manager.recurringSchedules.firstObject copy];
+        [first setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"16:00"]]
+                          forDay:SCDayOfWeekMonday];
+        SCWeeklySchedule *second = [first copy];
+        [second clearDay:SCDayOfWeekMonday];
+        XCTestExpectation *firstCompleted = [self expectationWithDescription:@"stale calendar reply"];
+        XCTestExpectation *secondCompleted = [self expectationWithDescription:@"newer calendar reply"];
+        [manager updateRecurringSchedules:@[first] completion:^(BOOL saved, NSError *error) {
+            XCTAssertFalse(saved);
+            XCTAssertEqualObjects(error.userInfo[@"failed_stage"], @"commitment_resolution");
+            [firstCompleted fulfill];
+        }];
+        [manager updateRecurringSchedules:@[second] completion:^(BOOL saved, NSError *error) {
+            XCTAssertTrue(saved);
+            XCTAssertNil(error);
+            [secondCompleted fulfill];
+        }];
+        XCTAssertEqual(manager.calendarReplies.count, 2);
+        NSDictionary *result = @{@"outcome": @"verified", @"store_persisted": @YES,
+            @"post_write_match": @YES, @"reconcile_succeeded": @YES, @"failed_stage": @"none"};
+        void (^secondReply)(NSDictionary *, NSError *) = manager.calendarReplies[1];
+        secondReply(result, nil);
+        [self waitForExpectations:@[secondCompleted] timeout:2];
+        void (^firstReply)(NSDictionary *, NSError *) = manager.calendarReplies[0];
+        firstReply(result, nil);
+        [self waitForExpectations:@[firstCompleted] timeout:2];
+        XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary, second.toDictionary);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"], (@[second.toDictionary]));
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
 - (void)testCommittedBlocklistPresentationSeparatesAppsAndWebsites {
     NSDictionary<NSString *, NSArray<NSString *> *> *sections =
         [SCMiscUtilities partitionBlocklistEntriesForDisplay:@[
@@ -966,6 +1270,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
         SCDaemonCapabilityRecurringBundleAppend,
+        SCDaemonCapabilityRecurringCalendarStrictification,
         @"future-safe-capability-v1",
     ];
 
@@ -997,6 +1302,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
         SCDaemonCapabilityRecurringBundleAppend,
+        SCDaemonCapabilityRecurringCalendarStrictification,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -1116,7 +1422,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         supportsRecurringBundleAppendWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"recurring-bundle-append-missing");
     XCTAssertFalse([SCXPCClient
-        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+        isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
                    capabilities:withoutAppend
         compatibleWithCurrentAppWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"recurring-bundle-append-missing");
@@ -1124,6 +1430,46 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
                    capabilities:currentCapabilities
         supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
+}
+
+- (void)testRecurringCalendarStrictificationRequiresIndependentProtocolElevenCapability {
+    NSArray<NSString *> *currentCapabilities = SCCurrentDaemonCapabilities();
+    NSMutableArray<NSString *> *withoutCalendar = [currentCapabilities mutableCopy];
+    [withoutCalendar removeObject:SCDaemonCapabilityRecurringCalendarStrictification];
+    NSString *reason = nil;
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:withoutCalendar
+        supportsLegacyRecurringRuntimeWithReason:&reason]);
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:withoutCalendar
+        supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:currentCapabilities
+        supportsRecurringCalendarStrictificationWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-calendar-strictify-protocol-too-old");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:currentCapabilities
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"protocol-too-old");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringCalendarStrictification
+                   capabilities:withoutCalendar
+        supportsRecurringCalendarStrictificationWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-calendar-strictify-missing");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                   capabilities:withoutCalendar
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-calendar-strictify-missing");
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                   capabilities:currentCapabilities
+        supportsRecurringCalendarStrictificationWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"compatible");
 }
 
@@ -2139,6 +2485,176 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertNil([SCSentry sanitizedTelemetryFields:unsafe
                                       forEventName:@"support.diagnostic_snapshot"]);
 }
+
+- (void)testActiveCalendarValidatorAllowsShrinkDeleteAndRestoringTheOpeningOriginal {
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"17:00"]]
+                        forDay:SCDayOfWeekMonday];
+    SCWeeklySchedule *draft = [opening copy];
+    [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"16:00"]]
+                      forDay:SCDayOfWeekMonday];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+    XCTAssertFalse([opening isValidActiveEditOfSchedule:draft], @"Compare with the opening snapshot, not the last drag");
+    [draft clearDay:SCDayOfWeekMonday];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+    draft = [opening copy];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+    XCTAssertEqualObjects([draft activeEditBaselineWindowIndexesForDay:SCDayOfWeekMonday
+                                                     baselineSchedule:opening], (@[@0]));
+}
+
+- (void)testActiveCalendarValidatorRejectsExpansionPanningSplitAndCrossDayMoves {
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"17:00"]]
+                        forDay:SCDayOfWeekMonday];
+    for (NSArray<SCTimeRange *> *windows in @[
+        @[[SCTimeRange rangeWithStart:@"08:00" end:@"17:00"]],
+        @[[SCTimeRange rangeWithStart:@"09:00" end:@"18:00"]],
+        @[[SCTimeRange rangeWithStart:@"10:00" end:@"18:00"]],
+        @[[SCTimeRange rangeWithStart:@"09:00" end:@"12:00"], [SCTimeRange rangeWithStart:@"13:00" end:@"17:00"]],
+    ]) {
+        SCWeeklySchedule *draft = [opening copy];
+        [draft setAllowedWindows:windows forDay:SCDayOfWeekMonday];
+        XCTAssertFalse([draft isValidActiveEditOfSchedule:opening]);
+    }
+    SCWeeklySchedule *moved = [opening copy];
+    [moved clearDay:SCDayOfWeekMonday];
+    [moved setAllowedWindows:[opening allowedWindowsForDay:SCDayOfWeekMonday] forDay:SCDayOfWeekTuesday];
+    XCTAssertFalse([moved isValidActiveEditOfSchedule:opening]);
+    SCWeeklySchedule *differentBundle = [opening copy];
+    differentBundle.bundleID = NSUUID.UUID.UUIDString;
+    XCTAssertFalse([differentBundle isValidActiveEditOfSchedule:opening]);
+}
+
+- (void)testActiveCalendarValidatorMatchesOverlappingOriginalsWithoutReusingAnOriginal {
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"17:00"],
+                                [SCTimeRange rangeWithStart:@"10:00" end:@"12:00"]]
+                        forDay:SCDayOfWeekMonday];
+    SCWeeklySchedule *draft = [opening copy];
+    [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"11:00"],
+                              [SCTimeRange rangeWithStart:@"13:00" end:@"15:00"]]
+                      forDay:SCDayOfWeekMonday];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+    XCTAssertEqualObjects([draft activeEditBaselineWindowIndexesForDay:SCDayOfWeekMonday
+                                                     baselineSchedule:opening], (@[@1, @0]));
+    [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"13:00" end:@"14:00"],
+                              [SCTimeRange rangeWithStart:@"15:00" end:@"16:00"]]
+                      forDay:SCDayOfWeekMonday];
+    XCTAssertFalse([draft isValidActiveEditOfSchedule:opening], @"Both proposed windows would reuse original zero");
+}
+
+- (void)testActiveCalendarValidatorPreservesUnchangedShortLegacyWindowOnly {
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:NSUUID.UUID.UUIDString];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"09:10"]]
+                        forDay:SCDayOfWeekMonday];
+    XCTAssertTrue([[opening copy] isValidActiveEditOfSchedule:opening]);
+    SCWeeklySchedule *draft = [opening copy];
+    [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"09:05"]]
+                      forDay:SCDayOfWeekMonday];
+    XCTAssertFalse([draft isValidActiveEditOfSchedule:opening]);
+    [draft clearDay:SCDayOfWeekMonday];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"]]
+                        forDay:SCDayOfWeekMonday];
+    [draft setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:15" end:@"09:30"]]
+                      forDay:SCDayOfWeekMonday];
+    XCTAssertTrue([draft isValidActiveEditOfSchedule:opening]);
+}
+
+- (void)testActiveCalendarGridKeepsReadOnlyModeAndValidatesDraftUpdates {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Focus" color:SCBlockBundle.colorBlue];
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"17:00"]]
+                        forDay:SCDayOfWeekMonday];
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    SCActiveCalendarGridRecorder *recorder = [SCActiveCalendarGridRecorder new];
+    grid.delegate = recorder;
+    grid.bundles = @[bundle];
+    grid.schedules = @{bundle.bundleID: opening};
+    grid.isCommitted = YES;
+    grid.showOnlyRemainingDays = NO;
+    [grid reloadData];
+    SCWeeklySchedule *shrunk = [opening copy];
+    [shrunk setAllowedWindows:@[[SCTimeRange rangeWithStart:@"10:00" end:@"16:00"]]
+                       forDay:SCDayOfWeekMonday];
+    [grid handleScheduleUpdate:shrunk forBundleID:bundle.bundleID];
+    XCTAssertEqual(recorder.updateCount, 0);
+    XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, opening.toDictionary);
+    grid.activeEditBaselineSchedules = @{bundle.bundleID: opening};
+    SCWeeklySchedule *immutableOpening = [opening copy];
+    [opening clearDay:SCDayOfWeekMonday];
+    XCTAssertEqualObjects(grid.activeEditBaselineSchedules[bundle.bundleID].toDictionary, immutableOpening.toDictionary);
+    [grid handleScheduleUpdate:shrunk forBundleID:bundle.bundleID];
+    XCTAssertEqual(recorder.updateCount, 1);
+    XCTAssertEqualObjects(recorder.lastSchedule.toDictionary, shrunk.toDictionary);
+    SCWeeklySchedule *weaker = [immutableOpening copy];
+    [weaker setAllowedWindows:@[[SCTimeRange rangeWithStart:@"08:00" end:@"18:00"]]
+                       forDay:SCDayOfWeekMonday];
+    [grid handleScheduleUpdate:weaker forBundleID:bundle.bundleID];
+    XCTAssertEqual(recorder.updateCount, 1);
+    XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, shrunk.toDictionary);
+    grid.schedules = @{bundle.bundleID: weaker};
+    XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, shrunk.toDictionary);
+    grid.schedules = @{bundle.bundleID: immutableOpening};
+    XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, immutableOpening.toDictionary);
+    for (NSString *key in @[@"v", @"z", @"x"]) {
+        NSEvent *event = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:0 context:nil
+            characters:key charactersIgnoringModifiers:key isARepeat:NO keyCode:0];
+        XCTAssertTrue([grid performKeyEquivalent:event]);
+    }
+    XCTAssertEqual(recorder.restrictedCount, 3);
+    grid.activeEditBaselineSchedules = nil;
+    [grid handleScheduleUpdate:shrunk forBundleID:bundle.bundleID];
+    XCTAssertEqual(recorder.updateCount, 1);
+}
+
+- (void)testActiveCalendarGridDeletePreservesOpeningIdentityAndResetRestoresIt {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Focus" color:SCBlockBundle.colorBlue];
+    SCWeeklySchedule *opening = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    [opening setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"12:00"],
+                                [SCTimeRange rangeWithStart:@"14:00" end:@"17:00"]]
+                        forDay:SCDayOfWeekMonday];
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    SCActiveCalendarGridRecorder *recorder = [SCActiveCalendarGridRecorder new];
+    grid.delegate = recorder;
+    grid.bundles = @[bundle];
+    grid.schedules = @{bundle.bundleID: opening};
+    grid.isCommitted = YES;
+    grid.showOnlyRemainingDays = NO;
+    [grid reloadData];
+    NSEvent *delete = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"\177"
+        charactersIgnoringModifiers:@"\177" isARepeat:NO keyCode:51];
+    for (NSNumber *active in @[@NO, @YES]) {
+        if (active.boolValue) grid.activeEditBaselineSchedules = @{bundle.bundleID: opening};
+        NSView *monday = nil;
+        for (NSView *column in [grid valueForKey:@"dayColumns"]) {
+            if ([[column valueForKey:@"day"] integerValue] == SCDayOfWeekMonday) monday = column;
+        }
+        XCTAssertNotNil(monday);
+        [monday setValue:bundle.bundleID forKey:@"selectedBundleID"];
+        [monday setValue:@0 forKey:@"selectedBlockIndex"];
+        XCTAssertTrue(grid.hasSelectedBlock);
+        [grid keyDown:delete];
+        XCTAssertEqual(recorder.updateCount, active.boolValue ? 1 : 0);
+        XCTAssertEqual([[grid scheduleForBundleID:bundle.bundleID] allowedWindowsForDay:SCDayOfWeekMonday].count,
+                       active.boolValue ? 1 : 2);
+    }
+    XCTAssertFalse(grid.hasSelectedBlock);
+    NSDictionary *origins = [grid valueForKey:@"activeEditWindowOrigins"];
+    XCTAssertEqualObjects(origins[bundle.bundleID][@(SCDayOfWeekMonday)], (@[@1]));
+    [grid reloadData];
+    origins = [grid valueForKey:@"activeEditWindowOrigins"];
+    XCTAssertEqualObjects(origins[bundle.bundleID][@(SCDayOfWeekMonday)], (@[@1]));
+    grid.schedules = @{bundle.bundleID: [opening copy]};
+    [grid reloadData];
+    origins = [grid valueForKey:@"activeEditWindowOrigins"];
+    XCTAssertEqualObjects(origins[bundle.bundleID][@(SCDayOfWeekMonday)], (@[@0, @1]));
+    XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, opening.toDictionary);
+}
+
 
 - (void)testCalendarVisibilityTelemetryDistinguishesCreatedBlocksFromHiddenBlocks {
     SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Telemetry fixture"

@@ -47,6 +47,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 @property (nonatomic, assign) BOOL isSelected;
 @property (nonatomic, assign) BOOL isDimmed;
 @property (nonatomic, assign) BOOL isCommitted;
+@property (nonatomic, assign) BOOL isGhost;
 @property (nonatomic, assign) NSInteger timeLabelDisplayMode;  // 0=auto, 1=full, 2=fallback, 3=hidden
 
 @end
@@ -82,26 +83,60 @@ static const CGFloat kDimmedOpacity = 0.2;
 
     self.layer.backgroundColor = [self.color colorWithAlphaComponent:bgAlpha].CGColor;
     self.layer.borderColor = [self.color colorWithAlphaComponent:borderAlpha].CGColor;
-    self.layer.borderWidth = self.isSelected ? 2.0 : 1.0;
+    // Allow policy is semantic, not decorative: consistently dashed.
+    self.layer.borderWidth = 0;
+    if (self.isGhost) self.layer.backgroundColor = [self.color colorWithAlphaComponent:0.10].CGColor;
 }
 
 - (void)setColor:(NSColor *)color {
     _color = color;
     [self updateAppearance];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setIsSelected:(BOOL)isSelected {
     _isSelected = isSelected;
     [self updateAppearance];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setIsDimmed:(BOOL)isDimmed {
     _isDimmed = isDimmed;
     [self updateAppearance];
+    [self setNeedsDisplay:YES];
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    return self.isGhost ? nil : [super hitTest:point];
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
+
+    CGFloat lineWidth = self.isSelected ? 2.0 : 1.0;
+    NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, lineWidth / 2, lineWidth / 2)
+                                                           xRadius:6 yRadius:6];
+    CGFloat dash[] = {5, 4};
+    [outline setLineDash:dash count:2 phase:0];
+    outline.lineWidth = lineWidth;
+    NSColor *outlineColor = self.isGhost ? [NSColor.labelColor colorWithAlphaComponent:0.24] :
+        [self.color colorWithAlphaComponent:self.isSelected ? 0.90 : (self.isDimmed ? 0.30 : 0.65)];
+    [outlineColor setStroke];
+    [outline stroke];
+    if (self.isGhost) return;
+
+    if (self.isSelected && !self.isCommitted) {
+        // Short selected windows can be under 15 px high. Keep the two visible
+        // handles and their hit regions separate instead of overlapping them.
+        CGFloat handleWidth = MIN(24, MAX(8, NSWidth(self.bounds) - 12));
+        CGFloat handleHeight = MIN(3, NSHeight(self.bounds) / 4);
+        [NSColor.labelColor setFill];
+        for (NSNumber *y in @[@(1.5), @(NSHeight(self.bounds) - handleHeight - 1.5)]) {
+            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect((NSWidth(self.bounds) - handleWidth) / 2,
+                                                               y.doubleValue, handleWidth, handleHeight)
+                                           xRadius:handleHeight / 2 yRadius:handleHeight / 2] fill];
+        }
+    }
 
     // Early exit if height is insufficient
     if (self.bounds.size.height <= 30 || !self.timeRange) {
@@ -167,6 +202,8 @@ static const CGFloat kDimmedOpacity = 0.2;
 @property (nonatomic, copy) NSDictionary<NSString *, SCWeeklySchedule *> *schedules;
 @property (nonatomic, copy, nullable) NSString *focusedBundleID;
 @property (nonatomic, assign) BOOL isCommitted;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, SCWeeklySchedule *> *activeEditBaselineSchedules;
+@property (nonatomic, copy) NSDictionary<NSString *, NSArray<NSNumber *> *> *activeEditOriginalIndexes;
 @property (nonatomic, assign) BOOL isToday;
 @property (nonatomic, strong, nullable) NSTimeZone *displayTimeZone;
 @property (nonatomic, assign) CGFloat timelineHeight;  // Height for 24 hours
@@ -183,6 +220,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 @property (nonatomic, assign) NSPoint mouseDownPoint;  // For drag threshold detection
 @property (nonatomic, strong, nullable) SCTimeRange *draggingRange;
 @property (nonatomic, strong, nullable) SCTimeRange *originalDragRange;
+@property (nonatomic, strong, nullable) SCTimeRange *activeEditOriginalDragRange;
 @property (nonatomic, copy, nullable) NSString *draggingBundleID;
 
 // Selected block
@@ -194,6 +232,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 @property (nonatomic, copy, nullable) void (^onEmptyAreaClicked)(void);
 @property (nonatomic, copy, nullable) void (^onBlockDoubleClicked)(SCBlockBundle *bundle);
 @property (nonatomic, copy, nullable) void (^onNoFocusInteraction)(void);  // Warning when interacting without bundle focus
+@property (nonatomic, copy, nullable) void (^onRestrictedEdit)(void);
 @property (nonatomic, copy, nullable) void (^onColumnClicked)(void);  // Any click in the column
 @property (nonatomic, copy, nullable) void (^onBlockSelected)(void);  // Block was selected (for clearing other selections)
 
@@ -208,6 +247,7 @@ static const CGFloat kDimmedOpacity = 0.2;
 
 @implementation SCCalendarDayColumn {
     NSMutableArray<SCAllowBlockView *> *_blockViews;
+    NSMutableArray<SCAllowBlockView *> *_ghostViews;
     NSTrackingArea *_trackingArea;
 }
 
@@ -330,6 +370,8 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 }
 
 - (void)reloadBlocks {
+    for (SCAllowBlockView *ghost in _ghostViews) [ghost removeFromSuperview];
+    _ghostViews = [NSMutableArray array];
     // Remove old block views
     for (SCAllowBlockView *block in _blockViews) {
         [block removeFromSuperview];
@@ -403,7 +445,8 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             blockView.timeRange = range;
             blockView.color = bundle.color;
             blockView.bundleID = bundle.bundleID;
-            blockView.isCommitted = self.isCommitted;
+            blockView.isCommitted = self.isCommitted && self.activeEditBaselineSchedules == nil;
+            blockView.accessibilityLabel = [NSString stringWithFormat:@"%@, Allow policy, dashed border, %@", bundle.name, range.displayString12Hour];
 
             // Dimmed if not focused bundle (and we have a focused bundle)
             if (self.focusedBundleID && ![bundle.bundleID isEqualToString:self.focusedBundleID]) {
@@ -420,6 +463,35 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         }
     }
 
+    if (self.activeEditBaselineSchedules != nil) {
+        NSArray<SCBlockLayoutInfo *> *originalLayouts = [self computeBlockLayoutsForSchedules:self.activeEditBaselineSchedules
+                                                                                 dragRange:nil forBundleID:nil windowIndex:-1 isNewBlock:NO];
+        for (SCBlockLayoutInfo *originalLayout in originalLayouts) {
+            NSString *bundleID = originalLayout.bundleID;
+            NSArray<SCTimeRange *> *originals = [self.activeEditBaselineSchedules[bundleID] allowedWindowsForDay:self.day];
+            SCTimeRange *original = originals[originalLayout.windowIndex];
+            NSArray<NSNumber *> *origins = self.activeEditOriginalIndexes[bundleID] ?: @[];
+            NSUInteger currentIndex = [origins indexOfObject:@(originalLayout.windowIndex)];
+            NSArray<SCTimeRange *> *currentWindows = [self.schedules[bundleID] allowedWindowsForDay:self.day];
+            SCTimeRange *current = currentIndex < currentWindows.count ? currentWindows[currentIndex] : nil;
+            BOOL draggingThis = isDraggingExistingBlock && [bundleID isEqualToString:self.draggingBundleID] &&
+                currentIndex == (NSUInteger)self.selectedBlockIndex;
+            BOOL unchanged = current && current.startMinutes == original.startMinutes && current.endMinutes == original.endMinutes;
+            if (unchanged && !draggingThis) continue;
+            SCBlockLayoutInfo *layout = layoutLookup[[NSString stringWithFormat:@"%@:%lu", bundleID, (unsigned long)currentIndex]] ?: originalLayout;
+            CGFloat laneWidth = (totalWidth - kLanePadding * 2) / MAX(1, layout.maxOverlap);
+            CGFloat y = [self yFromMinutes:original.startMinutes];
+            SCAllowBlockView *ghost = [[SCAllowBlockView alloc] initWithFrame:NSMakeRect(kLanePadding + layout.laneSlot * laneWidth,
+                y, laneWidth - kLanePadding, [self yFromMinutes:original.endMinutes] - y)];
+            ghost.isGhost = YES;
+            ghost.timeRange = original;
+            ghost.color = [self bundleForID:bundleID].color;
+            ghost.accessibilityLabel = [NSString stringWithFormat:@"Original %@ Allow window, %@", [self bundleForID:bundleID].name, original.displayString12Hour];
+            [self addSubview:ghost positioned:NSWindowBelow relativeTo:_blockViews.firstObject];
+            [_ghostViews addObject:ghost];
+        }
+    }
+
     // Calculate unified display mode for all blocks (use the most constrained)
     NSInteger unifiedDisplayMode = [self calculateUnifiedDisplayModeForBlocks:_blockViews];
     for (SCAllowBlockView *blockView in _blockViews) {
@@ -433,6 +505,11 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             // During drag, show at full width as overlay
             CGFloat laneWidth = totalWidth - kLanePadding * 2;
             CGFloat laneX = kLanePadding;
+            if (self.activeEditBaselineSchedules != nil) {
+                SCBlockLayoutInfo *layout = layoutLookup[[NSString stringWithFormat:@"%@:%ld", self.draggingBundleID, (long)self.selectedBlockIndex]];
+                laneWidth = (totalWidth - kLanePadding * 2) / MAX(1, layout.maxOverlap);
+                laneX = kLanePadding + layout.laneSlot * laneWidth;
+            }
 
             CGFloat y = [self yFromMinutes:[self.draggingRange startMinutes]];
             CGFloat height = [self yFromMinutes:[self.draggingRange endMinutes]] - y;
@@ -527,6 +604,21 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     [self reloadBlocks];
 }
 
+- (CGFloat)resizeHitZoneForBlock:(SCAllowBlockView *)block {
+    // Dense calendar entries cannot offer 40px targets without collisions.
+    // Divide short entries into disjoint top/bottom regions instead.
+    CGFloat preferred = self.activeEditBaselineSchedules != nil ? 20.0 : kEdgeDetectionZone;
+    return MIN(preferred, NSHeight(block.frame) / 2);
+}
+
+- (nullable SCTimeRange *)activeEditOriginalForBundleID:(NSString *)bundleID windowIndex:(NSInteger)windowIndex {
+    NSArray<NSNumber *> *indexes = self.activeEditOriginalIndexes[bundleID];
+    NSArray<SCTimeRange *> *originals = [self.activeEditBaselineSchedules[bundleID] allowedWindowsForDay:self.day];
+    if (windowIndex < 0 || (NSUInteger)windowIndex >= indexes.count) return nil;
+    NSUInteger originalIndex = indexes[windowIndex].unsignedIntegerValue;
+    return originalIndex < originals.count ? originals[originalIndex] : nil;
+}
+
 #pragma mark - Mouse Events
 
 - (void)mouseDown:(NSEvent *)event {
@@ -535,7 +627,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         self.onColumnClicked();
     }
 
-    if (self.isCommitted) return;
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
 
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
 
@@ -575,11 +667,12 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 
             // Check if near top or bottom edge for resize
             CGFloat relY = loc.y - blockView.frame.origin.y;
-            if (relY < kEdgeDetectionZone) {
+            CGFloat edgeZone = [self resizeHitZoneForBlock:blockView];
+            if (relY < edgeZone) {
                 self.isResizingTop = YES;
-            } else if (relY > blockView.frame.size.height - kEdgeDetectionZone) {
+            } else if (relY >= blockView.frame.size.height - edgeZone) {
                 self.isResizingBottom = YES;
-            } else {
+            } else if (self.activeEditBaselineSchedules == nil) {
                 self.isMovingBlock = YES;
             }
 
@@ -588,6 +681,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             self.draggingBundleID = blockBundleID;
             self.draggingRange = [blockView.timeRange copy];
             self.originalDragRange = [blockView.timeRange copy];
+            self.activeEditOriginalDragRange = [self activeEditOriginalForBundleID:blockBundleID windowIndex:self.selectedBlockIndex];
             self.dragStartY = loc.y;
             // MUST snap dragStartMinutes so delta calculations stay on 15-min grid
             self.dragStartMinutes = [self snapToGrid:[self minutesFromY:loc.y]];
@@ -602,6 +696,15 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             }
             [self.window makeFirstResponder:gridView ?: self];
 
+            if (self.activeEditBaselineSchedules != nil && !self.activeEditOriginalDragRange) {
+                self.isResizingTop = NO;
+                self.isResizingBottom = NO;
+                self.draggingRange = nil;
+                self.originalDragRange = nil;
+                self.draggingBundleID = nil;
+                return;
+            }
+
             // Tracking loop - captures all drag events, prevents NSScrollView from stealing them
             BOOL didActuallyDrag = NO;
             NSPoint startPoint = loc;
@@ -615,7 +718,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
                     if (!nextEvent) continue;
 
                     if (nextEvent.type == NSEventTypeLeftMouseUp) {
-                        if (didActuallyDrag) {
+                        if (didActuallyDrag && self.isDragging) {
                             // Real drag - apply changes
                             [self mouseUp:nextEvent];
                         } else {
@@ -635,6 +738,11 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
                         CGFloat distance = hypot(currentPoint.x - startPoint.x, currentPoint.y - startPoint.y);
 
                         if (distance > kDragThreshold) {
+                            if (self.activeEditBaselineSchedules != nil && !self.isResizingTop && !self.isResizingBottom) {
+                                if (!didActuallyDrag && self.onRestrictedEdit) self.onRestrictedEdit();
+                                didActuallyDrag = YES;
+                                continue; // Body clicks select; body drags never pan.
+                            }
                             didActuallyDrag = YES;
 
                             // Set isDragging and trigger full-width only when actual drag starts
@@ -653,6 +761,17 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     }
 
     // SECOND: Clicking on empty area - requires bundle focus to create blocks
+    if (self.activeEditBaselineSchedules != nil) {
+        if (event.clickCount == 2) {
+            SCBlockBundle *bundle = [self bundleForID:self.focusedBundleID];
+            if (bundle && self.onBlockDoubleClicked) self.onBlockDoubleClicked(bundle);
+            else if (self.onRestrictedEdit) self.onRestrictedEdit();
+        } else {
+            if (self.onRestrictedEdit) self.onRestrictedEdit();
+            if (self.onBlockSelected) self.onBlockSelected();
+        }
+        return; // No creation, including over a dimmed existing block.
+    }
     if (!self.focusedBundleID) {
         // No bundle focused - show warning
         if (self.onNoFocusInteraction) {
@@ -685,7 +804,9 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    if (self.isCommitted) return;
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
+    if (self.activeEditBaselineSchedules != nil &&
+        (!self.activeEditOriginalDragRange || (!self.isResizingTop && !self.isResizingBottom))) return;
 
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
 
@@ -737,14 +858,18 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
                                                      end:[self timeStringFromMinutes:MIN(end, 1440)]];
     } else if (self.isResizingTop) {
         // Resize top edge
-        NSInteger newStart = MIN(currentMinutes, [self.originalDragRange endMinutes] - (NSInteger)kMinBlockDuration);
+        NSInteger minimumDuration = self.activeEditBaselineSchedules != nil ? 15 : (NSInteger)kMinBlockDuration;
+        NSInteger newStart = MIN(currentMinutes, [self.originalDragRange endMinutes] - minimumDuration);
         newStart = MAX(0, newStart);
+        if (self.activeEditBaselineSchedules != nil) newStart = MAX(self.activeEditOriginalDragRange.startMinutes, newStart);
         self.draggingRange = [SCTimeRange rangeWithStart:[self timeStringFromMinutes:newStart]
                                                      end:self.originalDragRange.endTime];
     } else if (self.isResizingBottom) {
         // Resize bottom edge
-        NSInteger newEnd = MAX(currentMinutes, [self.originalDragRange startMinutes] + (NSInteger)kMinBlockDuration);
+        NSInteger minimumDuration = self.activeEditBaselineSchedules != nil ? 15 : (NSInteger)kMinBlockDuration;
+        NSInteger newEnd = MAX(currentMinutes, [self.originalDragRange startMinutes] + minimumDuration);
         newEnd = MIN(1440, newEnd);
+        if (self.activeEditBaselineSchedules != nil) newEnd = MIN(self.activeEditOriginalDragRange.endMinutes, newEnd);
         self.draggingRange = [SCTimeRange rangeWithStart:self.originalDragRange.startTime
                                                      end:[self timeStringFromMinutes:newEnd]];
     } else if (self.isMovingBlock) {
@@ -776,6 +901,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     self.hasPendingEmptyAreaClick = NO;
 
     if (!self.isDragging) return;
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
 
     // Capture drag state before resetting (needed for building the schedule)
     NSString *bundleID = self.draggingBundleID;
@@ -793,6 +919,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     self.isMovingBlock = NO;
     self.draggingRange = nil;
     self.originalDragRange = nil;
+    self.activeEditOriginalDragRange = nil;
     self.draggingBundleID = nil;
 
     // Apply the change using captured values
@@ -814,7 +941,9 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         }
 
         // Merge overlapping blocks
-        windows = [[self mergeOverlappingRanges:windows] mutableCopy];
+        if (self.activeEditBaselineSchedules == nil) {
+            windows = [[self mergeOverlappingRanges:windows] mutableCopy];
+        }
 
         [schedule setAllowedWindows:windows forDay:self.day];
 
@@ -825,7 +954,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-    if (self.isCommitted) {
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) {
         [[NSCursor arrowCursor] set];
         return;
     }
@@ -838,11 +967,12 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             CGFloat relY = loc.y - blockView.frame.origin.y;
 
             // Near top or bottom edge = resize cursor
-            if (relY < kEdgeDetectionZone || relY > blockView.frame.size.height - kEdgeDetectionZone) {
+            CGFloat edgeZone = [self resizeHitZoneForBlock:blockView];
+            if (relY < edgeZone || relY >= blockView.frame.size.height - edgeZone) {
                 [[NSCursor resizeUpDownCursor] set];
             } else {
                 // Middle of block = grab cursor
-                [[NSCursor openHandCursor] set];
+                [(self.activeEditBaselineSchedules != nil ? NSCursor.arrowCursor : NSCursor.openHandCursor) set];
             }
             return;
         }
@@ -867,7 +997,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         return;
     }
 
-    if (self.isCommitted) return;
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
 
     // Delete key removes selected block
     if (event.keyCode == 51 || event.keyCode == 117) {  // Backspace or Delete
@@ -877,6 +1007,14 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             if (self.selectedBlockIndex < windows.count) {
                 [windows removeObjectAtIndex:self.selectedBlockIndex];
                 [schedule setAllowedWindows:windows forDay:self.day];
+
+                if (self.activeEditBaselineSchedules != nil) {
+                    NSMutableDictionary *byBundle = [self.activeEditOriginalIndexes mutableCopy];
+                    NSMutableArray *indexes = [byBundle[self.selectedBundleID] mutableCopy];
+                    if ((NSUInteger)self.selectedBlockIndex < indexes.count) [indexes removeObjectAtIndex:self.selectedBlockIndex];
+                    byBundle[self.selectedBundleID] = indexes ?: @[];
+                    self.activeEditOriginalIndexes = byBundle;
+                }
 
                 if (self.onScheduleUpdated) {
                     self.onScheduleUpdated(self.selectedBundleID, schedule);
@@ -988,12 +1126,21 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
                                                             forBundleID:(NSString *)dragBundleID
                                                             windowIndex:(NSInteger)dragWindowIndex
                                                            isNewBlock:(BOOL)isNewBlock {
+    return [self computeBlockLayoutsForSchedules:self.schedules dragRange:dragRange forBundleID:dragBundleID
+                                    windowIndex:dragWindowIndex isNewBlock:isNewBlock];
+}
+
+- (NSArray<SCBlockLayoutInfo *> *)computeBlockLayoutsForSchedules:(NSDictionary<NSString *, SCWeeklySchedule *> *)schedules
+                                                     dragRange:(SCTimeRange *)dragRange
+                                                    forBundleID:(NSString *)dragBundleID
+                                                    windowIndex:(NSInteger)dragWindowIndex
+                                                     isNewBlock:(BOOL)isNewBlock {
     NSMutableArray<SCBlockLayoutInfo *> *blocks = [NSMutableArray array];
 
     // Step 1: Collect all blocks from all bundles
     for (NSInteger bundleIndex = 0; bundleIndex < self.bundles.count; bundleIndex++) {
         SCBlockBundle *bundle = self.bundles[bundleIndex];
-        SCWeeklySchedule *schedule = self.schedules[bundle.bundleID];
+        SCWeeklySchedule *schedule = schedules[bundle.bundleID];
         if (!schedule) continue;
 
         NSArray<SCTimeRange *> *windows = [schedule allowedWindowsForDay:self.day];
@@ -1153,6 +1300,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 @property (nonatomic, strong, nullable) SCTimeRange *copiedBlock;
 @property (nonatomic, copy, nullable) NSString *copiedBundleID;
 @property (nonatomic, assign) SCDayOfWeek lastClickedDay;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableDictionary<NSNumber *, NSArray<NSNumber *> *> *> *activeEditWindowOrigins;
 
 // Empty state hint
 @property (nonatomic, strong) NSTextField *emptyStateLabel;
@@ -1319,16 +1467,28 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         column.schedules = self.schedules;
         column.focusedBundleID = self.focusedBundleID;
         column.isCommitted = self.isCommitted;
+        column.activeEditBaselineSchedules = self.activeEditBaselineSchedules;
+        NSMutableDictionary *originalIndexes = [NSMutableDictionary dictionary];
+        for (NSString *bundleID in self.activeEditWindowOrigins) {
+            originalIndexes[bundleID] = self.activeEditWindowOrigins[bundleID][@(day)] ?: @[];
+        }
+        column.activeEditOriginalIndexes = originalIndexes;
         column.isToday = isToday;
         column.displayTimeZone = self.displayTimeZone;
         column.timelineHeight = timelineHeight;
 
         // Set callbacks
         __weak typeof(self) weakSelf = self;
+        __weak SCCalendarDayColumn *weakColumn = column;
         SCDayOfWeek capturedDay = day;  // Capture day for callbacks
         column.onScheduleUpdated = ^(NSString *bundleID, SCWeeklySchedule *schedule) {
             if (!weakSelf) return;
             weakSelf.lastClickedDay = capturedDay;
+            if (weakSelf.activeEditBaselineSchedules != nil) {
+                // Deletion changes indexes; resizing preserves them. Keep this
+                // identity independent of transient day-column view objects.
+                weakSelf.activeEditWindowOrigins[bundleID][@(capturedDay)] = weakColumn.activeEditOriginalIndexes[bundleID] ?: @[];
+            }
             [weakSelf handleScheduleUpdate:schedule forBundleID:bundleID];
         };
         column.onEmptyAreaClicked = ^{
@@ -1347,6 +1507,11 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
             weakSelf.lastClickedDay = capturedDay;
             if ([weakSelf.delegate respondsToSelector:@selector(calendarGridDidAttemptInteractionWithoutFocus:)]) {
                 [weakSelf.delegate calendarGridDidAttemptInteractionWithoutFocus:weakSelf];
+            }
+        };
+        column.onRestrictedEdit = ^{
+            if ([weakSelf.delegate respondsToSelector:@selector(calendarGridDidAttemptRestrictedEdit:)]) {
+                [weakSelf.delegate calendarGridDidAttemptRestrictedEdit:weakSelf];
             }
         };
         column.onColumnClicked = ^{
@@ -1382,7 +1547,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
         }
     }
 
-    self.emptyStateLabel.hidden = hasAnyBlocks;
+    self.emptyStateLabel.hidden = hasAnyBlocks || self.activeEditBaselineSchedules != nil;
     if (!hasAnyBlocks) {
         // Center the label in the columns container
         CGFloat containerWidth = self.columnsContainer.bounds.size.width;
@@ -1449,10 +1614,19 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 }
 
 - (void)handleScheduleUpdate:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {
+    if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
+    if (self.activeEditBaselineSchedules != nil &&
+        ![schedule isValidActiveEditOfSchedule:self.activeEditBaselineSchedules[bundleID]]) {
+        [self rebuildActiveEditWindowOrigins];
+        [self reloadData];
+        return;
+    }
     // Update internal schedules dictionary
     NSMutableDictionary *newSchedules = [self.schedules mutableCopy];
     newSchedules[bundleID] = schedule;
-    self.schedules = newSchedules;
+    // Do not rematch opening identities after every resize/delete. The column
+    // carried its original index through the mutation and updated that mapping.
+    _schedules = [newSchedules copy];
 
     // Reload affected columns
     for (SCCalendarDayColumn *column in self.dayColumns) {
@@ -1467,6 +1641,55 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     if ([self.delegate respondsToSelector:@selector(calendarGrid:didUpdateSchedule:forBundleID:)]) {
         [self.delegate calendarGrid:self didUpdateSchedule:schedule forBundleID:bundleID];
     }
+}
+
+- (void)rebuildActiveEditWindowOrigins {
+    self.activeEditWindowOrigins = [NSMutableDictionary dictionary];
+    for (NSString *bundleID in self.activeEditBaselineSchedules) {
+        NSMutableDictionary *byDay = [NSMutableDictionary dictionary];
+        for (SCDayOfWeek day = SCDayOfWeekSunday; day <= SCDayOfWeekSaturday; day++) {
+            byDay[@(day)] = [self.schedules[bundleID] activeEditBaselineWindowIndexesForDay:day
+                                                                       baselineSchedule:self.activeEditBaselineSchedules[bundleID]] ?: @[];
+        }
+        self.activeEditWindowOrigins[bundleID] = byDay;
+    }
+}
+
+- (void)setActiveEditBaselineSchedules:(NSDictionary<NSString *,SCWeeklySchedule *> *)activeEditBaselineSchedules {
+    if ((_activeEditBaselineSchedules == nil && activeEditBaselineSchedules == nil) ||
+        (_activeEditBaselineSchedules != nil && activeEditBaselineSchedules != nil &&
+         [self schedules:_activeEditBaselineSchedules matchSchedules:activeEditBaselineSchedules])) return;
+    NSMutableDictionary *snapshot = activeEditBaselineSchedules != nil ? [NSMutableDictionary dictionary] : nil;
+    for (NSString *bundleID in activeEditBaselineSchedules) snapshot[bundleID] = [activeEditBaselineSchedules[bundleID] copy];
+    _activeEditBaselineSchedules = [snapshot copy];
+    self.copiedBlock = nil;
+    self.copiedBundleID = nil;
+    [self.undoManager removeAllActions];
+    [self rebuildActiveEditWindowOrigins];
+    [self reloadData];
+}
+
+- (void)setSchedules:(NSDictionary<NSString *,SCWeeklySchedule *> *)schedules {
+    if ([self schedules:_schedules matchSchedules:schedules]) return;
+    if (self.activeEditBaselineSchedules != nil) {
+        if (![[NSSet setWithArray:schedules.allKeys] isEqualToSet:[NSSet setWithArray:self.activeEditBaselineSchedules.allKeys]]) return;
+        for (NSString *bundleID in schedules) {
+            if (![schedules[bundleID] isValidActiveEditOfSchedule:self.activeEditBaselineSchedules[bundleID]]) return;
+        }
+    }
+    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
+    for (NSString *bundleID in schedules) snapshot[bundleID] = [schedules[bundleID] copy];
+    _schedules = [snapshot copy];
+    [self rebuildActiveEditWindowOrigins];
+}
+
+- (BOOL)schedules:(NSDictionary<NSString *, SCWeeklySchedule *> *)first
+   matchSchedules:(NSDictionary<NSString *, SCWeeklySchedule *> *)second {
+    if (![[NSSet setWithArray:first.allKeys ?: @[]] isEqualToSet:[NSSet setWithArray:second.allKeys ?: @[]]]) return NO;
+    for (NSString *bundleID in first) {
+        if (![[first[bundleID] toDictionary] isEqualToDictionary:[second[bundleID] toDictionary]]) return NO;
+    }
+    return YES;
 }
 
 - (void)setFocusedBundleID:(NSString *)focusedBundleID {
@@ -1504,6 +1727,15 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
     NSString *chars = [[event charactersIgnoringModifiers] lowercaseString];
     BOOL cmdPressed = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
     BOOL shiftPressed = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+
+    if (cmdPressed && (self.isCommitted || self.activeEditBaselineSchedules != nil) &&
+        ([chars isEqualToString:@"v"] || [chars isEqualToString:@"z"] || [chars isEqualToString:@"x"])) {
+        if (self.activeEditBaselineSchedules != nil &&
+            [self.delegate respondsToSelector:@selector(calendarGridDidAttemptRestrictedEdit:)]) {
+            [self.delegate calendarGridDidAttemptRestrictedEdit:self];
+        }
+        return YES; // Active drafts use Reset; no stale undo, paste, or cut path.
+    }
 
     // Cmd+Shift+Z = Redo
     if (cmdPressed && shiftPressed && [chars isEqualToString:@"z"]) {
@@ -1607,7 +1839,7 @@ static BOOL SCBlockViewHasVisibleAppearanceForTelemetry(SCAllowBlockView *blockV
 
     // Delete/Backspace key - delete selected block
     if (event.keyCode == 51 || event.keyCode == 117) {
-        if (self.isCommitted) return;
+        if (self.isCommitted && self.activeEditBaselineSchedules == nil) return;
 
         // Find the column with the selected block and forward the delete
         for (SCCalendarDayColumn *column in self.dayColumns) {

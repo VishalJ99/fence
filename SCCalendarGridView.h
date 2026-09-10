@@ -35,6 +35,10 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 /// Use this to show a "select a bundle first" warning
 - (void)calendarGridDidAttemptInteractionWithoutFocus:(SCCalendarGridView *)grid;
 
+/// Active editing attempted creation, panning, paste, or another restricted
+/// action. Resize-edge clamping stays silent; this is for explicit actions.
+- (void)calendarGridDidAttemptRestrictedEdit:(SCCalendarGridView *)grid;
+
 @end
 
 @interface SCCalendarGridView : NSView
@@ -53,6 +57,12 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 
 /// Whether editing is locked (committed state)
 @property (nonatomic, assign) BOOL isCommitted;
+
+/// Non-nil enables a draft-only, stricter Allow editor while committed. The
+/// setter deep-copies this immutable opening snapshot. Nil restores the normal
+/// committed read-only grid. Reset by assigning copies of this baseline to
+/// schedules and reloading; accepting an edit must happen outside the grid.
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, SCWeeklySchedule *> *activeEditBaselineSchedules;
 
 /// Root-owned timezone while committed. Nil keeps draft display on the live
 /// system timezone.
