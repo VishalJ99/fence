@@ -285,6 +285,39 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
     return commitments;
 }
 
++ (NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                                   appendingEntries:(NSArray<NSString *> *)entries
+                                        forBundleID:(NSString *)bundleID
+                                     maximumEntries:(NSUInteger)maximumEntries {
+    if (![commitment isKindOfClass:[NSDictionary class]] ||
+        !SCDaemonSchedulerRecurringCommitmentIsValid(commitment[@"commitmentID"], commitment, 0) ||
+        !SCDaemonSchedulerUUIDString(bundleID) ||
+        !SCDaemonSchedulerStringArray(entries, NO) || entries.count == 0) return nil;
+    NSMutableArray *segments = [NSMutableArray array];
+    BOOL matched = NO;
+    NSUInteger aggregateEntries = 0;
+    for (NSDictionary *segment in commitment[@"segments"]) {
+        NSDictionary *replacement = segment;
+        if ([segment[SCDaemonScheduleSourceBundleIDsKey] containsObject:bundleID]) {
+            matched = YES;
+            NSMutableOrderedSet *unionEntries = [NSMutableOrderedSet
+                orderedSetWithArray:segment[@"blocklist"]];
+            [unionEntries addObjectsFromArray:entries];
+            NSMutableDictionary *updated = [segment mutableCopy];
+            updated[@"blocklist"] = unionEntries.array;
+            replacement = [updated copy];
+        }
+        NSUInteger count = [replacement[@"blocklist"] count];
+        if (!SCDaemonScheduleEntryCountCanAdd(aggregateEntries, count, maximumEntries)) return nil;
+        aggregateEntries += count;
+        [segments addObject:replacement];
+    }
+    if (!matched) return nil;
+    NSMutableDictionary *updated = [commitment mutableCopy];
+    updated[@"segments"] = [segments copy];
+    return [updated copy];
+}
+
 + (NSCalendar *)calendarForRecurringCommitment:(NSDictionary<NSString *,id> *)commitment
                               fallbackTimeZone:(NSTimeZone *)fallbackTimeZone {
     NSTimeZone *timeZone = SCDaemonSchedulerTimeZoneFromIdentifier(

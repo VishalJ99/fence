@@ -424,6 +424,14 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         NSAlert *alert = [[NSAlert alloc] init];
         alert.alertStyle = NSAlertStyleWarning;
         alert.messageText = @"Current block update was not verified";
+        if ([notification.userInfo[@"recurringBundleUpdate"] boolValue]) {
+            alert.informativeText = [outcome isEqualToString:@"partial"]
+                ? @"The helper saved the additions, but Fence could not fully verify the update. Existing restrictions remain in place. Reopen the bundle to check its contents."
+                : @"Fence could not save these additions to your commitment. Existing restrictions remain in place. Reopen the bundle to try adding them again.";
+            [alert addButtonWithTitle:@"OK"];
+            [alert runModal];
+            return;
+        }
         if ([outcome isEqualToString:@"skipped"]) {
             alert.informativeText = @"Fence saved the website or app to the bundle, but could not match that bundle to the active committed schedule. Existing rules remain active; this addition may not be blocked.";
         } else {
@@ -1132,7 +1140,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
             commitTimeZoneIdentifier ?: @"your current timezone"];
     }
     alert.informativeText = [NSString stringWithFormat:
-        @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. Editing and bundle changes stay locked until you end it; the selected period controls when End first becomes available. %@",
+        @"Your seven-day schedule repeats every week and stays enforced until you explicitly end the commitment. You can add apps and websites to existing bundles, but schedule edits and removals stay locked until you end it; the selected period controls when End first becomes available. %@",
         timezoneSummary];
 
     CGFloat accessoryHeight = bundlesWithNoAllowBlocks.count > 0 ? 78 : 30;

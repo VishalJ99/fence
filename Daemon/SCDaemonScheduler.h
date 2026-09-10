@@ -70,6 +70,14 @@ typedef void (^SCDaemonSchedulerAnomalyHandler)(NSDictionary<NSString *, id> *fi
 + (NSArray<NSDictionary<NSString *, id> *> *)validRecurringCommitmentsFromValue:(id)value
                                                                         ownerUID:(uid_t)ownerUID;
 
+/// Unions canonical entries into every existing segment contributed by the
+/// bundle, preserving the immutable envelope, timings, and segment identity.
+/// Returns nil for an unknown bundle or invalid/oversized resulting record.
++ (nullable NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                                          appendingEntries:(NSArray<NSString *> *)entries
+                                               forBundleID:(NSString *)bundleID
+                                            maximumEntries:(NSUInteger)maximumEntries;
+
 /// Returns a Monday-first Gregorian calendar rooted in the commitment's
 /// accepted timezone. Legacy records without timezone fields use the supplied
 /// fallback solely until the startup pinning migration persists them.

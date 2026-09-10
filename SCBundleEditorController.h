@@ -36,7 +36,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether this is a new bundle (vs editing existing)
 @property (nonatomic, readonly) BOOL isNewBundle;
 
-/// Whether we're in committed state (presents the existing bundle read-only)
+/// Whether we're in committed state (allows additions, but not removal or metadata edits)
 @property (nonatomic, assign) BOOL isCommitted;
 
 /// Initialize for creating a new bundle

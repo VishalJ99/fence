@@ -275,7 +275,7 @@
 
     // Warning label for committed state (hidden by default)
     self.committedWarningLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 90, y - 20, 190, 60)];
-    self.committedWarningLabel.stringValue = @"Locked during your commitment. End the commitment before changing this bundle.";
+    self.committedWarningLabel.stringValue = @"You can add apps and websites. End your commitment before removing them.";
     self.committedWarningLabel.font = [NSFont systemFontOfSize:10];
     self.committedWarningLabel.textColor = [NSColor systemRedColor];
     self.committedWarningLabel.bezeled = NO;
@@ -292,8 +292,8 @@
     if (self.isCommitted) {
         self.nameField.editable = NO;
         self.nameField.enabled = NO;
-        self.addAppButton.enabled = NO;
-        self.addWebsiteButton.enabled = NO;
+        self.addAppButton.enabled = YES;
+        self.addWebsiteButton.enabled = YES;
         self.deleteButton.enabled = NO;
         self.removeEntryButton.enabled = NO;
         self.colorPicker.alphaValue = 0.45;
@@ -302,7 +302,7 @@
                 recognizer.enabled = NO;
             }
         }
-        self.doneButton.title = @"Close";
+        self.doneButton.title = @"Done";
         self.committedWarningLabel.hidden = NO;
     } else {
         self.committedWarningLabel.hidden = YES;
@@ -404,8 +404,7 @@
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Cannot Remove in Committed State";
         alert.informativeText = [NSString stringWithFormat:
-            @"Cannot remove %@ in committed state. Please wait until the end of the week, "
-            @"or use an emergency reset if absolutely critical.", itemType];
+            @"End your commitment before removing this %@.", itemType];
         alert.alertStyle = NSAlertStyleWarning;
         [alert addButtonWithTitle:@"OK"];
         [alert beginSheetModalForWindow:self.window completionHandler:nil];
@@ -424,8 +423,7 @@
     if (self.isCommitted) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Cannot Delete Bundle in Committed State";
-        alert.informativeText = @"Cannot remove bundle in committed state. Please wait until the end of the week, "
-            @"or use an emergency reset if absolutely critical.";
+        alert.informativeText = @"End your commitment before deleting this bundle.";
         alert.alertStyle = NSAlertStyleWarning;
         [alert addButtonWithTitle:@"OK"];
         [alert beginSheetModalForWindow:self.window completionHandler:nil];
@@ -448,11 +446,6 @@
 }
 
 - (void)doneClicked:(id)sender {
-    if (self.isCommitted) {
-        [self closeEditor];
-        return;
-    }
-
     // Validate
     NSString *name = [self.nameField.stringValue stringByTrimmingCharactersInSet:
                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];

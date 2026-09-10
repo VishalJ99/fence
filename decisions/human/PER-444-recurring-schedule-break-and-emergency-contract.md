@@ -11,6 +11,7 @@ Fence for macOS adopts the following Fence iOS product contract:
 5. While a recurring commitment survives, Protection settings may only become stricter: the daily break allowance may decrease, the emergency-unlock wait may increase, and Protected Hours may be enabled or expanded. The reverse changes become editable only after explicit End. Legacy finite commitments retain their existing full lock.
 6. Protected Hours expansion means that every previously protected local wall-clock minute remains protected. This set-inclusion rule applies equally to same-day and overnight ranges and is enforced against the current root-owned commitment before mutation.
 7. The first migration retains the existing macOS allow-window bundle semantics and read-only committed calendar. Block-window bundles, IDK breaks, and Live Activity equivalents are follow-up work.
+8. Confirmed 2026-09-10: existing committed bundles allow adding apps and websites as a stricter change. Existing contents, bundle deletion, and schedule editing remain locked until explicit End. Additions must update the daemon-owned recurring template, not only the local editor or current occurrence; an active break or allow window remains respected.
 
 ## Emergency exit
 

@@ -770,6 +770,9 @@ compatibleWithCurrentAppWithReason:(NSString**)reason {
           supportsRecurringSchedulesWithReason:reason]) {
         return NO;
     }
+    if (![self isDaemonProtocolVersion:protocolVersion
+                           capabilities:capabilities
+          supportsRecurringBundleAppendWithReason:reason]) return NO;
 
     if (reason != NULL) {
         *reason = @"compatible";
@@ -810,6 +813,22 @@ supportsRecurringSchedulesWithReason:(NSString**)reason {
           supportsTrustedTravelTimeZoneWithReason:reason]) return NO;
     if (![capabilities containsObject:SCDaemonCapabilityProtectedHoursStrictification]) {
         if (reason != NULL) *reason = @"protected-hours-strictification-missing";
+        return NO;
+    }
+    if (reason != NULL) *reason = @"compatible";
+    return YES;
+}
+
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString *> *)capabilities
+supportsRecurringBundleAppendWithReason:(NSString **)reason {
+    if (protocolVersion < SCDaemonProtocolVersionRecurringBundleAppend) {
+        if (reason != NULL) *reason = @"recurring-bundle-append-protocol-too-old";
+        return NO;
+    }
+    if (![capabilities isKindOfClass:[NSArray class]] ||
+        ![capabilities containsObject:SCDaemonCapabilityRecurringBundleAppend]) {
+        if (reason != NULL) *reason = @"recurring-bundle-append-missing";
         return NO;
     }
     if (reason != NULL) *reason = @"compatible";
@@ -1491,6 +1510,36 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                 reply(error);
             }];
         }
+    }];
+}
+
+- (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                        bundleID:(NSString *)bundleID
+                                         entries:(NSArray<NSString *> *)entries
+                                           reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
+        if (daemonError != nil) { reply(@{}, daemonError); return; }
+        [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
+                                     NSString *marketingVersion, NSArray<NSString *> *capabilities,
+                                     NSError *handshakeError) {
+            NSString *reason = nil;
+            if (handshakeError != nil || ![SCXPCClient isDaemonProtocolVersion:protocolVersion
+                capabilities:capabilities supportsRecurringBundleAppendWithReason:&reason]) {
+                reply(@{}, handshakeError ?: SCXPCCurrentDaemonRequiredError(reason));
+                return;
+            }
+            [self connectAndExecuteCommandBlock:^(NSError *error) {
+                if (error != nil) { reply(@{}, error); return; }
+                [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
+                    reply(@{}, proxyError);
+                }] appendEntriesToRecurringCommitmentWithID:commitmentID
+                                                  generation:generation
+                                                    bundleID:bundleID
+                                                     entries:entries
+                                                       reply:reply];
+            }];
+        }];
     }];
 }
 

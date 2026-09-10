@@ -43,7 +43,10 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// Removes a bundle by ID
 - (void)removeBundleWithID:(NSString *)bundleID;
 
-/// Updates an existing bundle
+/// Updates an existing bundle. During a recurring commitment this accepts only
+/// additive entries, preserving existing entries and metadata. Local changes
+/// follow the root append result asynchronously; completion uses the strictify
+/// notification with recurringBundleUpdate/bundleSaved flags.
 - (void)updateBundle:(SCBlockBundle *)bundle;
 
 /// Repeats the most recent in-memory strictify operation. Returns NO if there

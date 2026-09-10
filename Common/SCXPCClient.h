@@ -52,6 +52,10 @@ supportsRootScheduleCommitWithReason:(NSString* _Nullable * _Nullable)reason;
                    capabilities:(NSArray<NSString*>* _Nullable)capabilities
 supportsRecurringSchedulesWithReason:(NSString* _Nullable * _Nullable)reason;
 
++ (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
+                   capabilities:(NSArray<NSString *> *)capabilities
+supportsRecurringBundleAppendWithReason:(NSString* _Nullable * _Nullable)reason;
+
 /// Protocol 6 and later can hydrate and operate the recurring runtime that
 /// shipped in 3.4.12 even when newer timezone selectors are unavailable.
 + (BOOL)isDaemonProtocolVersion:(NSInteger)protocolVersion
@@ -195,6 +199,13 @@ supportsTrustedTravelTimeZoneWithReason:(NSString* _Nullable * _Nullable)reason;
                            reply:(void(^)(NSError* error))reply;
 
 - (void)clearAllApprovedSchedules:(void(^)(NSError* error))reply;
+
+- (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                        bundleID:(NSString *)bundleID
+                                         entries:(NSArray<NSString *> *)entries
+                                           reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                            NSError * _Nullable error))reply;
 
 - (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
                                   entries:(NSArray<NSString*>*)entries

@@ -56,6 +56,21 @@
 
 @interface SCBundleEditorController (CommittedStateTests)
 - (void)updateButtonStatesForCommittedState;
+- (void)doneClicked:(id)sender;
+- (void)cancelClicked:(id)sender;
+@end
+
+@interface SCBundleEditorSaveRecorder : NSObject <SCBundleEditorDelegate>
+@property (nonatomic, strong) SCBlockBundle *savedBundle;
+@property (nonatomic) BOOL cancelled;
+@end
+
+@implementation SCBundleEditorSaveRecorder
+- (void)bundleEditor:(SCBundleEditorController *)editor didSaveBundle:(SCBlockBundle *)bundle {
+    self.savedBundle = bundle;
+}
+- (void)bundleEditorDidCancel:(SCBundleEditorController *)editor { self.cancelled = YES; }
+- (void)bundleEditor:(SCBundleEditorController *)editor didDeleteBundle:(SCBlockBundle *)bundle {}
 @end
 
 @interface SCCountdownWarningController (Testing)
@@ -186,6 +201,28 @@ static NSDictionary<NSString *, id> *SCSentryParsedEnvelopeFromRequest(NSURLRequ
 - (BOOL)applyRecurringRuntimeState:(NSDictionary<NSString *, id> *)state
              daemonProtocolVersion:(NSInteger)protocolVersion;
 - (nullable NSArray<NSString *> *)expectedRecurringActiveEntriesAtDate:(NSDate *)date;
+- (void)appendRecurringEntries:(NSArray<NSString *> *)entries
+                   toBundleID:(NSString *)bundleID
+                   commitment:(NSDictionary<NSString *, id> *)commitment
+                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply;
+@end
+
+@interface SCRecurringBundleAppendTestManager : SCScheduleManager
+@property (nonatomic, strong) NSMutableArray *appendReplies;
+@property (nonatomic, copy) NSArray<NSString *> *appendedEntries;
+@property (nonatomic, copy) NSString *appendedBundleID;
+@end
+
+@implementation SCRecurringBundleAppendTestManager
+- (void)appendRecurringEntries:(NSArray<NSString *> *)entries
+                   toBundleID:(NSString *)bundleID
+                   commitment:(NSDictionary<NSString *, id> *)commitment
+                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    self.appendedEntries = entries;
+    self.appendedBundleID = bundleID;
+    if (self.appendReplies == nil) self.appendReplies = [NSMutableArray array];
+    [self.appendReplies addObject:[reply copy]];
+}
 @end
 
 static NSArray<NSString *> *SCRecurringRuntimeDefaultsKeys(void) {
@@ -328,6 +365,7 @@ static NSArray<NSString *> *SCCurrentDaemonCapabilities(void) {
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
+        SCDaemonCapabilityRecurringBundleAppend,
     ];
 }
 
@@ -443,7 +481,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     [super tearDown];
 }
 
-- (void)testCommittedBundleEditorShowsContentsReadOnly {
+- (void)testCommittedBundleEditorAllowsAdditionsButKeepsRemovalLocked {
     SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Work" color:SCBlockBundle.colorRed];
     [bundle addEntry:@"example.com"];
     [bundle addEntry:@"app:com.example.Focus"];
@@ -469,21 +507,256 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertFalse(entriesTableView.tableColumns.firstObject.editable);
     XCTAssertFalse(nameField.enabled);
     XCTAssertFalse(nameField.editable);
-    XCTAssertFalse(addAppButton.enabled);
-    XCTAssertFalse(addWebsiteButton.enabled);
+    XCTAssertTrue(addAppButton.enabled);
+    XCTAssertTrue(addWebsiteButton.enabled);
     XCTAssertFalse(removeEntryButton.enabled);
     XCTAssertFalse(deleteButton.enabled);
     XCTAssertEqualWithAccuracy(colorPicker.alphaValue, 0.45, 0.001);
-    XCTAssertEqualObjects(doneButton.title, @"Close");
+    XCTAssertEqualObjects(doneButton.title, @"Done");
     XCTAssertFalse(warningLabel.hidden);
     XCTAssertEqualObjects(warningLabel.stringValue,
-                          @"Locked during your commitment. End the commitment before changing this bundle.");
+                          @"You can add apps and websites. End your commitment before removing them.");
     XCTAssertEqualObjects(warningLabel.textColor, NSColor.systemRedColor);
 
     for (NSView *colorView in [editor valueForKey:@"colorViews"]) {
         for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
             XCTAssertFalse(recognizer.enabled);
         }
+    }
+}
+
+- (void)testCommittedBundleEditorSavesAdditionsOnlyWhenDoneIsClicked {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Work" color:SCBlockBundle.colorRed];
+    [bundle addEntry:@"existing.example"];
+    SCBundleEditorController *editor = [[SCBundleEditorController alloc] initWithBundle:bundle];
+    SCBundleEditorSaveRecorder *recorder = [[SCBundleEditorSaveRecorder alloc] init];
+    editor.delegate = recorder;
+    editor.isCommitted = YES;
+    [editor updateButtonStatesForCommittedState];
+    SCBlockBundle *draft = [editor valueForKey:@"workingBundle"];
+    [draft addEntry:@"added.example"];
+    [draft addEntry:@"app:com.example.Focus"];
+    XCTAssertEqualObjects(bundle.entries, (@[@"existing.example"]));
+    XCTAssertNil(recorder.savedBundle);
+
+    [editor doneClicked:nil];
+    XCTAssertEqualObjects(recorder.savedBundle.entries,
+                          (@[@"existing.example", @"added.example", @"app:com.example.Focus"]));
+    XCTAssertFalse(recorder.cancelled);
+
+    SCBundleEditorController *cancelled = [[SCBundleEditorController alloc] initWithBundle:bundle];
+    SCBundleEditorSaveRecorder *cancelRecorder = [[SCBundleEditorSaveRecorder alloc] init];
+    cancelled.delegate = cancelRecorder;
+    cancelled.isCommitted = YES;
+    SCBlockBundle *cancelledDraft = [cancelled valueForKey:@"workingBundle"];
+    [cancelledDraft addEntry:@"discarded.example"];
+    [cancelled cancelClicked:nil];
+    XCTAssertTrue(cancelRecorder.cancelled);
+    XCTAssertNil(cancelRecorder.savedBundle);
+    XCTAssertEqualObjects(bundle.entries, (@[@"existing.example"]));
+}
+
+- (void)testRecurringBundleAdditionsRequireDaemonPersistenceAndPreserveCommitment {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        for (NSString *outcome in @[@"verified", @"failed", @"partial"]) {
+            SCClearRecurringTelemetryDefaults(defaults);
+            SCInstallRecurringTelemetryFixture(defaults);
+            SCRecurringBundleAppendTestManager *manager = [SCRecurringBundleAppendTestManager new];
+            SCBlockBundle *original = [manager.bundles.firstObject copy];
+            NSDictionary *commitment = [defaults objectForKey:@"SCRecurringCommitment"];
+            NSDictionary *activeBreak = @{@"endsAt": [NSDate dateWithTimeIntervalSinceNow:300]};
+            [defaults setObject:activeBreak forKey:@"SCActiveTimedBreak"];
+            SCBlockBundle *draft = [original copy];
+            draft.name = @"Not permitted";
+            draft.color = SCBlockBundle.colorRed;
+            draft.enabled = NO;
+            [draft.entries removeAllObjects];
+            [draft addEntry:@"added.example"];
+            [draft addEntry:@"app:com.example.Focus"];
+
+            XCTestExpectation *completed = [self expectationWithDescription:outcome];
+            __block NSDictionary *notificationInfo = nil;
+            id observer = [NSNotificationCenter.defaultCenter
+                addObserverForName:SCScheduleStrictifyDidCompleteNotification object:manager queue:nil
+                usingBlock:^(NSNotification *note) {
+                    notificationInfo = note.userInfo;
+                    [completed fulfill];
+                }];
+            [manager updateBundle:draft];
+            XCTAssertEqualObjects(manager.appendedEntries, (@[@"added.example", @"app:com.example.Focus"]));
+            XCTAssertEqualObjects(manager.appendedBundleID, original.bundleID);
+            XCTAssertEqualObjects(manager.bundles.firstObject.entries, original.entries,
+                                  @"Do not report unacknowledged additions as saved");
+            XCTAssertEqual(manager.appendReplies.count, 1);
+            BOOL persisted = ![outcome isEqualToString:@"failed"];
+            BOOL verified = [outcome isEqualToString:@"verified"];
+            void (^reply)(NSDictionary *, NSError *) = manager.appendReplies.firstObject;
+            reply(@{@"outcome": outcome, @"store_persisted": @(persisted),
+                    @"post_write_match": @(persisted), @"reconcile_succeeded": @(verified)},
+                  verified ? nil : [NSError errorWithDomain:@"Fixture" code:1 userInfo:nil]);
+            [self waitForExpectations:@[completed] timeout:2];
+            [NSNotificationCenter.defaultCenter removeObserver:observer];
+            SCBlockBundle *saved = manager.bundles.firstObject;
+            XCTAssertEqualObjects(saved.name, original.name);
+            XCTAssertEqualObjects(saved.color, original.color);
+            XCTAssertEqual(saved.enabled, original.enabled);
+            XCTAssertTrue([saved.entries containsObject:original.entries.firstObject]);
+            XCTAssertEqual([saved.entries containsObject:@"added.example"], persisted);
+            XCTAssertEqualObjects(notificationInfo[SCScheduleStrictifyOutcomeKey], outcome);
+            XCTAssertTrue([notificationInfo[@"recurringBundleUpdate"] boolValue]);
+            XCTAssertEqual([notificationInfo[@"bundleSaved"] boolValue], persisted);
+            XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringCommitment"], commitment);
+            XCTAssertEqualObjects([defaults objectForKey:@"SCActiveTimedBreak"], activeBreak);
+        }
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringBundleRemovalOnlyEditDoesNotCallDaemon {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCInstallRecurringTelemetryFixture(defaults);
+        SCRecurringBundleAppendTestManager *manager = [SCRecurringBundleAppendTestManager new];
+        SCBlockBundle *original = [manager.bundles.firstObject copy];
+        SCBlockBundle *draft = [original copy];
+        [draft.entries removeAllObjects];
+        [manager updateBundle:draft];
+        XCTAssertEqual(manager.appendReplies.count, 0);
+        XCTAssertEqualObjects(manager.bundles.firstObject.entries, original.entries);
+        [manager removeBundleWithID:original.bundleID];
+        XCTAssertNotNil([manager bundleWithID:original.bundleID]);
+    } @finally {
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringBundleOutOfOrderAcknowledgmentsPreserveBothAdditions {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    id observer = nil;
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCInstallRecurringTelemetryFixture(defaults);
+        SCRecurringBundleAppendTestManager *manager = [SCRecurringBundleAppendTestManager new];
+        SCBlockBundle *original = [manager.bundles.firstObject copy];
+        SCBlockBundle *firstDraft = [original copy];
+        [firstDraft addEntry:@"first.example"];
+        SCBlockBundle *secondDraft = [original copy];
+        [secondDraft addEntry:@"app:com.example.Second"];
+        [manager updateBundle:firstDraft];
+        [manager updateBundle:secondDraft];
+        XCTAssertEqual(manager.appendReplies.count, 2);
+        XCTAssertEqualObjects(manager.bundles.firstObject.toDictionary, original.toDictionary);
+
+        XCTestExpectation *secondCompleted = [self expectationWithDescription:@"second request acknowledged first"];
+        XCTestExpectation *firstCompleted = [self expectationWithDescription:@"first request acknowledged last"];
+        NSMutableArray<NSString *> *operationTokens = [NSMutableArray array];
+        observer = [NSNotificationCenter.defaultCenter
+            addObserverForName:SCScheduleStrictifyDidCompleteNotification object:manager queue:nil
+            usingBlock:^(NSNotification *note) {
+                XCTAssertEqualObjects(note.userInfo[SCScheduleStrictifyOutcomeKey], @"verified");
+                [operationTokens addObject:note.userInfo[SCScheduleStrictifyOperationTokenKey]];
+                if (operationTokens.count == 1) [secondCompleted fulfill];
+                else [firstCompleted fulfill];
+            }];
+        NSDictionary *verifiedResult = @{
+            @"outcome": @"verified", @"store_persisted": @YES,
+            @"post_write_match": @YES, @"reconcile_succeeded": @YES,
+        };
+        void (^secondReply)(NSDictionary *, NSError *) = manager.appendReplies[1];
+        secondReply(verifiedResult, nil);
+        [self waitForExpectations:@[secondCompleted] timeout:2];
+        XCTAssertTrue([manager.bundles.firstObject.entries containsObject:@"app:com.example.Second"]);
+        XCTAssertFalse([manager.bundles.firstObject.entries containsObject:@"first.example"]);
+
+        void (^firstReply)(NSDictionary *, NSError *) = manager.appendReplies[0];
+        firstReply(verifiedResult, nil);
+        [self waitForExpectations:@[firstCompleted] timeout:2];
+        SCBlockBundle *expected = [original copy];
+        [expected addEntry:@"app:com.example.Second"];
+        [expected addEntry:@"first.example"];
+        XCTAssertEqualObjects(manager.bundles.firstObject.toDictionary, expected.toDictionary);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCScheduleBundles"], (@[expected.toDictionary]));
+        XCTAssertEqual(operationTokens.count, 2);
+        XCTAssertNotEqualObjects(operationTokens[0], operationTokens[1]);
+    } @finally {
+        if (observer != nil) [NSNotificationCenter.defaultCenter removeObserver:observer];
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringBundleAcknowledgmentDoesNotUpdateANewerCommitmentGeneration {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    id observer = nil;
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCInstallRecurringTelemetryFixture(defaults);
+        SCRecurringBundleAppendTestManager *manager = [SCRecurringBundleAppendTestManager new];
+        SCBlockBundle *original = [manager.bundles.firstObject copy];
+        SCBlockBundle *draft = [original copy];
+        [draft addEntry:@"stale.example"];
+        [manager updateBundle:draft];
+        XCTAssertEqual(manager.appendReplies.count, 1);
+        NSMutableDictionary *newCommitment = [[defaults objectForKey:@"SCRecurringCommitment"] mutableCopy];
+        newCommitment[@"generation"] = NSUUID.UUID.UUIDString;
+        [defaults setObject:newCommitment forKey:@"SCRecurringCommitment"];
+
+        XCTestExpectation *completed = [self expectationWithDescription:@"stale acknowledgment rejected"];
+        __block NSDictionary *notificationInfo = nil;
+        observer = [NSNotificationCenter.defaultCenter
+            addObserverForName:SCScheduleStrictifyDidCompleteNotification object:manager queue:nil
+            usingBlock:^(NSNotification *note) {
+                notificationInfo = note.userInfo;
+                [completed fulfill];
+            }];
+        void (^reply)(NSDictionary *, NSError *) = manager.appendReplies.firstObject;
+        reply(@{@"outcome": @"verified", @"store_persisted": @YES,
+                @"post_write_match": @YES, @"reconcile_succeeded": @YES}, nil);
+        [self waitForExpectations:@[completed] timeout:2];
+        XCTAssertEqualObjects(notificationInfo[SCScheduleStrictifyOutcomeKey], @"partial");
+        XCTAssertEqualObjects(notificationInfo[SCScheduleStrictifyFailedStageKey], @"commitment_resolution");
+        XCTAssertFalse([notificationInfo[@"bundleSaved"] boolValue]);
+        XCTAssertEqualObjects(manager.bundles.firstObject.toDictionary, original.toDictionary);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCScheduleBundles"], (@[original.toDictionary]));
+        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringCommitment"], newCommitment);
+    } @finally {
+        if (observer != nil) [NSNotificationCenter.defaultCenter removeObserver:observer];
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
+    }
+}
+
+- (void)testRecurringBundleInvalidAdditionIsRejectedWithoutDaemonRequest {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *snapshot = SCDefaultsSnapshot(defaults, SCRecurringTelemetryDefaultsKeys(defaults));
+    id observer = nil;
+    @try {
+        SCClearRecurringTelemetryDefaults(defaults);
+        SCInstallRecurringTelemetryFixture(defaults);
+        SCRecurringBundleAppendTestManager *manager = [SCRecurringBundleAppendTestManager new];
+        SCBlockBundle *original = [manager.bundles.firstObject copy];
+        SCBlockBundle *draft = [original copy];
+        [draft addEntry:@"valid.example"];
+        [draft.entries addObject:@"new invalid entry!"];
+        __block NSDictionary *notificationInfo = nil;
+        observer = [NSNotificationCenter.defaultCenter
+            addObserverForName:SCScheduleStrictifyDidCompleteNotification object:manager queue:nil
+            usingBlock:^(NSNotification *note) { notificationInfo = note.userInfo; }];
+        [manager updateBundle:draft];
+        XCTAssertEqual(manager.appendReplies.count, 0);
+        XCTAssertEqualObjects(notificationInfo[SCScheduleStrictifyOutcomeKey], @"failed");
+        XCTAssertEqualObjects(notificationInfo[SCScheduleStrictifyFailedStageKey], @"canonicalize");
+        XCTAssertFalse([notificationInfo[@"bundleSaved"] boolValue]);
+        XCTAssertEqualObjects(manager.bundles.firstObject.toDictionary, original.toDictionary);
+        XCTAssertEqualObjects([defaults objectForKey:@"SCScheduleBundles"], (@[original.toDictionary]));
+    } @finally {
+        if (observer != nil) [NSNotificationCenter.defaultCenter removeObserver:observer];
+        SCRestoreDefaultsSnapshot(defaults, snapshot);
     }
 }
 
@@ -692,6 +965,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
+        SCDaemonCapabilityRecurringBundleAppend,
         @"future-safe-capability-v1",
     ];
 
@@ -722,6 +996,7 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
+        SCDaemonCapabilityRecurringBundleAppend,
     ];
     NSArray<NSArray<NSString*>*>* missingCapabilities = @[
         [capabilities filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *capability, NSDictionary *bindings) {
@@ -811,6 +1086,45 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                    capabilities:capabilities
         compatibleWithCurrentAppWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"protocol-too-old");
+}
+
+- (void)testRecurringBundleAppendRequiresProtocolTenAndItsCapability {
+    NSArray<NSString *> *currentCapabilities = SCCurrentDaemonCapabilities();
+    NSMutableArray<NSString *> *withoutAppend = [currentCapabilities mutableCopy];
+    [withoutAppend removeObject:SCDaemonCapabilityRecurringBundleAppend];
+    NSString *reason = nil;
+
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                   capabilities:withoutAppend
+        supportsLegacyRecurringRuntimeWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                   capabilities:withoutAppend
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"protocol-too-old");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                   capabilities:currentCapabilities
+        supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-bundle-append-protocol-too-old");
+
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:withoutAppend
+        supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-bundle-append-missing");
+    XCTAssertFalse([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:withoutAppend
+        compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-bundle-append-missing");
+    XCTAssertTrue([SCXPCClient
+        isDaemonProtocolVersion:SCDaemonProtocolVersionRecurringBundleAppend
+                   capabilities:currentCapabilities
+        supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
 }
 
 - (void)testUserInitiatedDaemonUpgradeBlessesAndVerifiesExactlyOnce {

@@ -254,6 +254,15 @@ static NSError *SCScheduleCommitError(NSInteger code,
                      bundleSaved:(BOOL)bundleSaved
           blocklistFilePersisted:(BOOL)blocklistFilePersisted
                   operationToken:(nullable NSString *)operationToken;
+- (void)updateRecurringCommittedBundle:(SCBlockBundle *)bundle;
+- (void)appendRecurringEntries:(NSArray<NSString *> *)entries
+                   toBundleID:(NSString *)bundleID
+                   commitment:(NSDictionary<NSString *, id> *)commitment
+                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError * _Nullable))reply;
+- (void)postRecurringBundleUpdateOutcome:(NSString *)outcome
+                            failedStage:(NSString *)failedStage
+                            bundleSaved:(BOOL)bundleSaved
+                         operationToken:(NSString *)operationToken;
 - (void)emitStrictifyResultForEntries:(NSArray<NSString *> *)addedEntries
                             oldBundle:(SCBlockBundle *)oldBundle
                              toBundle:(SCBlockBundle *)bundle
@@ -395,8 +404,21 @@ static NSError *SCScheduleCommitError(NSInteger code,
 }
 
 - (void)updateBundle:(SCBlockBundle *)bundle {
-    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) {
+    if (self.recurringScheduleMigrationNeedsChoice) {
         NSLog(@"SCScheduleManager: Cannot edit bundles while recurring edits are locked");
+        return;
+    }
+    if (self.hasRecurringCommitment) {
+        // Serialize local reads/writes on the main queue. The daemon serializes
+        // root appends; replies may arrive in either order and are union-rebased.
+        SCBlockBundle *snapshot = [bundle copy];
+        if (![NSThread isMainThread]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateRecurringCommittedBundle:snapshot];
+            });
+        } else {
+            [self updateRecurringCommittedBundle:snapshot];
+        }
         return;
     }
     NSInteger index = [self indexOfBundleWithID:bundle.bundleID];
@@ -473,6 +495,122 @@ static NSError *SCScheduleCommitError(NSInteger code,
 
         [self postChangeNotification];
     }
+}
+
+- (void)updateRecurringCommittedBundle:(SCBlockBundle *)bundle {
+    SCBlockBundle *oldBundle = [[self bundleWithID:bundle.bundleID] copy];
+    NSDictionary<NSString *, id> *commitment = [self.recurringCommitmentDictionary copy];
+    if (oldBundle == nil || commitment == nil) return;
+
+    NSString *operationToken = NSUUID.UUID.UUIDString;
+    NSMutableOrderedSet<NSString *> *existingEntries = [NSMutableOrderedSet orderedSet];
+    for (NSString *entry in oldBundle.entries) {
+        NSString *canonical = [SCMiscUtilities canonicalBlockEntryFromString:entry];
+        if (canonical != nil) [existingEntries addObject:canonical];
+    }
+    NSMutableOrderedSet<NSString *> *additions = [NSMutableOrderedSet orderedSet];
+    for (id entry in bundle.entries) {
+        // Opaque legacy entries already present are retained, never resubmitted
+        // as new input. New entries must canonicalize before any root mutation.
+        if ([oldBundle.entries containsObject:entry]) continue;
+        NSString *canonical = [entry isKindOfClass:[NSString class]]
+            ? [SCMiscUtilities canonicalBlockEntryFromString:entry] : nil;
+        if (canonical == nil) {
+            [self postRecurringBundleUpdateOutcome:@"failed" failedStage:@"canonicalize"
+                                        bundleSaved:NO operationToken:operationToken];
+            return;
+        }
+        if (![existingEntries containsObject:canonical]) [additions addObject:canonical];
+    }
+    // Removing entries or editing name/color/enabled/order is not an additive
+    // update. Keep the original bundle intact without making a daemon request.
+    if (additions.count == 0) return;
+
+    NSArray<NSString *> *addedEntries = additions.array;
+    NSString *bundleID = oldBundle.bundleID;
+    [self appendRecurringEntries:addedEntries toBundleID:bundleID commitment:commitment
+                           reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL rootStored = [result[@"store_persisted"] boolValue] &&
+                [result[@"post_write_match"] boolValue];
+            BOOL rootVerified = rootStored && error == nil &&
+                [result[@"outcome"] isEqualToString:@"verified"] &&
+                [result[@"reconcile_succeeded"] boolValue];
+            NSString *stage = [result[@"failed_stage"] isKindOfClass:[NSString class]]
+                ? result[@"failed_stage"] : @"transport";
+            if (!rootStored) {
+                [self postRecurringBundleUpdateOutcome:@"failed" failedStage:stage
+                                            bundleSaved:NO operationToken:operationToken];
+                return;
+            }
+
+            NSDictionary *currentCommitment = self.recurringCommitmentDictionary;
+            NSInteger index = [self indexOfBundleWithID:bundleID];
+            if (index == NSNotFound ||
+                ![currentCommitment[@"commitmentID"] isEqual:commitment[@"commitmentID"]] ||
+                ![currentCommitment[@"generation"] isEqual:commitment[@"generation"]]) {
+                [self postRecurringBundleUpdateOutcome:@"partial"
+                                            failedStage:@"commitment_resolution"
+                                            bundleSaved:NO operationToken:operationToken];
+                return;
+            }
+
+            // Root storage is authoritative even when immediate reconciliation
+            // failed. Mirror those additions, but report partial rather than
+            // verified enforcement. Never replace a newer concurrent edit with
+            // the submitted snapshot, and never copy its mutable metadata.
+            SCBlockBundle *updatedBundle = [self.mutableBundles[index] copy];
+            for (NSString *entry in addedEntries) [updatedBundle addEntry:entry];
+            self.mutableBundles[index] = updatedBundle;
+            [self save];
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            BOOL bundleSaved = [defaults synchronize];
+            NSArray *persistedBundles = [defaults objectForKey:kBundlesKey];
+            BOOL matchingBundle = NO;
+            for (id persisted in ([persistedBundles isKindOfClass:[NSArray class]] ? persistedBundles : @[])) {
+                if ([persisted isKindOfClass:[NSDictionary class]] &&
+                    [persisted isEqualToDictionary:updatedBundle.toDictionary]) {
+                    matchingBundle = YES;
+                    break;
+                }
+            }
+            bundleSaved = bundleSaved && matchingBundle;
+            [self postChangeNotification];
+            [self postRecurringBundleUpdateOutcome:(rootVerified && bundleSaved ? @"verified" : @"partial")
+                                        failedStage:(!bundleSaved ? @"persist" : (rootVerified ? @"none" : stage))
+                                        bundleSaved:bundleSaved operationToken:operationToken];
+        });
+    }];
+}
+
+- (void)appendRecurringEntries:(NSArray<NSString *> *)entries
+                   toBundleID:(NSString *)bundleID
+                   commitment:(NSDictionary<NSString *, id> *)commitment
+                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    // Unlike the legacy active-block append, the daemon updates matching
+    // recurring template segments and reconciles its normal schedule/break
+    // state. This must not force a block during an allowed window or break.
+    SCXPCClient *xpc = [SCXPCClient new];
+    [xpc appendEntriesToRecurringCommitmentWithID:commitment[@"commitmentID"]
+                                      generation:commitment[@"generation"]
+                                        bundleID:bundleID
+                                         entries:entries
+                                           reply:reply];
+}
+
+- (void)postRecurringBundleUpdateOutcome:(NSString *)outcome
+                            failedStage:(NSString *)failedStage
+                            bundleSaved:(BOOL)bundleSaved
+                         operationToken:(NSString *)operationToken {
+    [[NSNotificationCenter defaultCenter] postNotificationName:SCScheduleStrictifyDidCompleteNotification
+                                                        object:self
+                                                      userInfo:@{
+        SCScheduleStrictifyOutcomeKey: outcome,
+        SCScheduleStrictifyFailedStageKey: failedStage,
+        SCScheduleStrictifyOperationTokenKey: operationToken,
+        @"recurringBundleUpdate": @YES,
+        @"bundleSaved": @(bundleSaved),
+    }];
 }
 
 - (NSArray<NSString *> *)entriesInArray:(NSArray<NSString *> *)entries notInArray:(NSArray<NSString *> *)otherEntries {

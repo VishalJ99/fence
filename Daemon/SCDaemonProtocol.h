@@ -24,7 +24,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionRecurringTimeZone = 7,
     SCDaemonProtocolVersionTrustedTravelTimeZone = 8,
     SCDaemonProtocolVersionProtectedHoursStrictification = 9,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionProtectedHoursStrictification,
+    SCDaemonProtocolVersionRecurringBundleAppend = 10,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringBundleAppend,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -43,6 +44,7 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
 #define SCDaemonCapabilityRecurringTimeZone @"recurring-time-zone-v1"
 #define SCDaemonCapabilityTrustedTravelTimeZone @"trusted-travel-time-zone-v1"
 #define SCDaemonCapabilityProtectedHoursStrictification @"protected-hours-strictification-v1"
+#define SCDaemonCapabilityRecurringBundleAppend @"recurring-bundle-append-v1"
 
 /// Pure ownership predicate shared with focused tests. A known owner must
 /// match exactly. Legacy ownerless blocks may be strictified only by the
@@ -341,6 +343,13 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
 
 // XPC method to append stricter entries to selected pre-approved schedules.
 // Each selected schedule must contain the provided existing entries before it is changed.
+- (void)appendEntriesToRecurringCommitmentWithID:(NSString *)commitmentID
+                                      generation:(NSString *)generation
+                                        bundleID:(NSString *)bundleID
+                                         entries:(NSArray<NSString *> *)entries
+                                           reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                            NSError * _Nullable error))reply;
+
 - (void)appendEntriesToApprovedSchedules:(NSDictionary<NSString*, NSArray<NSString*>*>*)expectedBlocklistsByScheduleID
                                  entries:(NSArray<NSString*>*)entries
                                    reply:(void(^)(NSError* error))reply;

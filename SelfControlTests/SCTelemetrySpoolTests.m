@@ -538,11 +538,35 @@
         SCDaemonCapabilityRecurringTimeZone,
         SCDaemonCapabilityTrustedTravelTimeZone,
         SCDaemonCapabilityProtectedHoursStrictification,
+        SCDaemonCapabilityRecurringBundleAppend,
     ];
     NSString *reason = nil;
     XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
                                           capabilities:required
                     compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"compatible");
+
+    // Existing v9 helpers remain valid for runtime inspection, but the new
+    // user-initiated append action requires an upgrade before its selector.
+    XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                                          capabilities:required
+                    supportsRecurringSchedulesWithReason:&reason]);
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                                           capabilities:required
+                    compatibleWithCurrentAppWithReason:&reason]);
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionProtectedHoursStrictification
+                                           capabilities:required
+             supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-bundle-append-protocol-too-old");
+    NSMutableArray *withoutBundleAppend = [required mutableCopy];
+    [withoutBundleAppend removeObject:SCDaemonCapabilityRecurringBundleAppend];
+    XCTAssertFalse([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                           capabilities:withoutBundleAppend
+             supportsRecurringBundleAppendWithReason:&reason]);
+    XCTAssertEqualObjects(reason, @"recurring-bundle-append-missing");
+    XCTAssertTrue([SCXPCClient isDaemonProtocolVersion:SCDaemonProtocolVersionCurrent
+                                          capabilities:[required arrayByAddingObject:SCDaemonCapabilityRecurringBundleAppend]
+            supportsRecurringBundleAppendWithReason:&reason]);
     XCTAssertEqualObjects(reason, @"compatible");
 
     NSArray *missingSpool = @[
