@@ -35,10 +35,13 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, strong) NSMenu *statusMenu;
+@property (nonatomic) BOOL menuIsTracking;
+@property (nonatomic) BOOL menuCloseRefreshScheduled;
+@property (nonatomic) BOOL menuPopulationInProgress;
 @property (nonatomic, strong) NSTimer *updateTimer;
 @property (nonatomic, strong, nullable) NSTimer *breakCountdownTimer;
 @property (nonatomic, weak, nullable) NSMenuItem *activeBreakStatusItem;
-@property (nonatomic) BOOL breakStatusSuspendsEnforcement;
+@property (nonatomic, weak, nullable) NSMenuItem *timedBreakActionItem;
 @property (nonatomic, strong, nullable) NSTimer *warningArmTimer;
 @property (nonatomic, strong) SCCountdownWarningController *countdownWarningController;
 @property (nonatomic, copy, nullable) NSString *dismissedWarningIdentifier;
@@ -50,6 +53,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 - (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager;
 - (NSString *)activeBreakMenuTitleForManager:(SCScheduleManager *)manager;
 - (void)updateActiveBreakStatusItem;
+- (void)refreshTrackedMenuItems;
 
 @end
 
@@ -150,6 +154,8 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 }
 
 - (void)removeStatusItem {
+    [self.statusMenu cancelTracking];
+    self.menuIsTracking = NO;
     if (self.statusItem) {
         [[NSStatusBar systemStatusBar] removeStatusItem:self.statusItem];
         self.statusItem = nil;
@@ -159,14 +165,21 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 #pragma mark - Menu Building
 
 - (void)rebuildMenu {
-    [self populateMenu:[[NSMenu alloc] init]];
+    [self populateMenu:self.statusMenu ?: [[NSMenu alloc] init]];
 }
 
 - (void)populateMenu:(NSMenu *)menu {
+    // AppKit forbids menu/item changes in menuWillOpen:/menuDidClose:, and
+    // common-mode timers also run while the menu (or a submenu) is tracking.
+    if (self.menuIsTracking || self.menuCloseRefreshScheduled || self.menuPopulationInProgress) return;
+    self.menuPopulationInProgress = YES;
     [menu removeAllItems];
     self.activeBreakStatusItem = nil;
+    self.timedBreakActionItem = nil;
     self.statusMenu = menu;
     self.statusMenu.delegate = self;
+    // All action availability is explicitly derived from current state below.
+    self.statusMenu.autoenablesItems = NO;
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
 
@@ -194,10 +207,6 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
             breakItem.enabled = NO;
             [self.statusMenu addItem:breakItem];
             self.activeBreakStatusItem = breakItem;
-            self.breakStatusSuspendsEnforcement = breakSuspendsEnforcement;
-            if (breakSuspendsEnforcement) {
-                [self updateActiveBreakStatusItem];
-            }
         }
 
         NSUInteger renderedBundleCount = 0;
@@ -315,7 +324,9 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
         extendItem.target = self;
         extendItem.enabled = !extensionInFlight;
         [self.statusMenu addItem:extendItem];
-        [self.statusMenu addItem:[self timedBreakMenuItemForManager:manager]];
+        NSMenuItem *breakAction = [self timedBreakMenuItemForManager:manager];
+        [self.statusMenu addItem:breakAction];
+        self.timedBreakActionItem = breakAction;
     }
 
     // Try Test Block - always show when not committed, grey out if block active
@@ -437,6 +448,8 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                keyEquivalent:@"q"];
     quitItem.target = self;
     [self.statusMenu addItem:quitItem];
+    self.menuPopulationInProgress = NO;
+    [self refreshTrackedMenuItems];
 }
 
 - (NSString *)activeBreakMenuTitleForManager:(SCScheduleManager *)manager {
@@ -455,25 +468,16 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     if (breakItem == nil) return;
 
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    if (!manager.hasActiveTimedBreak) {
-        [self.breakCountdownTimer invalidate];
-        self.breakCountdownTimer = nil;
-        [self populateMenu:self.statusMenu];
-        return;
-    }
-
-    BOOL breakSuspendsEnforcement = !manager.protectedHoursActiveNow;
-    if (breakSuspendsEnforcement != self.breakStatusSuspendsEnforcement) {
-        [self populateMenu:self.statusMenu];
-        return;
-    }
-    if (!breakSuspendsEnforcement) return;
-
-    NSString *breakText = [self activeBreakMenuTitleForManager:manager];
+    BOOL hasBreak = manager.hasActiveTimedBreak;
+    BOOL breakSuspendsEnforcement = hasBreak && !manager.protectedHoursActiveNow;
+    NSString *breakText = !hasBreak ? @"● Break ended"
+        : breakSuspendsEnforcement ? [self activeBreakMenuTitleForManager:manager]
+        : @"● Break interrupted by Protected Hours";
     NSMutableAttributedString *breakTitle =
         [[NSMutableAttributedString alloc] initWithString:breakText];
     [breakTitle addAttributes:@{
-        NSForegroundColorAttributeName: NSColor.systemGreenColor,
+        NSForegroundColorAttributeName: breakSuspendsEnforcement
+            ? NSColor.systemGreenColor : NSColor.systemOrangeColor,
         NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
     } range:NSMakeRange(0, breakText.length)];
     NSRange timerRange = [breakText rangeOfString:@"· " options:NSBackwardsSearch];
@@ -484,7 +488,39 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                                  weight:NSFontWeightSemibold]
                           range:NSMakeRange(timerStart, breakText.length - timerStart)];
     }
+    breakItem.title = breakText;
     breakItem.attributedTitle = breakTitle;
+}
+
+- (void)refreshTrackedMenuItems {
+    // Only mutate existing item properties here, never add/remove items, change
+    // actions/submenus, or replace the status menu beneath AppKit's tracker.
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    [self updateActiveBreakStatusItem];
+
+    NSMenuItem *breakAction = self.timedBreakActionItem;
+    if (breakAction == nil) return;
+    BOOL hasBreak = manager.hasActiveTimedBreak;
+    BOOL pending = manager.timedBreakMutationInFlight;
+    BOOL canTakeBreak = manager.canBeginTimedBreak;
+    if (breakAction.submenu != nil) {
+        breakAction.title = pending ? @"Updating Break…"
+            : hasBreak ? @"Break active — reopen menu"
+            : [NSString stringWithFormat:@"Take Break (%ld)", (long)manager.breakCreditsRemainingToday];
+        breakAction.enabled = canTakeBreak;
+        for (NSMenuItem *durationItem in breakAction.submenu.itemArray) {
+            durationItem.enabled = canTakeBreak;
+        }
+    } else if (breakAction.action == @selector(endTimedBreakClicked:)) {
+        breakAction.title = pending ? @"Updating Break…" : !hasBreak ? @"Break ended — reopen menu"
+            : manager.protectedHoursActiveNow ? @"End Paused Break" : @"End Break";
+        breakAction.enabled = manager.hasRecurringCommitment && hasBreak && !pending;
+    } else {
+        // A row built while a mutation was pending has no action. Do not turn
+        // it into a different action or attach a submenu while tracking.
+        breakAction.title = pending ? @"Updating Break…" : @"Break updated — reopen menu";
+        breakAction.enabled = NO;
+    }
 }
 
 - (NSString *)commitmentMenuTitleForManager:(SCScheduleManager *)manager {
@@ -541,6 +577,7 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
                                                            action:nil
                                                     keyEquivalent:@""];
     NSMenu *durationMenu = [[NSMenu alloc] initWithTitle:@"Take Break"];
+    durationMenu.autoenablesItems = NO;
     for (NSNumber *minutes in @[@5, @15, @30]) {
         NSMenuItem *durationItem = [[NSMenuItem alloc]
             initWithTitle:[NSString stringWithFormat:@"%@ minutes", minutes]
@@ -723,13 +760,11 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
     if (!self.statusItem) return;
 
     self.statusItem.button.image = [self statusImage];
-    if (self.breakCountdownTimer != nil && self.statusMenu != nil) {
-        [self populateMenu:self.statusMenu];
-        [self refreshCountdownWarning];
-        return;
+    if (self.menuIsTracking || self.menuCloseRefreshScheduled || self.menuPopulationInProgress) {
+        [self refreshTrackedMenuItems];
+    } else {
+        [self rebuildMenu];
     }
-    [self rebuildMenu];
-    self.statusItem.menu = self.statusMenu;
     [self refreshCountdownWarning];
 }
 
@@ -778,14 +813,18 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
 
 #pragma mark - NSMenuDelegate
 
-- (void)menuWillOpen:(NSMenu *)menu {
-    // Rebuild menu fresh when opened to ensure latest state
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != self.statusMenu) return;
+    // Unlike menuWillOpen:, this is AppKit's structural pre-open update hook.
     [self populateMenu:menu];
-    self.statusItem.menu = menu;
+}
+
+- (void)menuWillOpen:(NSMenu *)menu {
+    if (menu != self.statusMenu) return;
+    self.menuIsTracking = YES;
     [self.breakCountdownTimer invalidate];
     self.breakCountdownTimer = nil;
-    if (self.activeBreakStatusItem != nil) {
-        [self updateActiveBreakStatusItem];
+    if (self.activeBreakStatusItem != nil || self.timedBreakActionItem != nil) {
         self.breakCountdownTimer = [NSTimer timerWithTimeInterval:1.0
                                                            target:self
                                                          selector:@selector(breakCountdownTimerFired:)
@@ -794,19 +833,26 @@ static const NSTimeInterval SCWarningLeadTime = 90.0;
         [[NSRunLoop mainRunLoop] addTimer:self.breakCountdownTimer
                                   forMode:NSRunLoopCommonModes];
     }
-    [self refreshCountdownWarning];
 }
 
 - (void)menuDidClose:(NSMenu *)menu {
-    #pragma unused(menu)
+    if (menu != self.statusMenu) return;
     [self.breakCountdownTimer invalidate];
     self.breakCountdownTimer = nil;
-    self.activeBreakStatusItem = nil;
+    self.menuIsTracking = NO;
+    if (self.menuCloseRefreshScheduled) return;
+    self.menuCloseRefreshScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Never rebuild in menuDidClose:. If the menu reopened before this
+        // block ran, updateStatus still respects the new tracking session.
+        self.menuCloseRefreshScheduled = NO;
+        [self updateStatus];
+    });
 }
 
 - (void)breakCountdownTimerFired:(NSTimer *)timer {
     #pragma unused(timer)
-    [self updateActiveBreakStatusItem];
+    if (self.menuIsTracking) [self refreshTrackedMenuItems];
 }
 
 #pragma mark - Actions

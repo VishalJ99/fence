@@ -8,6 +8,7 @@
 - `server/` — Node/Express license activation and trial API. Runtime configuration comes from environment variables such as `DATABASE_URL` and `WEBHOOK_SECRET`.
 - `web/functions/api/` — Cloudflare Pages Functions used for checkout webhooks, license generation, and email delivery.
 - `scripts/` — local setup, build, and release automation, including macOS 26 compatibility bootstrapping.
+- `scripts/test-menu-lifecycle.m` — isolated native regression harness for menu tracking and break-expiry updates; compile/run instructions are embedded in the source.
 - `scripts/unlock-release-keychain.swift` — reads a mode-`600` password file and unlocks the explicitly selected release Keychain without placing its password in process arguments.
 - `scripts/sparkle-public-key.swift` — derives the public Ed25519 key from the configured Sparkle seed so release preflight can compare it with `Info.plist`.
 - `/Users/dross/.private/fence-release/dependencies/` — owner-only Mac-mini recovery copies for the unavailable pinned `ArgumentParser` commit and ignored Sparkle.framework 2.8.1; the adjacent `reproduction.txt` records checksums and restore commands.
