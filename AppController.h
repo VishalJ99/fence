@@ -22,7 +22,9 @@
 
 // Forward declaration to avoid compiler weirdness
 @class TimerWindowController;
+#ifdef DEBUG
 @class SCSafetyCheckWindowController;
+#endif
 @class SCWeekScheduleWindowController;
 @class SPUStandardUpdaterController;
 
@@ -61,7 +63,9 @@
 
 @property (assign) BOOL addingBlock;
 
+#ifdef DEBUG
 @property (nonatomic, strong) SCSafetyCheckWindowController* safetyCheckWindowController;
+#endif
 
 @property (nonatomic, strong, readonly) SPUStandardUpdaterController* updaterController;
 

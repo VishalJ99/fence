@@ -40,10 +40,9 @@
 #import "SCScheduleManager.h"
 #import "SCBlockBundle.h"
 #import "SCMenuBarController.h"
-#import "SCStartupSafetyCheck.h"
+#ifdef DEBUG
 #import "SCSafetyCheckWindowController.h"
-#import "SCVersionTracker.h"
-#import "SCTestBlockWindowController.h"
+#endif
 #import "SCLogger.h"
 #import "Common/SCLicenseManager.h"
 #import "SCLicenseWindowController.h"
@@ -118,7 +117,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 @property (atomic, strong, readwrite) SCXPCClient* xpc;
 @property (nonatomic, strong) SCWeekScheduleWindowController* weekScheduleWindowController;
 @property (nonatomic, strong, nullable) SCLicenseWindowController* licenseWindowController;
-@property (nonatomic, strong, nullable) SCTestBlockWindowController* testBlockWindowController;
 @property (nonatomic, strong, readwrite) SPUStandardUpdaterController* updaterController;
 
 - (void)checkDaemonCompatibilityAllowingRepair:(BOOL)allowRepair;
@@ -719,19 +717,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     [self updateDebugIndicator];
 #endif
 
-    // Check if safety test is needed (version changed since last test)
-    if ([SCStartupSafetyCheck safetyCheckNeeded]) {
-        // Delay slightly to let the app finish launching
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self showSafetyCheckPrompt];
-        });
-    } else if ([SCVersionTracker testBlockNeeded] && ![SCVersionTracker hasEverCommitted]) {
-        // Safety check passed previously, but user never completed a test block or committed
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self showTestBlockAfterSafetyCheck];
-        });
-    }
-
     appDidFinishLaunching_ = YES;
 }
 
@@ -754,16 +739,7 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     return NSTerminateNow;
 }
 
-- (void)showSafetyCheckPrompt {
-    NSAlert* alert = [[NSAlert alloc] init];
-    [alert setMessageText:@"Safety Check Required"];
-    [alert setInformativeText:@"Your macOS or Fence version has changed since the last safety check. Running a 30-second test to verify blocking works correctly."];
-    [alert addButtonWithTitle:@"Continue"];
-
-    [alert runModal];
-    [self runSafetyCheck];
-}
-
+#ifdef DEBUG
 - (void)runSafetyCheck {
     // Close existing safety check window if one is open
     if (self.safetyCheckWindowController) {
@@ -774,46 +750,11 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 
     self.safetyCheckWindowController = [[SCSafetyCheckWindowController alloc] init];
 
-    // Set completion handler to show test block after user clicks OK
-    __weak typeof(self) weakSelf = self;
-    self.safetyCheckWindowController.completionHandler = ^(SCSafetyCheckResult* result) {
-        if (result.passed) {
-            [weakSelf showTestBlockAfterSafetyCheck];
-        }
-    };
-
     [self.safetyCheckWindowController showWindow:self];
     [self.safetyCheckWindowController runSafetyCheck];
 }
 
-- (void)showTestBlockAfterSafetyCheck {
-    // Clean up safety check controller (window already closed by OK click)
-    self.safetyCheckWindowController = nil;
-
-    // Don't show test block if a block is already running
-    if ([SCBlockUtilities anyBlockIsRunning]) {
-        return;
-    }
-
-    // Show alert offering to try test block
-    NSAlert* alert = [[NSAlert alloc] init];
-    alert.messageText = @"Would you like to try a test block? (Recommended)";
-    alert.informativeText = @"You can try this any time from the menu when outside an active block.";
-    [alert addButtonWithTitle:@"Try Test Block"];
-    [alert addButtonWithTitle:@"Maybe Later"];
-
-    NSModalResponse response = [alert runModal];
-
-    if (response == NSAlertFirstButtonReturn) {
-        // Show test block window
-        self.testBlockWindowController = [[SCTestBlockWindowController alloc] init];
-        self.testBlockWindowController.completionHandler = ^(BOOL didComplete) {
-            self.testBlockWindowController = nil;
-        };
-        [self.testBlockWindowController showWindow:nil];
-        [NSApp activateIgnoringOtherApps:YES];
-    }
-}
+#endif
 
 - (void)checkDaemonCompatibilityAllowingRepair:(BOOL)allowRepair {
     [self.xpc getCompatibilityInfo:^(NSInteger protocolVersion,
