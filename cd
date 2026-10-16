@@ -1,0 +1,66 @@
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, arch:x86_64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, name:Any Mac }
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, arch:x86_64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, name:Any Mac }
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, arch:x86_64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, name:Any Mac }
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, arch:x86_64, id:00006000-001C24D60CD8801E, name:My Mac }
+{ platform:macOS, name:Any Mac }
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Library/LaunchServices/org.eyebeam.selfcontrold: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Library/LaunchServices/org.eyebeam.selfcontrold: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/Fence: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/Fence: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/org.eyebeam.SelfControl: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/org.eyebeam.SelfControl: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: replacing existing signature
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: replacing existing signature
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper
+
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/selfcontrol-cli
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/MacOS/SCKillerHelper
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--prepared:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--validated:/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: valid on disk
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: valid on disk
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: satisfies its Designated Requirement
+/Users/vishaljain/fence-release-3.4.8/build/DerivedData/Build/Products/Release/Fence.app: satisfies its Designated Requirement
+Searching for mounted interstitial disk image using /dev/disk17s... 
+Searching for mounted interstitial disk image using /dev/disk17s... 
+waited 1 seconds for .DS_STORE to be created.
+waited 1 seconds for .DS_STORE to be created.

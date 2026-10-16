@@ -7,8 +7,8 @@
 #import "Block Management/SCScheduleManager.h"
 #import "Block Management/SCBlockBundle.h"
 #import "Block Management/SCWeeklySchedule.h"
-#import "SCLogger.h"
 #import "Common/SCLicenseManager.h"
+#import "Common/SCSentry.h"
 #import "SCLicenseWindowController.h"
 #import "SCTestBlockWindowController.h"
 #import "SCSettings.h"
@@ -297,18 +297,21 @@
 
     [self.statusMenu addItem:[NSMenuItem separatorItem]];
 
-    // Report Bug
+    // Maintenance and privacy controls
     NSMenuItem *repairPermissionsItem = [[NSMenuItem alloc] initWithTitle:@"Repair Fence Permissions"
                                                                     action:@selector(repairPermissionsClicked:)
                                                              keyEquivalent:@""];
     repairPermissionsItem.target = self;
     [self.statusMenu addItem:repairPermissionsItem];
 
-    NSMenuItem *reportBugItem = [[NSMenuItem alloc] initWithTitle:@"Report Bug"
-                                                           action:@selector(reportBugClicked:)
-                                                    keyEquivalent:@""];
-    reportBugItem.target = self;
-    [self.statusMenu addItem:reportBugItem];
+    NSMenuItem *errorReportingItem = [[NSMenuItem alloc] initWithTitle:@"Send Anonymized Error Reports"
+                                                                action:@selector(toggleAnonymizedErrorReporting:)
+                                                         keyEquivalent:@""];
+    errorReportingItem.target = self;
+    errorReportingItem.state = [SCSentry errorReportingEnabled]
+        ? NSControlStateValueOn
+        : NSControlStateValueOff;
+    [self.statusMenu addItem:errorReportingItem];
 
     // Check for Updates
     NSMenuItem *updateItem = [[NSMenuItem alloc] initWithTitle:@"Check for Updates"
@@ -486,8 +489,13 @@
     [NSApp terminate:nil];
 }
 
-- (void)reportBugClicked:(id)sender {
-    [SCLogger exportLogsForSupport];
+- (void)toggleAnonymizedErrorReporting:(id)sender {
+    BOOL enabled = ![SCSentry errorReportingEnabled];
+    [SCSentry setUserErrorReportingEnabled:enabled];
+
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        ((NSMenuItem *)sender).state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
 }
 
 - (void)repairPermissionsClicked:(id)sender {
