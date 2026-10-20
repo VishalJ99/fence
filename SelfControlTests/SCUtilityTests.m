@@ -941,8 +941,14 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
             XCTAssertEqual(manager.calendarReplies.count, 1);
             XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringSchedules"], schedulesBefore);
             XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary, schedulesBefore.firstObject);
-            XCTAssertEqualObjects(manager.submittedCalendarCommitment,
-                                  [defaults objectForKey:@"SCRecurringCommitment"]);
+            NSMutableDictionary *submittedEnvelope = [manager.submittedCalendarCommitment mutableCopy];
+            NSArray *proposedProfiles = submittedEnvelope[@"proposedProtectedBundles"];
+            [submittedEnvelope removeObjectForKey:@"proposedProtectedBundles"];
+            XCTAssertEqualObjects(submittedEnvelope, [defaults objectForKey:@"SCRecurringCommitment"]);
+            NSMutableDictionary *expectedProfile = [manager.bundles.firstObject.toDictionary mutableCopy];
+            expectedProfile[@"blockedRanges"] = @[@{@"start": @0, @"end": @600},
+                                                   @{@"start": @960, @"end": @10080}];
+            XCTAssertEqualObjects(proposedProfiles, (@[expectedProfile]));
             XCTAssertEqual(manager.submittedCalendarSegments.count, 2);
             XCTAssertEqualObjects(manager.submittedCalendarSegments[0][SCRecurringSegmentStartMinuteKey], @0);
             XCTAssertEqualObjects(manager.submittedCalendarSegments[0][SCRecurringSegmentEndMinuteKey], @600);
@@ -974,7 +980,13 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
             XCTAssertEqualObjects(manager.recurringSchedules.firstObject.toDictionary,
                                   (rootStored ? expectedSchedules : schedulesBefore).firstObject);
             XCTAssertEqualObjects([defaults objectForKey:@"SCScheduleBundles"], bundlesBefore);
-            XCTAssertEqualObjects(SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys()), runtimeBefore);
+            NSMutableDictionary *expectedRuntime = [runtimeBefore mutableCopy];
+            if (rootStored) {
+                NSMutableDictionary *expectedCommitment = [runtimeBefore[@"SCRecurringCommitment"] mutableCopy];
+                expectedCommitment[@"protectedBundles"] = @[expectedProfile];
+                expectedRuntime[@"SCRecurringCommitment"] = expectedCommitment;
+            }
+            XCTAssertEqualObjects(SCDefaultsSnapshot(defaults, SCRecurringRuntimeDefaultsKeys()), expectedRuntime);
         }
     } @finally {
         SCRestoreDefaultsSnapshot(defaults, snapshot);
@@ -1065,7 +1077,11 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
                 @"reconcile_succeeded": @YES, @"failed_stage": @"none"}, nil);
         [self waitForExpectations:@[completed] timeout:2];
         XCTAssertTrue(manager.hasRecurringCommitment);
-        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringCommitment"], expired);
+        NSMutableDictionary *expectedCommitment = [expired mutableCopy];
+        NSMutableDictionary *expectedProfile = [manager.bundles.firstObject.toDictionary mutableCopy];
+        expectedProfile[@"blockedRanges"] = @[@{@"start": @0, @"end": @10080}];
+        expectedCommitment[@"protectedBundles"] = @[expectedProfile];
+        XCTAssertEqualObjects([defaults objectForKey:@"SCRecurringCommitment"], expectedCommitment);
     } @finally {
         SCRestoreDefaultsSnapshot(defaults, snapshot);
     }

@@ -172,20 +172,30 @@ same weekday, policy-aware detailed editor labels, and Shift-marquee starting
 over either selected or unselected entries. The detailed editor was added to
 the test target for its new regression test.
 
-The new implementation has **not yet compiled or executed its tests**. The
-earlier 186 passing tests apply to the initial slice, not this expanded change.
-The new Xcode attempt stalled before compilation while opening the SSD SwiftPM
-package cache. Bounded diagnostics found hanging access checks on cache and
-DerivedData paths; free space was ample. The owned stalled build was stopped.
+The expanded implementation now builds for testing and passes all **197 tests**
+on the Mac mini. The first retry fixed XCTest macro parsing and updated legacy
+assertions only for the intended protected-membership extension, retaining exact
+envelope, runtime and independently specified blocked-range checks. Astra high
+reviewed those test fixes and read the passing logs. No production behavior was
+changed by the test fixes. Earlier 186-test results apply only to the first slice.
+
+The initial build stalled before compilation opening the SSD SwiftPM cache.
+Bounded diagnostics found hanging access checks despite ample space. After the
+user restarted the connection, filesystem checks recovered and builds resumed.
 No cache deletion, storage relocation or symlink changes were made.
 
-The installed Computer Use connection lacks its trusted Sky service. A reviewed
-two-line configuration correction adds the official Sky service and app path,
-preserving browser and approval settings. The app-managed `node_repl` MCP server
-must reconnect; an actual state query remains unverified. The test-only native
+Computer Use remains unavailable to the active chat: the restarted child still
+receives an old browser-only configuration. A reviewed two-line correction adds
+the official Sky service/path, preserving browser and approval settings. A second
+reviewed correction removes the obsolete disabled `cua_repl` override so the
+enabled official plugin can provide its server. Host configuration reload and
+an actual state query remain unverified. This is a configuration diagnosis, not
+a confirmed binary version incompatibility. The test-only native
 fixture uses production views and synthetic in-memory data, with no admission,
 daemon or persistence proof implied. No new app has been installed or launched.
 The old prepared build658 is stale and must not be installed for this change.
+Private signed Release659 preparation is in progress; installation and actual
+Computer Use interaction/performance traces remain required.
 
 Recovery limit: runtime imports authoritative membership but does not rebuild a
 missing/stale local calendar after interrupted local persistence. Root validation

@@ -1235,8 +1235,8 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecurringCommitment(uid_t ow
     XCTAssertNotNil(added, @"A member stays appendable even while it has no blocked minutes");
     NSMutableDictionary *invented = [new mutableCopy];
     invented[@"blockedRanges"] = @[@{@"start": @0, @"end": @10080}];
-    XCTAssertFalse([SCDaemonScheduler protectedBundles:@[old, invented] areCoveredBySegments:original[@"segments"]]);
-    XCTAssertFalse([SCDaemonScheduler protectedBundlesAreValid:@[old, old]]);
+    XCTAssertFalse(([SCDaemonScheduler protectedBundles:@[old, invented] areCoveredBySegments:original[@"segments"]]));
+    XCTAssertFalse(([SCDaemonScheduler protectedBundlesAreValid:@[old, old]]));
 }
 
 @end
