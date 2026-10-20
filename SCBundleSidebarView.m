@@ -8,7 +8,7 @@
 #import "Block Management/SCWeeklySchedule.h"
 
 static const CGFloat kSidebarWidth = 180.0;
-static const CGFloat kPillHeight = 36.0;
+static const CGFloat kPillHeight = 40.0;
 static const CGFloat kPillSpacing = 8.0;
 static const CGFloat kPillCornerRadius = 8.0;
 static const CGFloat kDotSize = 10.0;
@@ -26,6 +26,7 @@ static const CGFloat kHeaderHeight = 30.0;
 @property (nonatomic, weak) id target;
 @property (nonatomic, assign) SEL action;
 @property (nonatomic, assign) SEL doubleClickAction;
+@property (nonatomic, strong) NSButton *editButton;
 
 @end
 
@@ -42,9 +43,20 @@ static const CGFloat kHeaderHeight = 30.0;
         _isCommitted = NO;
         self.wantsLayer = YES;
         self.layer.cornerRadius = kPillCornerRadius;
+        self.editButton = [NSButton buttonWithTitle:@"Edit" target:self action:@selector(editClicked:)];
+        self.editButton.frame = NSMakeRect(frame.size.width - 44, 0, 44, kPillHeight);
+        self.editButton.bordered = NO;
+        self.editButton.font = [NSFont systemFontOfSize:11];
+        self.editButton.autoresizingMask = NSViewMinXMargin;
+        self.editButton.accessibilityLabel = [NSString stringWithFormat:@"Edit %@ bundle", bundle.name];
+        [self addSubview:self.editButton];
         [self updateAppearance];
     }
     return self;
+}
+
+- (void)editClicked:(id)sender {
+    [NSApp sendAction:self.doubleClickAction to:self.target from:self];
 }
 
 - (void)updateTrackingAreas {
@@ -140,7 +152,7 @@ static const CGFloat kHeaderHeight = 30.0;
     };
 
     CGFloat textX = dotX + kDotSize + 8;
-    CGFloat textWidth = self.bounds.size.width - textX - kPadding;
+    CGFloat textWidth = self.bounds.size.width - textX - 44;
     CGFloat textY = (self.bounds.size.height - 16) / 2;
 
     [self.bundle.name drawInRect:NSMakeRect(textX, textY, textWidth, 18) withAttributes:attrs];
@@ -287,7 +299,7 @@ static const CGFloat kHeaderHeight = 30.0;
 }
 
 - (void)pillClicked:(SCBundlePillView *)pill {
-    // A committed row acts as an Inspect action, so keep it selected on every click.
+    // Keep the focused bundle selected while inspecting a committed calendar.
     if (!self.isCommitted && [pill.bundle.bundleID isEqualToString:self.selectedBundleID]) {
         // Already selected - deselect (return to All-Up)
         self.selectedBundleID = nil;
@@ -353,6 +365,8 @@ static const CGFloat kHeaderHeight = 30.0;
         pill.isCommitted = isCommitted;
     }
     self.addButton.enabled = !isCommitted;
+    self.addButton.toolTip = isCommitted
+        ? @"End your commitment before creating a new bundle." : @"Create a bundle of apps and websites.";
 }
 
 @end

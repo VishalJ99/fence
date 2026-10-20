@@ -51,6 +51,7 @@
 @property (nonatomic, strong, nullable) SCBlockBundle *bundle;
 @property (nonatomic, strong) SCBlockBundle *workingBundle;
 @property (nonatomic, assign) BOOL isNewBundle;
+@property (nonatomic, copy) NSSet<NSString *> *originalEntries;
 
 // UI Elements
 @property (nonatomic, strong) NSTextField *nameField;
@@ -74,7 +75,7 @@
 @implementation SCBundleEditorController
 
 - (instancetype)initForNewBundle {
-    NSRect frame = NSMakeRect(0, 0, 400, 450);
+    NSRect frame = NSMakeRect(0, 0, 400, 510);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                      backing:NSBackingStoreBuffered
@@ -90,6 +91,7 @@
         _bundle = nil;
         _workingBundle = [SCBlockBundle bundleWithName:@"New Bundle" color:[SCBlockBundle colorBlue]];
         _isNewBundle = YES;
+        _originalEntries = [NSSet set];
         window.delegate = self;
 
         [self setupUI];
@@ -98,7 +100,7 @@
 }
 
 - (instancetype)initWithBundle:(SCBlockBundle *)bundle {
-    NSRect frame = NSMakeRect(0, 0, 400, 450);
+    NSRect frame = NSMakeRect(0, 0, 400, 510);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                      backing:NSBackingStoreBuffered
@@ -114,6 +116,7 @@
         _bundle = bundle;
         _workingBundle = [bundle copy];
         _isNewBundle = NO;
+        _originalEntries = [NSSet setWithArray:bundle.entries];
         window.delegate = self;
 
         [self setupUI];
@@ -125,6 +128,15 @@
     NSView *contentView = self.window.contentView;
     CGFloat padding = 16;
     CGFloat y = contentView.bounds.size.height - padding;
+
+    // Reserve a separate banner above the form so it never overlaps actions.
+    self.committedWarningLabel = [NSTextField wrappingLabelWithString:@""];
+    self.committedWarningLabel.frame = NSMakeRect(padding, y - 48, 368, 44);
+    self.committedWarningLabel.font = [NSFont systemFontOfSize:11];
+    self.committedWarningLabel.textColor = NSColor.secondaryLabelColor;
+    self.committedWarningLabel.hidden = YES;
+    [contentView addSubview:self.committedWarningLabel];
+    y -= 60;
 
     // Name field
     y -= 30;
@@ -257,56 +269,45 @@
         [contentView addSubview:self.deleteButton];
     }
 
-    // Done button (positioned at right)
+    // Save button (positioned at right)
     self.doneButton = [[NSButton alloc] initWithFrame:NSMakeRect(310, y, 80, 30)];
-    self.doneButton.title = @"Done";
+    self.doneButton.title = @"Save";
     self.doneButton.bezelStyle = NSBezelStyleRounded;
     self.doneButton.keyEquivalent = @"\r";
     self.doneButton.target = self;
     self.doneButton.action = @selector(doneClicked:);
     [contentView addSubview:self.doneButton];
 
-    // Hidden button for ESC key to close
-    self.cancelButton = [[NSButton alloc] initWithFrame:NSZeroRect];
-    self.cancelButton.keyEquivalent = @"\e"; // Escape key
+    self.cancelButton = [[NSButton alloc] initWithFrame:NSMakeRect(220, y, 80, 30)];
+    self.cancelButton.title = @"Cancel";
+    self.cancelButton.bezelStyle = NSBezelStyleRounded;
+    self.cancelButton.keyEquivalent = @"\e";
     self.cancelButton.target = self;
     self.cancelButton.action = @selector(cancelClicked:);
     [contentView addSubview:self.cancelButton];
+    [self updateButtonStatesForCommittedState];
+}
 
-    // Warning label for committed state (hidden by default)
-    self.committedWarningLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 90, y - 20, 190, 60)];
-    self.committedWarningLabel.stringValue = @"Commitment active. Add apps and websites only; end it before removing them.";
-    self.committedWarningLabel.font = [NSFont systemFontOfSize:10];
-    self.committedWarningLabel.textColor = [NSColor systemRedColor];
-    self.committedWarningLabel.bezeled = NO;
-    self.committedWarningLabel.editable = NO;
-    self.committedWarningLabel.drawsBackground = NO;
-    self.committedWarningLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    self.committedWarningLabel.usesSingleLineMode = NO;
-    self.committedWarningLabel.maximumNumberOfLines = 4;
-    self.committedWarningLabel.hidden = YES;
-    [contentView addSubview:self.committedWarningLabel];
+- (BOOL)selectedEntryCanBeRemoved {
+    NSInteger row = self.entriesTableView.selectedRow;
+    if (row < 0 || row >= (NSInteger)self.workingBundle.entries.count) return NO;
+    return !self.isCommitted || ![self.originalEntries containsObject:self.workingBundle.entries[row]];
 }
 
 - (void)updateButtonStatesForCommittedState {
-    if (self.isCommitted) {
-        self.nameField.editable = NO;
-        self.nameField.enabled = NO;
-        self.addAppButton.enabled = YES;
-        self.addWebsiteButton.enabled = YES;
-        self.deleteButton.enabled = NO;
-        self.removeEntryButton.enabled = NO;
-        self.colorPicker.alphaValue = 0.45;
-        for (NSView *colorView in self.colorViews) {
-            for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
-                recognizer.enabled = NO;
-            }
+    BOOL protected = self.isCommitted;
+    self.nameField.editable = !protected;
+    self.nameField.enabled = !protected;
+    self.deleteButton.enabled = !protected;
+    self.removeEntryButton.enabled = [self selectedEntryCanBeRemoved];
+    self.colorPicker.alphaValue = protected ? 0.45 : 1.0;
+    for (NSView *colorView in self.colorViews) {
+        for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
+            recognizer.enabled = !protected;
         }
-        self.doneButton.title = @"Done";
-        self.committedWarningLabel.hidden = NO;
-    } else {
-        self.committedWarningLabel.hidden = YES;
     }
+    self.committedWarningLabel.stringValue = @"Commitment active. Existing items, name and color are locked. Add items, then Save to apply.";
+    self.committedWarningLabel.hidden = !self.isCommitted;
 }
 
 - (BOOL)colorsEqual:(NSColor *)c1 and:(NSColor *)c2 {
@@ -320,6 +321,7 @@
 #pragma mark - Actions
 
 - (void)colorCircleClicked:(NSClickGestureRecognizer *)gesture {
+    if (self.isCommitted) return;
     NSView *clickedView = gesture.view;
     NSArray<NSColor *> *colors = [SCBlockBundle allPresetColors];
     NSInteger index = [clickedView.identifier integerValue];
@@ -392,30 +394,10 @@
 }
 
 - (void)removeEntryClicked:(id)sender {
-    // Block removal in committed state
-    if (self.isCommitted) {
-        NSInteger row = self.entriesTableView.selectedRow;
-        NSString *itemType = @"entry";
-        if (row >= 0 && row < (NSInteger)self.workingBundle.entries.count) {
-            NSString *entry = self.workingBundle.entries[row];
-            itemType = [entry hasPrefix:@"app:"] ? @"app" : @"website";
-        }
-
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"Cannot Remove in Committed State";
-        alert.informativeText = [NSString stringWithFormat:
-            @"End your commitment before removing this %@.", itemType];
-        alert.alertStyle = NSAlertStyleWarning;
-        [alert addButtonWithTitle:@"OK"];
-        [alert beginSheetModalForWindow:self.window completionHandler:nil];
-        return;
-    }
-
-    NSInteger row = self.entriesTableView.selectedRow;
-    if (row >= 0 && row < (NSInteger)self.workingBundle.entries.count) {
-        [self.workingBundle.entries removeObjectAtIndex:row];
-        [self.entriesTableView reloadData];
-    }
+    if (![self selectedEntryCanBeRemoved]) return;
+    [self.workingBundle.entries removeObjectAtIndex:self.entriesTableView.selectedRow];
+    [self.entriesTableView reloadData];
+    [self updateButtonStatesForCommittedState];
 }
 
 - (void)deleteClicked:(id)sender {
@@ -458,7 +440,7 @@
         return;
     }
 
-    self.workingBundle.name = name;
+    if (!self.isCommitted) self.workingBundle.name = name;
 
     [self removeClickOutsideMonitor];
     [self.delegate bundleEditor:self didSaveBundle:self.workingBundle];
@@ -562,12 +544,7 @@
 #pragma mark - NSTableViewDelegate
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    // Keep Remove disabled in committed state, otherwise enable based on selection
-    if (self.isCommitted) {
-        self.removeEntryButton.enabled = NO;
-    } else {
-        self.removeEntryButton.enabled = (self.entriesTableView.selectedRow >= 0);
-    }
+    self.removeEntryButton.enabled = [self selectedEntryCanBeRemoved];
 }
 
 #pragma mark - Sheet Presentation

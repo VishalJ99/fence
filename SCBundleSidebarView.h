@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Called when user clicks the add bundle button
 - (void)bundleSidebarDidRequestAddBundle:(SCBundleSidebarView *)sidebar;
 
-/// Called when user double-clicks a bundle to edit it
+/// Called when user clicks Edit or double-clicks a bundle
 - (void)bundleSidebar:(SCBundleSidebarView *)sidebar didRequestEditBundle:(SCBlockBundle *)bundle;
 
 @end

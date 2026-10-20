@@ -1775,10 +1775,6 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Update calendar grid with new focus
     self.calendarGridView.focusedBundleID = self.focusedBundleID;
     [self.calendarGridView reloadData];
-
-    if (self.scheduleEditBaseline == nil && bundle != nil && [SCScheduleManager sharedManager].hasRecurringCommitment) {
-        [self bundleSidebar:sidebar didRequestEditBundle:bundle];
-    }
 }
 
 - (void)bundleSidebarDidRequestAddBundle:(SCBundleSidebarView *)sidebar {
@@ -1786,7 +1782,13 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)bundleSidebar:(SCBundleSidebarView *)sidebar didRequestEditBundle:(SCBlockBundle *)bundle {
-    if (self.scheduleEditBaseline != nil) return;
+    if (self.scheduleEditBaseline != nil) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Finish Editing Your Schedule";
+        alert.informativeText = @"Save or cancel your schedule changes before editing a bundle.";
+        [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        return;
+    }
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
     if (manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];

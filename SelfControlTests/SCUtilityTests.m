@@ -59,6 +59,7 @@
 - (void)updateButtonStatesForCommittedState;
 - (void)doneClicked:(id)sender;
 - (void)cancelClicked:(id)sender;
+- (void)removeEntryClicked:(id)sender;
 @end
 
 @interface SCBundleEditorSaveRecorder : NSObject <SCBundleEditorDelegate>
@@ -72,6 +73,26 @@
 }
 - (void)bundleEditorDidCancel:(SCBundleEditorController *)editor { self.cancelled = YES; }
 - (void)bundleEditor:(SCBundleEditorController *)editor didDeleteBundle:(SCBlockBundle *)bundle {}
+@end
+
+// Disposable event queues exercise the real calendar mouse tracking without
+// posting input to the user's desktop or touching persisted schedules.
+@interface SCCalendarTrackingTestWindow : NSWindow
+@property (nonatomic, strong) NSMutableArray<NSEvent *> *trackingEvents;
+@end
+@implementation SCCalendarTrackingTestWindow
+- (NSEvent *)nextEventMatchingMask:(NSEventMask)mask untilDate:(NSDate *)expiration inMode:(NSRunLoopMode)mode dequeue:(BOOL)dequeue {
+    NSEvent *event = self.trackingEvents.firstObject;
+    if (event && dequeue) [self.trackingEvents removeObjectAtIndex:0];
+    return event ?: [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:self.windowNumber context:nil eventNumber:0 clickCount:1 pressure:0];
+}
+@end
+@interface SCCalendarMagnifyTestEvent : NSEvent
+@property (nonatomic) CGFloat testMagnification;
+@end
+@implementation SCCalendarMagnifyTestEvent
+- (CGFloat)magnification { return self.testMagnification; }
+- (NSEventPhase)phase { return NSEventPhaseNone; }
 @end
 
 @interface SCCalendarGridView (ActiveCalendarTests)
@@ -566,17 +587,48 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     XCTAssertFalse(removeEntryButton.enabled);
     XCTAssertFalse(deleteButton.enabled);
     XCTAssertEqualWithAccuracy(colorPicker.alphaValue, 0.45, 0.001);
-    XCTAssertEqualObjects(doneButton.title, @"Done");
+    XCTAssertEqualObjects(doneButton.title, @"Save");
+    NSButton *cancelButton = [editor valueForKey:@"cancelButton"];
+    XCTAssertEqualObjects(cancelButton.title, @"Cancel");
+    XCTAssertGreaterThan(cancelButton.frame.size.width, 0);
+    XCTAssertFalse(cancelButton.hidden);
     XCTAssertFalse(warningLabel.hidden);
     XCTAssertEqualObjects(warningLabel.stringValue,
-                          @"Commitment active. Add apps and websites only; end it before removing them.");
-    XCTAssertEqualObjects(warningLabel.textColor, NSColor.systemRedColor);
+                          @"Commitment active. Existing items, name and color are locked. Add items, then Save to apply.");
+    XCTAssertEqualObjects(warningLabel.textColor, NSColor.secondaryLabelColor);
 
     for (NSView *colorView in [editor valueForKey:@"colorViews"]) {
         for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
             XCTAssertFalse(recognizer.enabled);
         }
     }
+}
+
+- (void)testCommittedBundleEditorCanUndoDraftAdditionsButNotOriginalEntries {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Work" color:SCBlockBundle.colorRed];
+    [bundle addEntry:@"existing.example"];
+    SCBundleEditorController *editor = [[SCBundleEditorController alloc] initWithBundle:bundle];
+    editor.isCommitted = YES;
+    SCBlockBundle *draft = [editor valueForKey:@"workingBundle"];
+    [draft addEntry:@"new.example"];
+    [draft addEntry:@"app:com.example.Focus"];
+    NSTableView *table = [editor valueForKey:@"entriesTableView"];
+    NSButton *remove = [editor valueForKey:@"removeEntryButton"];
+    [table reloadData];
+    [table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    [editor updateButtonStatesForCommittedState];
+    XCTAssertFalse(remove.enabled);
+    [editor removeEntryClicked:nil];
+    XCTAssertEqual(draft.entries.count, 3);
+
+    for (NSUInteger i = 0; i < 2; i++) {
+        [table selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+        [editor updateButtonStatesForCommittedState];
+        XCTAssertTrue(remove.enabled);
+        [editor removeEntryClicked:nil];
+    }
+    XCTAssertEqualObjects(draft.entries, (@[@"existing.example"]));
+    XCTAssertEqualObjects(bundle.entries, (@[@"existing.example"]));
 }
 
 - (void)testCommittedBundleEditorSavesAdditionsOnlyWhenDoneIsClicked {
@@ -2624,19 +2676,16 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     grid.isCommitted = YES;
     grid.showOnlyRemainingDays = NO;
     [grid reloadData];
+    SCCalendarTrackingTestWindow *window = [[SCCalendarTrackingTestWindow alloc] initWithContentRect:grid.frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    window.releasedWhenClosed = NO; window.contentView = grid;
     NSEvent *delete = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
         modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"\177"
         charactersIgnoringModifiers:@"\177" isARepeat:NO keyCode:51];
     for (NSNumber *active in @[@NO, @YES]) {
         if (active.boolValue) grid.activeEditBaselineSchedules = @{bundle.bundleID: opening};
-        NSView *monday = nil;
-        for (NSView *column in [grid valueForKey:@"dayColumns"]) {
-            if ([[column valueForKey:@"day"] integerValue] == SCDayOfWeekMonday) monday = column;
-        }
-        XCTAssertNotNil(monday);
-        [monday setValue:bundle.bundleID forKey:@"selectedBundleID"];
-        [monday setValue:@0 forKey:@"selectedBlockIndex"];
-        XCTAssertTrue(grid.hasSelectedBlock);
+        NSPoint point = [self calendarPoint:grid day:SCDayOfWeekMonday minutes:630 x:30];
+        [self calendarGestureInWindow:window from:point to:point shift:NO];
+        XCTAssertEqual(grid.hasSelectedBlock, active.boolValue);
         [grid keyDown:delete];
         XCTAssertEqual(recorder.updateCount, active.boolValue ? 1 : 0);
         XCTAssertEqual([[grid scheduleForBundleID:bundle.bundleID] allowedWindowsForDay:SCDayOfWeekMonday].count,
@@ -2653,8 +2702,136 @@ NSDictionary* veryLongBlockLegacyDict; // year-long block, one day in
     origins = [grid valueForKey:@"activeEditWindowOrigins"];
     XCTAssertEqualObjects(origins[bundle.bundleID][@(SCDayOfWeekMonday)], (@[@0, @1]));
     XCTAssertEqualObjects([grid scheduleForBundleID:bundle.bundleID].toDictionary, opening.toDictionary);
+    [window close];
 }
 
+
+- (NSView *)calendarColumn:(SCCalendarGridView *)grid day:(SCDayOfWeek)day {
+    for (NSView *column in [grid valueForKey:@"dayColumns"]) {
+        if ([[column valueForKey:@"day"] integerValue] == day) return column;
+    }
+    return nil;
+}
+
+- (NSPoint)calendarPoint:(SCCalendarGridView *)grid day:(SCDayOfWeek)day minutes:(NSInteger)minutes x:(CGFloat)x {
+    NSView *column = [self calendarColumn:grid day:day];
+    return [column convertPoint:NSMakePoint(x, minutes / 1440.0 * NSHeight(column.bounds)) toView:nil];
+}
+
+- (void)calendarGestureInWindow:(SCCalendarTrackingTestWindow *)window from:(NSPoint)start to:(NSPoint)end shift:(BOOL)shift {
+    NSEventModifierFlags flags = shift ? NSEventModifierFlagShift : 0;
+    NSEvent *(^event)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint point) {
+        return [NSEvent mouseEventWithType:type location:point modifierFlags:flags timestamp:0
+                             windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    };
+    window.trackingEvents = [NSMutableArray arrayWithArray:@[event(NSEventTypeLeftMouseDragged, end), event(NSEventTypeLeftMouseUp, end)]];
+    NSView *target = [window.contentView hitTest:start];
+    XCTAssertNotNil(target);
+    [target mouseDown:event(NSEventTypeLeftMouseDown, start)];
+}
+
+- (void)testCalendarMarqueeMovesResizesPinchesAndDeletesAcrossBundlesAndDays {
+    SCBlockBundle *first = [SCBlockBundle bundleWithName:@"First" color:SCBlockBundle.colorBlue];
+    SCBlockBundle *second = [SCBlockBundle bundleWithName:@"Second" color:SCBlockBundle.colorBlue];
+    SCWeeklySchedule *a = [SCWeeklySchedule emptyScheduleForBundleID:first.bundleID];
+    SCWeeklySchedule *b = [SCWeeklySchedule emptyScheduleForBundleID:second.bundleID];
+    [a setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"], [SCTimeRange rangeWithStart:@"14:00" end:@"15:00"]] forDay:SCDayOfWeekMonday];
+    [b setAllowedWindows:@[[SCTimeRange rangeWithStart:@"11:00" end:@"12:00"]] forDay:SCDayOfWeekTuesday];
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(0, 0, 900, 900)];
+    SCActiveCalendarGridRecorder *recorder = [SCActiveCalendarGridRecorder new];
+    grid.delegate = recorder;
+    grid.bundles = @[first, second]; grid.schedules = @{first.bundleID:a, second.bundleID:b};
+    [grid reloadData];
+    SCCalendarTrackingTestWindow *window = [[SCCalendarTrackingTestWindow alloc] initWithContentRect:grid.frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    window.releasedWhenClosed = NO; window.contentView = grid;
+    NSView *tuesday = [self calendarColumn:grid day:SCDayOfWeekTuesday];
+    [self calendarGestureInWindow:window from:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:480 x:1]
+        to:[self calendarPoint:grid day:SCDayOfWeekTuesday minutes:780 x:NSWidth(tuesday.bounds)-1] shift:NO];
+    XCTAssertEqual([[grid valueForKey:@"selectedWindows"] count], 2);
+    grid.focusedBundleID = nil;
+    [grid reloadData];
+    XCTAssertEqual([[grid valueForKey:@"selectedWindows"] count], 2);
+    // Drag from a selected body: both move by two hours and stay selected.
+    [self calendarGestureInWindow:window from:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:570 x:30]
+        to:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:690 x:30] shift:NO];
+    XCTAssertEqualObjects([[grid.schedules[first.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].startTime, @"11:00");
+    XCTAssertEqualObjects([[grid.schedules[second.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday] firstObject].startTime, @"13:00");
+    XCTAssertEqual([[grid valueForKey:@"selectedWindows"] count], 2);
+    XCTAssertEqual(recorder.updateCount, 2);
+    // Bottom-edge contraction uses the same delta for both windows.
+    [self calendarGestureInWindow:window from:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:717 x:30]
+        to:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:687 x:30] shift:NO];
+    XCTAssertEqualObjects([[grid.schedules[first.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].endTime, @"11:30");
+    XCTAssertEqualObjects([[grid.schedules[second.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday] firstObject].endTime, @"13:30");
+    SCCalendarMagnifyTestEvent *pinch = [SCCalendarMagnifyTestEvent new];
+    pinch.testMagnification = 0.125;
+    NSView *pinchTarget = [window.contentView hitTest:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:675 x:30]];
+    [pinchTarget magnifyWithEvent:pinch];
+    XCTAssertEqualObjects([[grid.schedules[first.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].startTime, @"10:45");
+    XCTAssertEqualObjects([[grid.schedules[second.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday] firstObject].endTime, @"13:45");
+    NSEvent *delete = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil characters:@"\177" charactersIgnoringModifiers:@"\177" isARepeat:NO keyCode:51];
+    [grid keyDown:delete];
+    XCTAssertEqual([grid.schedules[first.bundleID] allowedWindowsForDay:SCDayOfWeekMonday].count, 1);
+    XCTAssertEqualObjects([[grid.schedules[first.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].startTime, @"14:00");
+    XCTAssertEqual([grid.schedules[second.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday].count, 0);
+    XCTAssertFalse(grid.hasSelectedBlock);
+    [window close];
+}
+
+- (void)testCalendarShiftSelectionSharedBoundaryAndCommittedRestrictions {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Bounds" color:SCBlockBundle.colorBlue];
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    // Two-hour windows leave a body between the active editor resize handles.
+    [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"01:00" end:@"03:00"]] forDay:SCDayOfWeekMonday];
+    [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"21:00" end:@"23:00"]] forDay:SCDayOfWeekTuesday];
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(0, 0, 900, 900)];
+    SCActiveCalendarGridRecorder *recorder = [SCActiveCalendarGridRecorder new]; grid.delegate = recorder;
+    grid.bundles = @[bundle]; grid.schedules = @{bundle.bundleID:schedule}; [grid reloadData];
+    SCCalendarTrackingTestWindow *window = [[SCCalendarTrackingTestWindow alloc] initWithContentRect:grid.frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO]; window.releasedWhenClosed = NO; window.contentView = grid;
+    NSPoint first = [self calendarPoint:grid day:SCDayOfWeekMonday minutes:120 x:30];
+    NSPoint second = [self calendarPoint:grid day:SCDayOfWeekTuesday minutes:1320 x:30];
+    [self calendarGestureInWindow:window from:first to:first shift:NO];
+    [self calendarGestureInWindow:window from:second to:second shift:YES];
+    XCTAssertEqual([[grid valueForKey:@"selectedWindows"] count], 2);
+    [self calendarGestureInWindow:window from:first to:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:300 x:30] shift:NO];
+    XCTAssertEqualObjects([[grid.schedules[bundle.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].startTime, @"02:00");
+    XCTAssertEqualObjects([[grid.schedules[bundle.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday] firstObject].endTime, @"24:00");
+    NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil characters:@"\033" charactersIgnoringModifiers:@"\033" isARepeat:NO keyCode:53];
+    [grid keyDown:escape]; XCTAssertFalse(grid.hasSelectedBlock);
+    grid.schedules = @{bundle.bundleID:schedule}; grid.isCommitted = YES; [grid reloadData];
+    [self calendarGestureInWindow:window from:first to:first shift:NO]; XCTAssertFalse(grid.hasSelectedBlock);
+    grid.activeEditBaselineSchedules = @{bundle.bundleID:schedule};
+    [self calendarGestureInWindow:window from:first to:first shift:NO];
+    [self calendarGestureInWindow:window from:second to:second shift:YES];
+    NSUInteger before = recorder.updateCount;
+    [self calendarGestureInWindow:window from:first to:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:180 x:30] shift:NO];
+    XCTAssertEqual(recorder.updateCount, before); XCTAssertEqual(recorder.restrictedCount, 1);
+    SCCalendarMagnifyTestEvent *pinch = [SCCalendarMagnifyTestEvent new]; pinch.testMagnification = 0.5;
+    [grid magnifyWithEvent:pinch]; XCTAssertEqual(recorder.updateCount, before);
+    pinch.testMagnification = -0.125; [grid magnifyWithEvent:pinch];
+    XCTAssertEqualObjects([[grid.schedules[bundle.bundleID] allowedWindowsForDay:SCDayOfWeekMonday] firstObject].startTime, @"01:15");
+    XCTAssertEqualObjects([[grid.schedules[bundle.bundleID] allowedWindowsForDay:SCDayOfWeekTuesday] firstObject].endTime, @"22:45");
+    XCTAssertTrue([grid.schedules[bundle.bundleID] isValidActiveEditOfSchedule:schedule]);
+    [window close];
+}
+
+- (void)testCalendarMoveMergesCollisionAndRemapsSelection {
+    SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Collision" color:SCBlockBundle.colorBlue];
+    SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
+    [schedule setAllowedWindows:@[[SCTimeRange rangeWithStart:@"09:00" end:@"10:00"], [SCTimeRange rangeWithStart:@"14:00" end:@"15:00"]] forDay:SCDayOfWeekMonday];
+    SCCalendarGridView *grid = [[SCCalendarGridView alloc] initWithFrame:NSMakeRect(0, 0, 900, 900)];
+    SCActiveCalendarGridRecorder *recorder = [SCActiveCalendarGridRecorder new]; grid.delegate = recorder;
+    grid.bundles = @[bundle]; grid.schedules = @{bundle.bundleID:schedule}; [grid reloadData];
+    SCCalendarTrackingTestWindow *window = [[SCCalendarTrackingTestWindow alloc] initWithContentRect:grid.frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO]; window.releasedWhenClosed = NO; window.contentView = grid;
+    [self calendarGestureInWindow:window from:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:570 x:30]
+        to:[self calendarPoint:grid day:SCDayOfWeekMonday minutes:870 x:30] shift:NO];
+    XCTAssertEqual([grid.schedules[bundle.bundleID] allowedWindowsForDay:SCDayOfWeekMonday].count, 1);
+    XCTAssertEqual([[grid valueForKey:@"selectedWindows"] count], 1);
+    NSDictionary *selected = [[grid valueForKey:@"selectedWindows"] anyObject];
+    XCTAssertEqualObjects(selected[@"index"], @0);
+    grid.focusedBundleID = bundle.bundleID; XCTAssertFalse(grid.hasSelectedBlock);
+    [window close];
+}
 
 - (void)testCalendarVisibilityTelemetryDistinguishesCreatedBlocksFromHiddenBlocks {
     SCBlockBundle *bundle = [SCBlockBundle bundleWithName:@"Telemetry fixture"
