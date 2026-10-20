@@ -104,6 +104,7 @@ static BOOL const kUseCalendarUI = YES;
 
 // New Calendar UI Elements
 @property (nonatomic, strong) SCBundleSidebarView *bundleSidebar;
+@property (nonatomic, strong) NSTextField *admissionNotice;
 @property (nonatomic, strong) SCCalendarGridView *calendarGridView;
 @property (nonatomic, strong) SCHoverableLinkButton *travelingButton;
 @property (nonatomic, copy, nullable) NSString *focusedBundleID;  // nil = All-Up state
@@ -282,6 +283,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     rulesLabel.textColor = NSColor.systemRedColor;
     rulesLabel.frame = NSMakeRect(12, 15, 282, 20);
     [self.scheduleEditRulesView addSubview:rulesLabel];
+    self.admissionNotice = [NSTextField labelWithString:@""];
+    self.admissionNotice.font = [NSFont systemFontOfSize:10];
+    self.admissionNotice.textColor = NSColor.systemRedColor;
+    self.admissionNotice.frame = NSMakeRect(12, 1, NSWidth(self.scheduleEditRulesView.bounds) - 24, 14);
+    self.admissionNotice.autoresizingMask = NSViewWidthSizable;
+    [self.scheduleEditRulesView addSubview:self.admissionNotice];
     NSButton *rulesInfo = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"info.circle"
                                                           accessibilityDescription:@"About stricter edits"]
                                            target:self action:@selector(showScheduleEditRules:)];
@@ -594,6 +601,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         }
         if (self.scheduleEditDraft != nil) scheduleDict = self.scheduleEditDraft;
 
+        NSMutableSet *protectedIDs = [NSMutableSet set];
+        for (SCBlockBundle *bundle in manager.bundles) {
+            if ([manager isBundleProtected:bundle.bundleID]) [protectedIDs addObject:bundle.bundleID];
+        }
+        self.bundleSidebar.protectedBundleIDs = protectedIDs;
+        self.calendarGridView.protectedBundleIDs = protectedIDs;
         self.bundleSidebar.bundles = manager.bundles;
         self.bundleSidebar.selectedBundleID = self.focusedBundleID;
         self.bundleSidebar.schedules = scheduleDict;
@@ -960,6 +973,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (BOOL)hasScheduleEditChanges {
     if (self.scheduleEditBaseline == nil) return NO;
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if ([manager bundlesRequiringAllowAdmissionForSchedules:self.scheduleEditDraft.allValues].count > 0) return YES;
+    for (SCBlockBundle *bundle in manager.bundles) {
+        if (![manager isBundleProtected:bundle.bundleID] && bundle.enabled && bundle.entries.count &&
+            [self.scheduleEditDraft[bundle.bundleID] hasAnyWindows]) return YES;
+    }
     return ![[SCRecurringScheduleCompiler canonicalDictionariesForSchedules:self.scheduleEditBaseline.allValues]
         isEqual:[SCRecurringScheduleCompiler canonicalDictionariesForSchedules:self.scheduleEditDraft.allValues]];
 }
@@ -967,6 +986,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)updateScheduleEditUI {
     BOOL editing = self.scheduleEditBaseline != nil;
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    SCBlockBundle *focused = [self.bundleSidebar bundleForID:self.focusedBundleID];
+    self.admissionNotice.stringValue = editing && focused.enabled && focused.entries.count &&
+        focused.policy == SCBundlePolicyAllow && ![manager isBundleProtected:focused.bundleID]
+        ? @"Joins on Save. Without Allow windows, this bundle is blocked all day." : @"";
     self.titleLabel.stringValue = editing ? @"Edit Schedule" : @"Fence";
     self.editScheduleButton.hidden = !manager.hasRecurringCommitment;
     self.editScheduleButton.title = self.scheduleEditSaving ? @"Saving…" : (editing ? @"Save Changes" : @"Edit Schedule");
@@ -1022,6 +1045,37 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
         return;
     }
     if (!self.hasScheduleEditChanges) return;
+    NSArray<SCBlockBundle *> *admissions = [manager bundlesRequiringAllowAdmissionForSchedules:self.scheduleEditDraft.allValues];
+    if (admissions.count) {
+        NSMutableArray *names = [NSMutableArray array];
+        NSMutableArray *unscheduled = [NSMutableArray array];
+        for (SCBlockBundle *bundle in admissions) {
+            [names addObject:bundle.name];
+            if (![self.scheduleEditDraft[bundle.bundleID] hasAnyWindows]) [unscheduled addObject:bundle.name];
+        }
+        NSAlert *alert = [NSAlert new];
+        alert.alertStyle = NSAlertStyleWarning;
+        alert.messageText = @"Add Allow bundles to this session?";
+        NSString *warning = [NSString stringWithFormat:@"%@ will join the current session on Save. Their apps and websites are blocked outside their Allow windows. The commitment deadline stays the same. After saving, metadata, deletion and content removal are locked; content can be added.", [names componentsJoinedByString:@", "]];
+        if (unscheduled.count) warning = [warning stringByAppendingFormat:@"\n\n%@ has no Allow windows and will be blocked all week.", [unscheduled componentsJoinedByString:@", "]];
+        alert.informativeText = warning;
+        NSTextField *review = [NSTextField wrappingLabelWithString:@"Review these restrictions before saving."];
+        review.textColor = [NSColor.systemRedColor colorWithAlphaComponent:0.92];
+        review.frame = NSMakeRect(0, 0, 360, 28);
+        alert.accessoryView = review;
+        [alert addButtonWithTitle:@"Save and Join"];
+        [alert addButtonWithTitle:@"Cancel"];
+        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+            if (response == NSAlertFirstButtonReturn) [self saveScheduleEdit];
+        }];
+        return;
+    }
+    [self saveScheduleEdit];
+}
+
+- (void)saveScheduleEdit {
+    SCScheduleManager *manager = [SCScheduleManager sharedManager];
+    if (self.scheduleEditSaving || !self.scheduleEditBaseline) return;
     self.scheduleEditSaving = YES;
     self.calendarGridView.activeEditBaselineSchedules = nil;
     [self updateScheduleEditUI];
@@ -1083,7 +1137,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 - (void)showScheduleEditRules:(id)sender {
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Stricter edits only";
-    alert.informativeText = @"Your commitment is active. You can only make changes that increase blocking.\n\nAllow windows · dashed border\nDrag an edge inward to shorten a window, or select it and press Delete. You can’t move windows or add allowed time. Removing the last window blocks that bundle all day.\n\nYour original schedule\nFaint outlines show where you started. Reset restores this draft; Cancel discards it. Changes take effect only when you save.";
+    alert.informativeText = @"Your commitment is active. You can only make changes that increase blocking.\n\nAllow windows · dashed border\nDrag an edge inward to shorten a window, or select it and press Delete. You can’t move windows or add allowed time. Removing the last window blocks that bundle all day.\n\nBlock windows · solid border\nExpand windows or add blocked time. Existing blocked minutes must remain blocked.\n\nNew bundles\nSet their first timetable freely. Save adds them to this session without changing its deadline. Allow bundles without windows become blocked all week.\n\nYour original schedule\nFaint outlines show where you started. Reset restores this draft; Cancel discards it. Changes take effect only when you save.";
     [alert addButtonWithTitle:@"Got it"];
     [alert beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1125,12 +1179,12 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)addBundleClicked:(id)sender {
     SCScheduleManager *manager = [SCScheduleManager sharedManager];
-    if (manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice) {
+    if (self.scheduleEditSaving || manager.recurringScheduleMigrationNeedsChoice) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Schedule Locked";
         alert.informativeText = manager.recurringScheduleMigrationNeedsChoice
             ? @"Choose which legacy schedule should repeat before editing bundles."
-            : @"End your commitment before creating a new bundle. You can still add apps and websites to existing bundles.";
+            : @"Wait for your schedule changes to finish saving.";
         [alert runModal];
         return;
     }
@@ -1288,10 +1342,10 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Start Recurring Commitment?";
 
-    // Check for bundles with no allow blocks (will be blocked all week)
+    // Allow bundles without windows are blocked all week.
     NSMutableArray<NSString *> *bundlesWithNoAllowBlocks = [NSMutableArray array];
     for (SCBlockBundle *bundle in manager.bundles) {
-        if (!bundle.enabled) continue;
+        if (!bundle.enabled || bundle.policy == SCBundlePolicyBlock) continue;
         SCWeeklySchedule *schedule = [manager recurringScheduleForBundleID:bundle.bundleID];
         // No schedule OR schedule with no allowed windows = blocked all week
         BOOL hasAnyAllowWindows = NO;
@@ -1757,7 +1811,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.bundleEditorController.delegate = self;
 
     self.bundleEditorController.isCommitted =
-        manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
+        [manager isBundleProtected:bundle.bundleID];
 
     [self.bundleEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1775,6 +1829,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     // Update calendar grid with new focus
     self.calendarGridView.focusedBundleID = self.focusedBundleID;
     [self.calendarGridView reloadData];
+    [self updateScheduleEditUI];
 }
 
 - (void)bundleSidebarDidRequestAddBundle:(SCBundleSidebarView *)sidebar {
@@ -1801,7 +1856,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
     self.bundleEditorController.delegate = self;
 
     self.bundleEditorController.isCommitted =
-        manager.hasRecurringCommitment || manager.recurringScheduleMigrationNeedsChoice;
+        [manager isBundleProtected:bundle.bundleID];
 
     [self.bundleEditorController beginSheetModalForWindow:self.window completionHandler:nil];
 }
@@ -1810,7 +1865,7 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 
 - (void)calendarGrid:(SCCalendarGridView *)grid didUpdateSchedule:(SCWeeklySchedule *)schedule forBundleID:(NSString *)bundleID {
     if (self.scheduleEditBaseline != nil) {
-        if (self.scheduleEditSaving || ![schedule isValidActiveEditOfSchedule:self.scheduleEditBaseline[bundleID]]) {
+        if (self.scheduleEditSaving || ![[SCScheduleManager sharedManager] isRecurringSchedule:schedule validActiveEditOfSchedule:self.scheduleEditBaseline[bundleID]]) {
             [self reloadData];
             return;
         }
@@ -1904,15 +1959,15 @@ static void SCEmitEmergencyUnlockResult(NSString *outcome,
 }
 
 - (void)calendarGridDidAttemptRestrictedEdit:(SCCalendarGridView *)grid {
-    [self showCalendarWarningWithMessage:@"Stricter edits only — shorten or remove Allow windows."];
+    [self showCalendarWarningWithMessage:@"Stricter edits only — shrink Allow windows or expand Block windows."];
 }
 
 #pragma mark - Warning UI
 
 - (void)showSelectBundleWarning {
     NSString *message = ([SCScheduleManager sharedManager].bundles.count == 0)
-        ? @"To create allow block — create a bundle first"
-        : @"To create allow block — select a bundle first";
+        ? @"To create a window — create a bundle first"
+        : @"To create a window — select a bundle first";
     [self showCalendarWarningWithMessage:message];
 }
 

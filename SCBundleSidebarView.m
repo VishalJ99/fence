@@ -120,12 +120,12 @@ static const CGFloat kHeaderHeight = 30.0;
         self.layer.borderColor = [[NSColor.whiteColor colorWithAlphaComponent:0.1] CGColor];
     }
 
-    // Committed state: desaturate
     if (self.isCommitted) {
-        self.alphaValue = 0.6;
-    } else {
-        self.alphaValue = 1.0;
+        self.layer.borderWidth = 1.5;
+        self.layer.borderColor = [NSColor.systemRedColor colorWithAlphaComponent:0.62].CGColor;
     }
+    self.alphaValue = 1.0;
+    self.accessibilityValue = self.isCommitted ? @"In active session" : @"Not in active session";
 
     [self setNeedsDisplay:YES];
 }
@@ -180,6 +180,7 @@ static const CGFloat kHeaderHeight = 30.0;
 @interface SCBundleSidebarView ()
 
 @property (nonatomic, strong) NSTextField *headerLabel;
+@property (nonatomic, strong) NSTextField *sessionLegend;
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSView *pillContainer;
 @property (nonatomic, strong) NSButton *addButton;
@@ -222,6 +223,14 @@ static const CGFloat kHeaderHeight = 30.0;
     self.headerLabel.autoresizingMask = NSViewMinYMargin;
     [self addSubview:self.headerLabel];
 
+    self.sessionLegend = [NSTextField labelWithString:@"●  In active session"];
+    self.sessionLegend.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    self.sessionLegend.textColor = [NSColor.systemRedColor colorWithAlphaComponent:0.86];
+    self.sessionLegend.frame = NSMakeRect(kPadding, y - 18, kSidebarWidth - 2 * kPadding, 18);
+    self.sessionLegend.autoresizingMask = NSViewMinYMargin;
+    [self addSubview:self.sessionLegend];
+    y -= 24;
+
     // Scroll view for pills
     CGFloat scrollHeight = y - kPadding - 40; // Leave room for add button at bottom
     self.scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 40, kSidebarWidth, scrollHeight)];
@@ -249,6 +258,7 @@ static const CGFloat kHeaderHeight = 30.0;
 }
 
 - (void)reloadData {
+    self.sessionLegend.hidden = self.protectedBundleIDs.count == 0;
     // Remove old pill views
     for (SCBundlePillView *pill in self.pillViews) {
         [pill removeFromSuperview];
@@ -268,9 +278,7 @@ static const CGFloat kHeaderHeight = 30.0;
         pill.doubleClickAction = @selector(pillDoubleClicked:);
         pill.isSelected = [bundle.bundleID isEqualToString:self.selectedBundleID];
 
-        // Grey out bundles only if BOTH: has schedule for viewed week AND week is committed
-        SCWeeklySchedule *schedule = self.schedules[bundle.bundleID];
-        pill.isCommitted = (schedule != nil && self.isCommitted);
+        pill.isCommitted = [self.protectedBundleIDs containsObject:bundle.bundleID];
 
         [self.pillContainer addSubview:pill];
         [self.pillViews addObject:pill];
@@ -300,7 +308,7 @@ static const CGFloat kHeaderHeight = 30.0;
 
 - (void)pillClicked:(SCBundlePillView *)pill {
     // Keep the focused bundle selected while inspecting a committed calendar.
-    if (!self.isCommitted && [pill.bundle.bundleID isEqualToString:self.selectedBundleID]) {
+    if ([pill.bundle.bundleID isEqualToString:self.selectedBundleID]) {
         // Already selected - deselect (return to All-Up)
         self.selectedBundleID = nil;
     } else {
@@ -361,12 +369,8 @@ static const CGFloat kHeaderHeight = 30.0;
 
 - (void)setIsCommitted:(BOOL)isCommitted {
     _isCommitted = isCommitted;
-    for (SCBundlePillView *pill in self.pillViews) {
-        pill.isCommitted = isCommitted;
-    }
-    self.addButton.enabled = !isCommitted;
-    self.addButton.toolTip = isCommitted
-        ? @"End your commitment before creating a new bundle." : @"Create a bundle of apps and websites.";
+    self.addButton.enabled = YES;
+    self.addButton.toolTip = @"Create a bundle of apps and websites.";
 }
 
 @end

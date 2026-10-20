@@ -1212,6 +1212,22 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                              blockSettings:(NSDictionary<NSString *,id> *)blockSettings
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self installRecurringCommitmentWithID:commitmentID generation:generation startedAt:startedAt
+        lockEndsAt:lockEndsAt timeZoneIdentifier:timeZoneIdentifier followsLocationTimeZone:followsLocationTimeZone
+        protectedHours:protectedHours blockSettings:blockSettings segments:segments protectedBundles:nil reply:reply];
+}
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                         protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
         if (daemonError != nil) { reply(@{}, daemonError); return; }
         NSError *authorizationRepairError = nil;
@@ -1233,6 +1249,7 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                   protectedHours:protectedHours
                                    blockSettings:blockSettings
                                         segments:segments
+                                protectedBundles:protectedBundles
                                    authorization:self.authorization
                                            reply:^(NSDictionary *result, NSError *error) {
                 [SCXPCClient recordAuthorizationRejectionForCommand:@"replace_schedule" error:error];
@@ -1536,6 +1553,15 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                                    generation:(NSString *)generation
                                      segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
                                         reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    [self updateRecurringScheduleForCommitmentID:commitmentID generation:generation
+        segments:segments protectedBundles:nil reply:reply];
+}
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
     [self ensureCurrentDaemonForUserInitiatedAction:^(NSError *daemonError) {
         if (daemonError != nil) { reply(@{}, daemonError); return; }
         [self getCompatibilityInfo:^(NSInteger protocolVersion, NSString *buildVersion,
@@ -1552,7 +1578,7 @@ supportsRootScheduleCommitWithReason:(NSString**)reason {
                 [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
                     reply(@{}, proxyError);
                 }] updateRecurringScheduleForCommitmentID:commitmentID generation:generation
-                                                  segments:segments reply:reply];
+                                                  segments:segments protectedBundles:protectedBundles reply:reply];
             }];
         }];
     }];

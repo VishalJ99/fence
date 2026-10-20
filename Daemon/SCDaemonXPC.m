@@ -1437,6 +1437,23 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                   segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
                              authorization:(NSData *)authData
                                      reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
+    [self installRecurringCommitmentWithID:commitmentID generation:generation startedAt:startedAt
+        lockEndsAt:lockEndsAt timeZoneIdentifier:timeZoneIdentifier followsLocationTimeZone:followsLocationTimeZone
+        protectedHours:protectedHours blockSettings:blockSettings segments:segments protectedBundles:nil authorization:authData reply:reply];
+}
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *,id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *,id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *,id> *> *)segments
+                         protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                             authorization:(NSData *)authData
+                                     reply:(void (^)(NSDictionary<NSString *,id> *, NSError *))reply {
     NSMutableDictionary<NSString *, id> *result = [@{
         @"schema_version": @1,
         @"outcome": @"failed",
@@ -1502,7 +1519,7 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         previousEnd = [segment[@"endMinuteOfWeek"] integerValue];
     }
 
-    NSDictionary<NSString *, id> *proposed = @{
+    NSMutableDictionary<NSString *, id> *proposed = [@{
         @"schemaVersion": @1,
         @"commitmentID": commitmentID,
         @"generation": generation,
@@ -1514,7 +1531,17 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"protectedHours": validatedHours,
         @"blockSettings": [blockSettings copy],
         @"segments": [validatedSegments copy],
-    };
+    } mutableCopy];
+    if (protectedBundles != nil) {
+        NSMutableDictionary *initial = [proposed mutableCopy];
+        initial[@"protectedBundles"] = @[];
+        NSDictionary *protected = [SCDaemonScheduler recurringCommitment:initial protectingBundles:protectedBundles];
+        if (protected == nil || ![SCDaemonScheduler protectedBundles:protectedBundles areCoveredBySegments:validatedSegments]) {
+            reply([result copy], [SCErr errorWithCode:403 subDescription:@"Invalid protected bundle membership"]);
+            return;
+        }
+        proposed = [protected mutableCopy];
+    }
 
     if (![SCDaemonBlockMethods lockOrTimeout:^(NSError *error) {
         result[@"failed_stage"] = @"lock";
@@ -2294,6 +2321,10 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
         @"break_active": @(activeBreak != nil),
         @"can_end_expired": @(!lockActive && !protectedActive),
     } mutableCopy];
+    if (commitment[@"protectedBundles"] != nil) state[@"protected_bundles"] = commitment[@"protectedBundles"];
+    NSMutableSet *legacyIDs = [NSMutableSet set];
+    for (NSDictionary *segment in commitment[@"segments"]) [legacyIDs addObjectsFromArray:segment[SCDaemonScheduleSourceBundleIDsKey]];
+    state[@"legacy_protected_bundle_ids"] = legacyIDs.allObjects;
     if (activeBreak != nil) state[@"break_ends_at"] = activeBreak[@"endsAt"];
     reply([state copy], nil);
 }
@@ -2636,6 +2667,15 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
                                    generation:(NSString *)generation
                                      segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
                                         reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
+    [self updateRecurringScheduleForCommitmentID:commitmentID generation:generation
+        segments:segments protectedBundles:nil reply:reply];
+}
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                                        reply:(void (^)(NSDictionary<NSString *, id> *, NSError *))reply {
     NSMutableDictionary *result = [@{@"outcome": @"failed", @"failed_stage": @"validate",
         @"store_persisted": @NO, @"post_write_match": @NO, @"reconcile_succeeded": @NO} mutableCopy];
     if (self.clientUID == 0 || !SCDaemonUUIDString(commitmentID) || !SCDaemonUUIDString(generation) ||
@@ -2676,6 +2716,20 @@ static NSString *SCDaemonScheduleJobLabel(NSString *scheduleID, NSDate *startDat
             commitmentID, generation);
         NSDictionary *updated = commitment == nil ? nil : [SCDaemonScheduler recurringCommitment:commitment
             strictifyingSegments:validated maximumEntries:SCDaemonConsistencyMaximumEntries];
+        if (updated != nil && protectedBundles != nil) {
+            NSDictionary *membership = [SCDaemonScheduler recurringCommitment:commitment protectingBundles:protectedBundles];
+            if (membership == nil) updated = nil;
+            else {
+                NSMutableDictionary *combined = [updated mutableCopy];
+                combined[@"protectedBundles"] = membership[@"protectedBundles"];
+                updated = combined;
+            }
+        } else if (updated != nil && commitment[@"protectedBundles"] != nil) {
+            // Older clients cannot silently replace a membership-aware calendar.
+            updated = nil;
+        }
+        if (updated != nil && updated[@"protectedBundles"] != nil &&
+            ![SCDaemonScheduler protectedBundles:updated[@"protectedBundles"] areCoveredBySegments:updated[@"segments"]]) updated = nil;
         if (updated == nil) {
             resultError = [SCErr errorWithCode:403
                 subDescription:@"The calendar would weaken the current commitment or is out of date"];

@@ -388,8 +388,67 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     return [self.mutableBundles copy];
 }
 
+- (BOOL)isBundleProtected:(NSString *)bundleID {
+    NSDictionary *commitment = self.recurringCommitmentDictionary;
+    if (commitment == nil) return [self bundleIsUsedInCommittedSchedule:bundleID];
+    NSArray *profiles = commitment[@"protectedBundles"];
+    if (![profiles isKindOfClass:[NSArray class]]) {
+        NSArray *legacyIDs = commitment[@"legacyProtectedBundleIDs"];
+        return legacyIDs == nil || [legacyIDs containsObject:bundleID];
+    }
+    for (NSDictionary *profile in profiles) {
+        if ([profile[@"bundleID"] isEqual:bundleID]) return YES;
+    }
+    return NO;
+}
+
+- (NSArray<SCBlockBundle *> *)recurringEnforcedBundles {
+    if (!self.hasRecurringCommitment) return self.bundles;
+    NSMutableArray *result = [NSMutableArray array];
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if ([self isBundleProtected:bundle.bundleID]) [result addObject:bundle];
+    }
+    return result;
+}
+
+- (BOOL)isRecurringSchedule:(SCWeeklySchedule *)schedule validActiveEditOfSchedule:(SCWeeklySchedule *)baseline {
+    SCBlockBundle *bundle = [self bundleWithID:schedule.bundleID];
+    if (bundle == nil) return NO;
+    return ![self isBundleProtected:bundle.bundleID] ||
+        [schedule isValidActiveEditOfSchedule:baseline policy:bundle.policy];
+}
+
+- (NSArray<SCBlockBundle *> *)bundlesRequiringAllowAdmissionForSchedules:(NSArray<SCWeeklySchedule *> *)schedules {
+    NSMutableArray *result = [NSMutableArray array];
+    for (SCBlockBundle *bundle in self.mutableBundles) {
+        if (bundle.enabled && bundle.entries.count > 0 && bundle.policy == SCBundlePolicyAllow &&
+            ![self isBundleProtected:bundle.bundleID]) [result addObject:bundle];
+    }
+    return result;
+}
+
+- (NSArray<NSDictionary *> *)protectedProfilesForBundles:(NSArray<SCBlockBundle *> *)bundles
+                                              schedules:(NSArray<SCWeeklySchedule *> *)schedules {
+    NSMutableArray *result = [NSMutableArray array];
+    for (SCBlockBundle *bundle in bundles) {
+        if (!bundle.enabled || bundle.entries.count == 0) continue;
+        NSArray *segments = [SCRecurringScheduleCompiler segmentsForBundles:@[bundle] schedules:schedules];
+        if (bundle.policy == SCBundlePolicyBlock && segments.count == 0 &&
+            ![self isBundleProtected:bundle.bundleID]) continue;
+        NSMutableDictionary *profile = [bundle.toDictionary mutableCopy];
+        NSMutableArray *ranges = [NSMutableArray array];
+        for (NSDictionary *segment in segments) {
+            [ranges addObject:@{@"start": segment[SCRecurringSegmentStartMinuteKey],
+                                @"end": segment[SCRecurringSegmentEndMinuteKey]}];
+        }
+        profile[@"blockedRanges"] = ranges;
+        [result addObject:profile];
+    }
+    return result;
+}
+
 - (void)addBundle:(SCBlockBundle *)bundle {
-    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) {
+    if (self.recurringScheduleMigrationNeedsChoice || self.hasUnexpiredLegacyCommitment) {
         NSLog(@"SCScheduleManager: Cannot add bundles while recurring edits are locked");
         return;
     }
@@ -397,6 +456,12 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
         return; // Already exists or invalid
     }
 
+    NSDictionary *active = self.recurringCommitmentDictionary;
+    if (active != nil && active[@"protectedBundles"] == nil && active[@"legacyProtectedBundleIDs"] == nil) {
+        NSMutableDictionary *legacy = [active mutableCopy];
+        legacy[@"legacyProtectedBundleIDs"] = [self.mutableBundles valueForKey:@"bundleID"];
+        [NSUserDefaults.standardUserDefaults setObject:legacy forKey:kRecurringCommitmentKey];
+    }
     bundle.displayOrder = self.mutableBundles.count;
     [self.mutableBundles addObject:bundle];
 
@@ -408,8 +473,8 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
 
 - (void)removeBundleWithID:(NSString *)bundleID {
     // Cannot delete bundles while committed - this would loosen restrictions
-    if (self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice ||
-        [self isCommittedForWeekOffset:0]) {
+    if ([self isBundleProtected:bundleID] || self.recurringScheduleMigrationNeedsChoice ||
+        (!self.hasRecurringCommitment && [self isCommittedForWeekOffset:0])) {
         NSLog(@"SCScheduleManager: Cannot delete bundle while committed - would loosen restrictions");
         return;
     }
@@ -434,7 +499,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
         NSLog(@"SCScheduleManager: Cannot edit bundles while recurring edits are locked");
         return;
     }
-    if (self.hasRecurringCommitment) {
+    if ([self isBundleProtected:bundle.bundleID] && self.hasRecurringCommitment) {
         // Serialize local reads/writes on the main queue. The daemon serializes
         // root appends; replies may arrive in either order and are union-rebased.
         SCBlockBundle *snapshot = [bundle copy];
@@ -505,7 +570,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
             }
         }
 
-        BOOL shouldDiagnoseAdditions = addedEntries.count > 0 &&
+        BOOL shouldDiagnoseAdditions = !self.hasRecurringCommitment && addedEntries.count > 0 &&
             (usedInCommittedSchedule || [SCBlockUtilities anyBlockIsRunning] ||
              [self isCommittedForWeekOffset:0] || [self isCommittedForWeekOffset:1]);
         if (shouldDiagnoseAdditions) {
@@ -588,6 +653,17 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
             SCBlockBundle *updatedBundle = [self.mutableBundles[index] copy];
             for (NSString *entry in addedEntries) [updatedBundle addEntry:entry];
             self.mutableBundles[index] = updatedBundle;
+            if (currentCommitment[@"protectedBundles"] != nil) {
+                NSMutableArray *profiles = [NSMutableArray array];
+                for (NSDictionary *profile in currentCommitment[@"protectedBundles"]) {
+                    NSMutableDictionary *updatedProfile = [profile mutableCopy];
+                    if ([profile[@"bundleID"] isEqual:bundleID]) updatedProfile[@"entries"] = updatedBundle.toDictionary[@"entries"];
+                    [profiles addObject:updatedProfile];
+                }
+                NSMutableDictionary *updatedCommitment = [currentCommitment mutableCopy];
+                updatedCommitment[@"protectedBundles"] = profiles;
+                [NSUserDefaults.standardUserDefaults setObject:updatedCommitment forKey:kRecurringCommitmentKey];
+            }
             [self save];
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
             BOOL bundleSaved = [defaults synchronize];
@@ -1351,6 +1427,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
 }
 
 - (void)reorderBundles:(NSArray<SCBlockBundle *> *)bundles {
+    if (self.hasRecurringCommitment) return;
     [self.mutableBundles removeAllObjects];
     [self.mutableBundles addObjectsFromArray:bundles];
 
@@ -1676,7 +1753,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
 }
 
 - (void)updateRecurringSchedule:(SCWeeklySchedule *)schedule {
-    if (schedule == nil || self.hasRecurringCommitment || self.recurringScheduleMigrationNeedsChoice) return;
+    if (schedule == nil || [self isBundleProtected:schedule.bundleID] || self.recurringScheduleMigrationNeedsChoice) return;
     NSUInteger index = [self.mutableRecurringSchedules indexOfObjectPassingTest:
         ^BOOL(SCWeeklySchedule *candidate, NSUInteger idx, BOOL *stop) {
             #pragma unused(idx)
@@ -1729,21 +1806,27 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSMutableSet<NSString *> *proposedBundleIDs = [NSMutableSet set];
     NSMutableArray<SCWeeklySchedule *> *draft = [NSMutableArray array];
     BOOL validDraft = [schedules isKindOfClass:[NSArray class]] &&
-        schedules.count == baselineByBundle.count;
+        schedules.count >= baselineByBundle.count;
     for (id candidate in (validDraft ? schedules : @[])) {
         if (![candidate isKindOfClass:[SCWeeklySchedule class]]) { validDraft = NO; break; }
         SCWeeklySchedule *schedule = candidate;
         if (schedule.bundleID.length == 0) { validDraft = NO; break; }
         SCWeeklySchedule *baseline = baselineByBundle[schedule.bundleID];
-        if (baseline == nil || [proposedBundleIDs containsObject:schedule.bundleID] ||
-            ![schedule isValidActiveEditOfSchedule:baseline]) {
+        if (baseline == nil && [self isBundleProtected:schedule.bundleID]) {
+            // Admission can protect a no-window Allow bundle before a local
+            // schedule row exists. Its established baseline is an empty week.
+            baseline = [SCWeeklySchedule emptyScheduleForBundleID:schedule.bundleID];
+        }
+        if ([self bundleWithID:schedule.bundleID] == nil ||
+            [proposedBundleIDs containsObject:schedule.bundleID] ||
+            ![self isRecurringSchedule:schedule validActiveEditOfSchedule:baseline]) {
             validDraft = NO;
             break;
         }
         [proposedBundleIDs addObject:schedule.bundleID];
         [draft addObject:[schedule copy]];
     }
-    if (!validDraft || proposedBundleIDs.count != baselineByBundle.count) {
+    if (!validDraft || ![[NSSet setWithArray:baselineByBundle.allKeys] isSubsetOfSet:proposedBundleIDs]) {
         finish(NO, SCScheduleCommitError(52, @"validate",
             @"While committed, keep the same bundles and only shorten or remove existing Allow windows.", NO));
         return;
@@ -1751,7 +1834,15 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSArray *baselineSnapshot = [SCRecurringScheduleCompiler
         canonicalDictionariesForSchedules:baselineByBundle.allValues];
     NSArray *draftSnapshot = [SCRecurringScheduleCompiler canonicalDictionariesForSchedules:draft];
-    if ([draftSnapshot isEqual:baselineSnapshot]) {
+    NSArray *proposedProfiles = [self protectedProfilesForBundles:self.bundles schedules:draft];
+    BOOL sameMembership = [proposedProfiles isEqual:commitment[@"protectedBundles"]];
+    if (commitment[@"protectedBundles"] == nil) {
+        sameMembership = YES;
+        for (NSDictionary *profile in proposedProfiles) {
+            if (![self isBundleProtected:profile[@"bundleID"]]) { sameMembership = NO; break; }
+        }
+    }
+    if ([draftSnapshot isEqual:baselineSnapshot] && sameMembership) {
         finish(YES, nil);
         return;
     }
@@ -1799,7 +1890,9 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
         return;
     }
 
-    [self submitRecurringCalendarSegments:segments commitment:commitment
+    NSMutableDictionary *requestCommitment = [commitment mutableCopy];
+    requestCommitment[@"proposedProtectedBundles"] = proposedProfiles;
+    [self submitRecurringCalendarSegments:segments commitment:requestCommitment
                                     reply:^(NSDictionary<NSString *, id> *result, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             BOOL rootStored = [result[@"store_persisted"] boolValue] &&
@@ -1837,6 +1930,9 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
             // reconciliation failed. Never mirror a captured draft into a new
             // commitment or overwrite a newer calendar/bundle update.
             self.mutableRecurringSchedules = draft;
+            NSMutableDictionary *admittedCommitment = [currentCommitment mutableCopy];
+            admittedCommitment[@"protectedBundles"] = proposedProfiles;
+            [NSUserDefaults.standardUserDefaults setObject:admittedCommitment forKey:kRecurringCommitmentKey];
             [self saveRecurringSchedules];
             NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
             NSArray *persisted = [defaults objectForKey:kRecurringSchedulesKey];
@@ -1867,6 +1963,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     [xpc updateRecurringScheduleForCommitmentID:commitment[@"commitmentID"]
                                     generation:commitment[@"generation"]
                                       segments:segments
+                              protectedBundles:commitment[@"proposedProtectedBundles"]
                                          reply:reply];
 }
 
@@ -1874,7 +1971,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     SCWeeklySchedule *existing = [self recurringScheduleForBundleID:bundle.bundleID];
     if (existing != nil) return existing;
     SCWeeklySchedule *schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
-    if (!self.hasRecurringCommitment && !self.recurringScheduleMigrationNeedsChoice) {
+    if (![self isBundleProtected:bundle.bundleID] && !self.recurringScheduleMigrationNeedsChoice) {
         [self.mutableRecurringSchedules addObject:schedule];
         [self saveRecurringSchedules];
     }
@@ -2032,6 +2129,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSString *commitmentID = NSUUID.UUID.UUIDString;
     NSString *generation = NSUUID.UUID.UUIDString;
 
+    NSArray *initialProfiles = [self protectedProfilesForBundles:enabledBundles schedules:self.recurringSchedules];
     SCXPCClient *xpc = [SCXPCClient new];
     [xpc installRecurringCommitmentWithID:commitmentID
                                 generation:generation
@@ -2042,6 +2140,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
                              protectedHours:protectedHours
                               blockSettings:blockSettings
                                    segments:segments
+                           protectedBundles:initialProfiles
                                       reply:^(NSDictionary<NSString *,id> *result, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             NSUInteger storedCount = [result[@"segments_stored"] unsignedIntegerValue];
@@ -2073,6 +2172,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
                 @"lockEndsAt": lockEndsAt,
                 @"timeZoneIdentifier": timeZoneIdentifier,
                 @"followsLocationTimeZone": @(followsLocationTimeZone),
+                @"protectedBundles": initialProfiles,
             };
             [defaults setObject:localCommitment forKey:kRecurringCommitmentKey];
             [defaults setObject:(reconcileSucceeded ? @"verified" : @"stored")
@@ -2284,6 +2384,15 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     if (completeTimeZonePair) {
         localCommitment[@"timeZoneIdentifier"] = timeZoneIdentifier;
         localCommitment[@"followsLocationTimeZone"] = @(followsLocationTimeZone.boolValue);
+    }
+    if ([state[@"protected_bundles"] isKindOfClass:[NSArray class]]) {
+        localCommitment[@"protectedBundles"] = state[@"protected_bundles"];
+    } else {
+        NSDictionary *prior = self.recurringCommitmentDictionary;
+        NSArray *legacyIDs = [prior[@"generation"] isEqual:generation] ? prior[@"legacyProtectedBundleIDs"] : nil;
+        NSMutableSet *ids = [NSMutableSet setWithArray:legacyIDs ?: [self.mutableBundles valueForKey:@"bundleID"]];
+        if ([state[@"legacy_protected_bundle_ids"] isKindOfClass:[NSArray class]]) [ids addObjectsFromArray:state[@"legacy_protected_bundle_ids"]];
+        localCommitment[@"legacyProtectedBundleIDs"] = ids.allObjects;
     }
     SCProtectedHoursRange range = SCNormalizeProtectedHoursRange(
         protectedStart.integerValue, protectedEnd.integerValue);
@@ -3032,6 +3141,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
 #pragma mark - Status Display
 
 - (NSString *)statusStringForBundleID:(NSString *)bundleID {
+    if (self.hasRecurringCommitment && ![self isBundleProtected:bundleID]) return @"Not in active session";
     SCWeeklySchedule *schedule = [self recurringScheduleForBundleID:bundleID];
     if (!schedule) {
         // Recurring compilation treats a missing allow-window schedule as
@@ -3042,7 +3152,8 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSCalendar *calendar = self.hasRecurringCommitment
         ? self.recurringCalendar : [NSCalendar currentCalendar];
     NSString *baseStatus = [schedule currentStatusStringAtDate:[NSDate date]
-                                                       calendar:calendar];
+                                                       calendar:calendar
+                                                         policy:[self bundleWithID:bundleID].policy];
 
     // If no next state change (empty string), use commitment end date
     // This happens when bundle is blocked all week with no allowed windows
@@ -3069,9 +3180,11 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
 }
 
 - (BOOL)wouldBundleBeAllowed:(NSString *)bundleID {
+    if (self.hasRecurringCommitment && ![self isBundleProtected:bundleID]) return YES;
+    SCBlockBundle *bundle = [self bundleWithID:bundleID];
     SCWeeklySchedule *schedule = [self recurringScheduleForBundleID:bundleID];
     if (!schedule) {
-        return !self.hasRecurringCommitment;
+        return bundle.policy == SCBundlePolicyBlock || !self.hasRecurringCommitment;
     }
     NSCalendar *calendar = self.hasRecurringCommitment
         ? self.recurringCalendar : [NSCalendar currentCalendar];
@@ -3082,9 +3195,9 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSInteger minute = components.hour * 60 + components.minute;
     for (SCTimeRange *window in [schedule allowedWindowsForDay:day]) {
         // Recurring enforcement uses half-open allow windows.
-        if (window.startMinutes <= minute && minute < window.endMinutes) return YES;
+        if (window.startMinutes <= minute && minute < window.endMinutes) return bundle.policy == SCBundlePolicyAllow;
     }
-    return NO;
+    return bundle.policy == SCBundlePolicyBlock;
 }
 
 - (NSDate *)nextRecurringBlockingStartAfterDate:(NSDate *)date
@@ -3093,7 +3206,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     if (date == nil || !self.hasRecurringCommitment) return nil;
 
     NSArray<NSDictionary<NSString *, id> *> *segments =
-        [SCRecurringScheduleCompiler segmentsForBundles:self.mutableBundles
+        [SCRecurringScheduleCompiler segmentsForBundles:[self recurringEnforcedBundles]
                                                 schedules:self.recurringSchedules];
     if (segments.count == 0) return nil;
 
@@ -3202,7 +3315,7 @@ static NSError *SCRecurringCalendarUpdateError(NSInteger code,
     NSInteger minuteOfWeek = dayFromMonday * 24 * 60 +
         components.hour * 60 + components.minute;
     NSArray<NSDictionary<NSString *, id> *> *segments =
-        [SCRecurringScheduleCompiler segmentsForBundles:self.mutableBundles
+        [SCRecurringScheduleCompiler segmentsForBundles:[self recurringEnforcedBundles]
                                                 schedules:self.recurringSchedules];
     for (NSDictionary<NSString *, id> *segment in segments) {
         NSInteger startMinute = [segment[SCRecurringSegmentStartMinuteKey] integerValue];

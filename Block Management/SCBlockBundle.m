@@ -69,6 +69,7 @@ static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
     bundle->_bundleID = dict[@"bundleID"];
     bundle.name = dict[@"name"];
     bundle.enabled = dict[@"enabled"] ? [dict[@"enabled"] boolValue] : YES;
+    bundle.policy = [dict[@"policy"] integerValue] == SCBundlePolicyBlock ? SCBundlePolicyBlock : SCBundlePolicyAllow;
     bundle.displayOrder = dict[@"displayOrder"] ? [dict[@"displayOrder"] integerValue] : 0;
 
     // Parse color
@@ -91,6 +92,7 @@ static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
         @"colorHex": [self hexFromColor:self.color] ?: @"007AFF",
         @"entries": SCCanonicalBundleEntries(self.entries),
         @"enabled": @(self.enabled),
+        @"policy": @(self.policy),
         @"displayOrder": @(self.displayOrder)
     };
 }
@@ -243,6 +245,7 @@ static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
     copy.color = [self.color copy];
     copy.entries = [self.entries mutableCopy];
     copy.enabled = self.enabled;
+    copy.policy = self.policy;
     copy.displayOrder = self.displayOrder;
     return copy;
 }
@@ -254,6 +257,7 @@ static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
     [coder encodeObject:self.name forKey:@"name"];
     [coder encodeObject:[self hexFromColor:self.color] forKey:@"colorHex"];
     [coder encodeObject:SCCanonicalBundleEntries(self.entries) forKey:@"entries"];
+    [coder encodeInteger:self.policy forKey:@"policy"];
     [coder encodeBool:self.enabled forKey:@"enabled"];
     [coder encodeInteger:self.displayOrder forKey:@"displayOrder"];
 }
@@ -270,6 +274,7 @@ static NSMutableArray<NSString*> *SCCanonicalBundleEntries(id rawEntries) {
         NSSet *allowedClasses = [NSSet setWithObjects:[NSArray class], [NSString class], nil];
         _entries = SCCanonicalBundleEntries([coder decodeObjectOfClasses:allowedClasses forKey:@"entries"]);
 
+        _policy = [coder decodeIntegerForKey:@"policy"] == SCBundlePolicyBlock ? SCBundlePolicyBlock : SCBundlePolicyAllow;
         _enabled = [coder decodeBoolForKey:@"enabled"];
         _displayOrder = [coder decodeIntegerForKey:@"displayOrder"];
     }

@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #import "SCTimeRange.h"
+#import "SCBlockBundle.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -95,6 +96,7 @@ typedef NS_ENUM(NSInteger, SCDayOfWeek) {
 /// Returns human-readable status for current state
 - (NSString *)currentStatusString;
 - (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar;
+- (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar policy:(SCBundlePolicy)policy;
 
 /// Total allowed minutes for a specific day
 - (NSInteger)totalAllowedMinutesForDay:(SCDayOfWeek)day;
@@ -111,6 +113,7 @@ typedef NS_ENUM(NSInteger, SCDayOfWeek) {
 /// Changed windows need at least 15 minutes; unchanged legacy shorter windows
 /// remain valid. Neither schedule is mutated.
 - (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule;
+- (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule policy:(SCBundlePolicy)policy;
 
 /// Original-window indexes, in this schedule's window order, or nil when the
 /// day is not a valid active edit. Used by the calendar to retain entry identity.

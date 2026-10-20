@@ -56,6 +56,10 @@
 // UI Elements
 @property (nonatomic, strong) NSTextField *nameField;
 @property (nonatomic, strong) NSStackView *colorPicker;
+@property (nonatomic, strong) NSSegmentedControl *policyControl;
+@property (nonatomic, strong) NSView *policySection;
+@property (nonatomic, strong) NSTextField *policyExplanation;
+@property (nonatomic, strong) NSView *warningContainer;
 @property (nonatomic, strong) NSTableView *entriesTableView;
 @property (nonatomic, strong) NSButton *addAppButton;
 @property (nonatomic, strong) NSButton *addWebsiteButton;
@@ -75,7 +79,7 @@
 @implementation SCBundleEditorController
 
 - (instancetype)initForNewBundle {
-    NSRect frame = NSMakeRect(0, 0, 400, 510);
+    NSRect frame = NSMakeRect(0, 0, 400, 575);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                      backing:NSBackingStoreBuffered
@@ -90,6 +94,7 @@
     if (self) {
         _bundle = nil;
         _workingBundle = [SCBlockBundle bundleWithName:@"New Bundle" color:[SCBlockBundle colorBlue]];
+        _workingBundle.policy = SCBundlePolicyBlock;
         _isNewBundle = YES;
         _originalEntries = [NSSet set];
         window.delegate = self;
@@ -100,7 +105,7 @@
 }
 
 - (instancetype)initWithBundle:(SCBlockBundle *)bundle {
-    NSRect frame = NSMakeRect(0, 0, 400, 510);
+    NSRect frame = NSMakeRect(0, 0, 400, 575);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                      backing:NSBackingStoreBuffered
@@ -129,14 +134,23 @@
     CGFloat padding = 16;
     CGFloat y = contentView.bounds.size.height - padding;
 
-    // Reserve a separate banner above the form so it never overlaps actions.
-    self.committedWarningLabel = [NSTextField wrappingLabelWithString:@""];
-    self.committedWarningLabel.frame = NSMakeRect(padding, y - 48, 368, 44);
+    self.warningContainer = [[NSView alloc] initWithFrame:NSMakeRect(padding, y - 54, 368, 54)];
+    self.warningContainer.wantsLayer = YES;
+    self.warningContainer.layer.cornerRadius = 8;
+    self.warningContainer.layer.backgroundColor = [NSColor.systemRedColor colorWithAlphaComponent:0.08].CGColor;
+    self.warningContainer.layer.borderColor = [NSColor.systemRedColor colorWithAlphaComponent:0.22].CGColor;
+    self.warningContainer.layer.borderWidth = 1;
+    NSImageView *lock = [[NSImageView alloc] initWithFrame:NSMakeRect(10, 19, 16, 16)];
+    lock.image = [NSImage imageWithSystemSymbolName:@"lock.fill" accessibilityDescription:@"Protected bundle"];
+    lock.contentTintColor = [NSColor.systemRedColor colorWithAlphaComponent:0.92];
+    [self.warningContainer addSubview:lock];
+    self.committedWarningLabel = [NSTextField wrappingLabelWithString:@"Bundle is being used in the current session. Modifications are restricted. Content can be added."];
+    self.committedWarningLabel.frame = NSMakeRect(34, 7, 324, 40);
     self.committedWarningLabel.font = [NSFont systemFontOfSize:11];
-    self.committedWarningLabel.textColor = NSColor.secondaryLabelColor;
-    self.committedWarningLabel.hidden = YES;
-    [contentView addSubview:self.committedWarningLabel];
-    y -= 60;
+    self.committedWarningLabel.textColor = [NSColor.systemRedColor colorWithAlphaComponent:0.92];
+    [self.warningContainer addSubview:self.committedWarningLabel];
+    [contentView addSubview:self.warningContainer];
+    y -= 65;
 
     // Name field
     y -= 30;
@@ -200,6 +214,26 @@
         }
     }
     self.colorViews = views;
+
+    y -= 48;
+    self.policySection = [[NSView alloc] initWithFrame:NSMakeRect(padding, y - 18, 368, 50)];
+    NSTextField *policyLabel = [NSTextField labelWithString:@"Policy:"];
+    policyLabel.frame = NSMakeRect(0, 21, 60, 20);
+    [self.policySection addSubview:policyLabel];
+    self.policyControl = [NSSegmentedControl segmentedControlWithLabels:@[@"Allow", @"Block"]
+                                                         trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                               target:self action:@selector(policyChanged:)];
+    self.policyControl.frame = NSMakeRect(64, 17, 190, 28);
+    self.policyControl.accessibilityLabel = @"Bundle policy";
+    self.policyControl.selectedSegment = self.workingBundle.policy;
+    [self.policySection addSubview:self.policyControl];
+    self.policyExplanation = [NSTextField labelWithString:@""];
+    self.policyExplanation.frame = NSMakeRect(0, 0, 368, 16);
+    self.policyExplanation.font = [NSFont systemFontOfSize:10];
+    self.policyExplanation.textColor = NSColor.secondaryLabelColor;
+    [self.policySection addSubview:self.policyExplanation];
+    [self updatePolicyExplanation];
+    [contentView addSubview:self.policySection];
 
     // Entries label
     y -= 40;
@@ -298,16 +332,19 @@
     BOOL protected = self.isCommitted;
     self.nameField.editable = !protected;
     self.nameField.enabled = !protected;
-    self.deleteButton.enabled = !protected;
+    self.nameField.alphaValue = protected ? 0.62 : 1.0;
+    self.deleteButton.alphaValue = protected ? 0.42 : 1.0;
+    self.policySection.alphaValue = protected ? 0.62 : 1.0;
     self.removeEntryButton.enabled = [self selectedEntryCanBeRemoved];
-    self.colorPicker.alphaValue = protected ? 0.45 : 1.0;
+    self.colorPicker.alphaValue = 1.0;
     for (NSView *colorView in self.colorViews) {
+        NSColor *color = [SCBlockBundle allPresetColors][colorView.identifier.integerValue];
+        colorView.alphaValue = protected && ![self colorsEqual:color and:self.workingBundle.color] ? 0.42 : 1.0;
         for (NSGestureRecognizer *recognizer in colorView.gestureRecognizers) {
             recognizer.enabled = !protected;
         }
     }
-    self.committedWarningLabel.stringValue = @"Commitment active. Existing items, name and color are locked. Add items, then Save to apply.";
-    self.committedWarningLabel.hidden = !self.isCommitted;
+    self.warningContainer.hidden = !protected;
 }
 
 - (BOOL)colorsEqual:(NSColor *)c1 and:(NSColor *)c2 {
@@ -319,6 +356,26 @@
 }
 
 #pragma mark - Actions
+
+- (void)updatePolicyExplanation {
+    self.policyExplanation.stringValue = self.workingBundle.policy == SCBundlePolicyBlock
+        ? @"Block these apps and websites inside their calendar windows."
+        : @"Block these apps and websites outside their calendar windows.";
+}
+
+- (void)policyChanged:(id)sender {
+    if (self.isCommitted) {
+        self.policyControl.selectedSegment = self.workingBundle.policy;
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"Policy is locked";
+        alert.informativeText = @"The policy cannot change while this bundle is in the current session. Content can be added.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        return;
+    }
+    self.workingBundle.policy = self.policyControl.selectedSegment;
+    [self updatePolicyExplanation];
+}
 
 - (void)colorCircleClicked:(NSClickGestureRecognizer *)gesture {
     if (self.isCommitted) return;
@@ -344,7 +401,7 @@
     panel.allowsMultipleSelection = YES;
     panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
     panel.allowedContentTypes = @[[UTType typeWithIdentifier:@"com.apple.application-bundle"]];
-    panel.message = @"Select apps to block:";
+    panel.message = @"Select apps for this bundle:";
 
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
         if (result == NSModalResponseOK) {
@@ -364,7 +421,7 @@
 - (void)addWebsiteClicked:(id)sender {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Add Website";
-    alert.informativeText = @"Enter the domain to block (e.g., facebook.com):";
+    alert.informativeText = @"Enter a domain for this bundle (e.g., facebook.com):";
 
     NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
     input.placeholderString = @"example.com";

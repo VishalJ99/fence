@@ -19,6 +19,7 @@ static const CGFloat kDragThreshold = 5.0;  // Pixels to move before starting dr
 @interface SCTimelineView : NSView
 
 @property (nonatomic, strong) NSMutableArray<SCTimeRange *> *allowedWindows;
+@property (nonatomic) SCBundlePolicy policy;
 @property (nonatomic, strong) NSColor *bundleColor;
 @property (nonatomic, assign) BOOL isCommitted;
 @property (nonatomic, copy, nullable) void (^onWindowsChanged)(void);
@@ -339,6 +340,8 @@ static const CGFloat kDragThreshold = 5.0;  // Pixels to move before starting dr
     // Border - thicker when selected
     [[self.bundleColor colorWithAlphaComponent:1.0] setStroke];
     [bgPath setLineWidth:isSelected ? 2.5 : 1.5];
+    CGFloat dash[] = {5, 4};
+    if (self.policy == SCBundlePolicyAllow) [bgPath setLineDash:dash count:2 phase:0];
     [bgPath stroke];
 
     // Time labels
@@ -833,9 +836,13 @@ static const CGFloat kDragThreshold = 5.0;  // Pixels to move before starting dr
     self.titleLabel.drawsBackground = NO;
     [contentView addSubview:self.titleLabel];
 
-    // Legend - colored blocks = allowed time
+    // The coloured windows follow the bundle policy.
     NSTextField *legendLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(padding + 267, y + 6, 100, 20)];
-    legendLabel.stringValue = @"■ = Allowed";
+    legendLabel.stringValue = self.bundle.policy == SCBundlePolicyBlock ? @"■ = Blocked" : @"■ = Allowed";
+    legendLabel.toolTip = self.bundle.policy == SCBundlePolicyBlock
+        ? @"These apps and websites are blocked inside the coloured windows."
+        : @"These apps and websites are blocked outside the coloured windows.";
+    legendLabel.accessibilityLabel = legendLabel.toolTip;
     legendLabel.font = [NSFont systemFontOfSize:13];
     legendLabel.textColor = self.bundle.color;
     legendLabel.bezeled = NO;
@@ -864,6 +871,7 @@ static const CGFloat kDragThreshold = 5.0;  // Pixels to move before starting dr
     y -= 560;
     self.timelineView = [[SCTimelineView alloc] initWithFrame:NSMakeRect(padding, y, 368, 533)];
     self.timelineView.bundleColor = self.bundle.color;
+    self.timelineView.policy = self.bundle.policy;
     self.timelineView.allowedWindows = [[self.workingSchedule allowedWindowsForDay:self.day] mutableCopy];
     self.timelineView.isCommitted = self.isCommitted;
 
@@ -942,7 +950,7 @@ static const CGFloat kDragThreshold = 5.0;  // Pixels to move before starting dr
     if (self.isCommitted) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Cannot Add Blocks";
-        alert.informativeText = @"You're committed to this week. You cannot add new allowed time blocks.";
+        alert.informativeText = @"Your commitment is active. Use Edit Schedule to make changes that increase blocking.";
         [alert runModal];
         return;
     }

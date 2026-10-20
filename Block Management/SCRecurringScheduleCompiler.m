@@ -58,7 +58,8 @@ isAllowedAtMondayBasedMinute:(NSInteger)minuteOfWeek {
         if (![bundle isKindOfClass:[SCBlockBundle class]] || !bundle.enabled || bundle.bundleID.length == 0) continue;
         SCWeeklySchedule *schedule = schedulesByBundle[bundle.bundleID];
         if (schedule == nil) schedule = [SCWeeklySchedule emptyScheduleForBundleID:bundle.bundleID];
-        if ([self schedule:schedule isAllowedAtMondayBasedMinute:minute]) continue;
+        BOOL insideWindow = [self schedule:schedule isAllowedAtMondayBasedMinute:minute];
+        if (bundle.policy == SCBundlePolicyBlock ? !insideWindow : insideWindow) continue;
 
         BOOL contributed = NO;
         for (id candidate in bundle.entries ?: @[]) {

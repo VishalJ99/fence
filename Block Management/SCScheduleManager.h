@@ -58,6 +58,11 @@ extern NSString * const SCScheduleStrictifyOperationTokenKey;
 /// another's payload.
 - (BOOL)retryStrictifyUpdateForOperationToken:(NSString *)operationToken;
 
+/// Membership persists through allowed windows, breaks and deadline expiry.
+- (BOOL)isBundleProtected:(NSString *)bundleID;
+- (BOOL)isRecurringSchedule:(SCWeeklySchedule *)schedule validActiveEditOfSchedule:(SCWeeklySchedule *)baseline;
+- (NSArray<SCBlockBundle *> *)bundlesRequiringAllowAdmissionForSchedules:(NSArray<SCWeeklySchedule *> *)schedules;
+
 /// Gets a bundle by ID
 - (nullable SCBlockBundle *)bundleWithID:(NSString *)bundleID;
 

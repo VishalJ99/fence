@@ -26,7 +26,8 @@ typedef NS_ENUM(NSInteger, SCDaemonProtocolVersion) {
     SCDaemonProtocolVersionProtectedHoursStrictification = 9,
     SCDaemonProtocolVersionRecurringBundleAppend = 10,
     SCDaemonProtocolVersionRecurringCalendarStrictification = 11,
-    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringCalendarStrictification,
+    SCDaemonProtocolVersionRecurringBundleMembership = 12,
+    SCDaemonProtocolVersionCurrent = SCDaemonProtocolVersionRecurringBundleMembership,
 };
 
 // These names are intentionally static and contain no blocklist or user data.
@@ -254,6 +255,20 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
                                      reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                     NSError * _Nullable error))reply;
 
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *, id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                         protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                             authorization:(NSData *)authData
+                                     reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                    NSError * _Nullable error))reply;
+
 /// Updates only the timezone of an owner-matching location-following
 /// commitment. A fixed commitment cannot be converted after Commit.
 - (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
@@ -350,6 +365,13 @@ NS_INLINE BOOL SCDaemonScheduledStartRequestIsValid(NSDate * _Nullable requested
 - (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
                                    generation:(NSString *)generation
                                      segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                         NSError * _Nullable error))reply;
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
                                         reply:(void (^)(NSDictionary<NSString *, id> *result,
                                                          NSError * _Nullable error))reply;
 

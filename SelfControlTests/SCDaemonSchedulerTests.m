@@ -1183,4 +1183,60 @@ static NSDictionary<NSString *, id> *SCSchedulerTestRecurringCommitment(uid_t ow
                           @"periodic");
 }
 
+- (NSDictionary *)protectedProfileWithID:(NSString *)bundleID policy:(NSInteger)policy ranges:(NSArray *)ranges {
+    return @{@"bundleID": bundleID, @"name": @"Protected", @"colorHex": @"007AFF",
+        @"enabled": @YES, @"displayOrder": @0, @"policy": @(policy),
+        @"entries": @[@"example.com"], @"blockedRanges": ranges};
+}
+
+- (void)testRootBundleMembershipPersistsAndRejectsMetadataRemovalAndWeakerMinutes {
+    NSDate *now = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSDictionary *original = [self calendarCommitmentAtDate:now];
+    NSDictionary *profile = [self protectedProfileWithID:SCSchedulerTestBundleID policy:0
+        ranges:@[@{@"start": @540, @"end": @720}]];
+    NSDictionary *protected = [SCDaemonScheduler recurringCommitment:original protectingBundles:@[profile]];
+    XCTAssertNotNil(protected);
+    XCTAssertEqualObjects(protected[@"lockEndsAt"], original[@"lockEndsAt"]);
+    XCTAssertEqualObjects(protected[@"generation"], original[@"generation"]);
+    XCTAssertTrue([SCDaemonScheduler protectedBundles:@[profile] areCoveredBySegments:protected[@"segments"]]);
+    for (NSDictionary *change in @[@{@"name": @"Renamed"}, @{@"policy": @1},
+         @{@"colorHex": @"FF0000"}, @{@"entries": @[]},
+         @{@"blockedRanges": @[@{@"start": @541, @"end": @720}]}]) {
+        NSMutableDictionary *weaker = [profile mutableCopy];
+        [weaker addEntriesFromDictionary:change];
+        XCTAssertNil([SCDaemonScheduler recurringCommitment:protected protectingBundles:@[weaker]]);
+    }
+    XCTAssertNil([SCDaemonScheduler recurringCommitment:protected protectingBundles:@[]]);
+    NSDictionary *appended = [SCDaemonScheduler recurringCommitment:protected
+        appendingEntries:@[@"new.example"] forBundleID:SCSchedulerTestBundleID maximumEntries:4096];
+    XCTAssertTrue([appended[@"protectedBundles"][0][@"entries"] containsObject:@"new.example"]);
+    XCTAssertEqualObjects(appended[@"lockEndsAt"], original[@"lockEndsAt"]);
+    NSData *serialized = [NSPropertyListSerialization dataWithPropertyList:appended
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    NSDictionary *restored = [NSPropertyListSerialization propertyListWithData:serialized
+        options:NSPropertyListImmutable format:NULL error:nil];
+    XCTAssertEqualObjects(restored, appended);
+    XCTAssertEqual([SCDaemonScheduler validRecurringCommitmentsFromValue:@{SCSchedulerTestCommitmentID: restored}
+        ownerUID:501].count, 1U);
+}
+
+- (void)testRootAdmissionIncludesNonBlockingMemberAndRejectsInventedCoverage {
+    NSDate *now = [self dateWithYear:2026 month:7 day:13 hour:9 minute:30];
+    NSMutableDictionary *original = [[self calendarCommitmentAtDate:now] mutableCopy];
+    NSDictionary *old = [self protectedProfileWithID:SCSchedulerTestBundleID policy:0
+        ranges:@[@{@"start": @540, @"end": @720}]];
+    original[@"protectedBundles"] = @[old];
+    NSDictionary *new = [self protectedProfileWithID:SCSchedulerTestScheduleID3 policy:0 ranges:@[]];
+    NSDictionary *updated = [SCDaemonScheduler recurringCommitment:original protectingBundles:@[old, new]];
+    XCTAssertNotNil(updated);
+    XCTAssertEqualObjects(updated[@"lockEndsAt"], original[@"lockEndsAt"]);
+    NSDictionary *added = [SCDaemonScheduler recurringCommitment:updated appendingEntries:@[@"new.example"]
+        forBundleID:SCSchedulerTestScheduleID3 maximumEntries:4096];
+    XCTAssertNotNil(added, @"A member stays appendable even while it has no blocked minutes");
+    NSMutableDictionary *invented = [new mutableCopy];
+    invented[@"blockedRanges"] = @[@{@"start": @0, @"end": @10080}];
+    XCTAssertFalse([SCDaemonScheduler protectedBundles:@[old, invented] areCoveredBySegments:original[@"segments"]]);
+    XCTAssertFalse([SCDaemonScheduler protectedBundlesAreValid:@[old, old]]);
+}
+
 @end

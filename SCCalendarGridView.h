@@ -57,6 +57,7 @@ didRequestEditBundle:(SCBlockBundle *)bundle
 
 /// Whether editing is locked (committed state)
 @property (nonatomic, assign) BOOL isCommitted;
+@property (nonatomic, copy) NSSet<NSString *> *protectedBundleIDs;
 
 /// Non-nil enables a draft-only, stricter Allow editor while committed. The
 /// setter deep-copies this immutable opening snapshot. Nil restores the normal

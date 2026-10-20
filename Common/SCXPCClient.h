@@ -143,6 +143,19 @@ supportsTrustedTravelTimeZoneWithReason:(NSString* _Nullable * _Nullable)reason;
                                   segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
                                      reply:(void(^)(NSDictionary<NSString *, id> *result,
                                                     NSError * _Nullable error))reply;
+
+- (void)installRecurringCommitmentWithID:(NSString *)commitmentID
+                               generation:(NSString *)generation
+                                 startedAt:(NSDate *)startedAt
+                                lockEndsAt:(NSDate *)lockEndsAt
+                       timeZoneIdentifier:(NSString *)timeZoneIdentifier
+                  followsLocationTimeZone:(BOOL)followsLocationTimeZone
+                            protectedHours:(NSDictionary<NSString *, id> *)protectedHours
+                             blockSettings:(NSDictionary<NSString *, id> *)blockSettings
+                                  segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                         protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
+                                     reply:(void(^)(NSDictionary<NSString *, id> *result,
+                                                    NSError * _Nullable error))reply;
 - (void)updateLocationTimeZoneForRecurringCommitmentID:(NSString *)commitmentID
                                              generation:(NSString *)generation
                                      timeZoneIdentifier:(NSString *)timeZoneIdentifier
@@ -206,6 +219,13 @@ supportsTrustedTravelTimeZoneWithReason:(NSString* _Nullable * _Nullable)reason;
 - (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
                                    generation:(NSString *)generation
                                      segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                                        reply:(void (^)(NSDictionary<NSString *, id> *result,
+                                                         NSError * _Nullable error))reply;
+
+- (void)updateRecurringScheduleForCommitmentID:(NSString *)commitmentID
+                                   generation:(NSString *)generation
+                                     segments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                             protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)protectedBundles
                                         reply:(void (^)(NSDictionary<NSString *, id> *result,
                                                          NSError * _Nullable error))reply;
 

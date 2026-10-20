@@ -136,6 +136,13 @@ typedef void (^SCDaemonSchedulerAnomalyHandler)(NSDictionary<NSString *, id> *fi
 - (void)evaluateForTrigger:(NSString *)trigger
                  completion:(nullable void (^)(NSDictionary<NSString *, id> *result))completion;
 
+/// Validates and extends root-owned bundle membership without changing its envelope.
++ (nullable NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                                           protectingBundles:(NSArray<NSDictionary<NSString *, id> *> *)profiles;
++ (BOOL)protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)profiles
+  areCoveredBySegments:(NSArray<NSDictionary<NSString *, id> *> *)segments;
++ (BOOL)protectedBundlesAreValid:(NSArray<NSDictionary<NSString *, id> *> *)profiles;
+
 @end
 
 NS_ASSUME_NONNULL_END

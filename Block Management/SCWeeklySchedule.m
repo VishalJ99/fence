@@ -125,6 +125,24 @@ static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
 
 #pragma mark - Day Access
 
+- (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule policy:(SCBundlePolicy)policy {
+    if (policy == SCBundlePolicyAllow) return [self isValidActiveEditOfSchedule:baselineSchedule];
+    if (baselineSchedule == nil || ![self.bundleID isEqual:baselineSchedule.bundleID]) return NO;
+    for (SCDayOfWeek day = SCDayOfWeekSunday; day <= SCDayOfWeekSaturday; day++) {
+        for (NSInteger minute = 0; minute < 1440; minute++) {
+            BOOL wasBlocked = NO, isBlocked = NO;
+            for (SCTimeRange *window in [baselineSchedule allowedWindowsForDay:day]) {
+                if (window.startMinutes <= minute && minute < window.endMinutes) wasBlocked = YES;
+            }
+            for (SCTimeRange *window in [self allowedWindowsForDay:day]) {
+                if (window.startMinutes <= minute && minute < window.endMinutes) isBlocked = YES;
+            }
+            if (wasBlocked && !isBlocked) return NO;
+        }
+    }
+    return YES;
+}
+
 - (BOOL)isValidActiveEditOfSchedule:(SCWeeklySchedule *)baselineSchedule {
     if (![self.bundleID isEqualToString:baselineSchedule.bundleID]) return NO;
     for (SCDayOfWeek day = SCDayOfWeekSunday; day <= SCDayOfWeekSaturday; day++) {
@@ -276,7 +294,7 @@ static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
 
     // Check if current time falls within any allowed window
     for (SCTimeRange *window in windows) {
-        if ([window containsTimeInMinutes:minutesFromMidnight]) {
+        if (window.startMinutes <= minutesFromMidnight && minutesFromMidnight < window.endMinutes) {
             return YES;
         }
     }
@@ -298,8 +316,8 @@ static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
     SCDayOfWeek today = (SCDayOfWeek)(nowComponents.weekday - 1);
     NSInteger currentMinutes = nowComponents.hour * 60 + nowComponents.minute;
 
-    // Search for next state change within the next 7 days
-    for (NSInteger dayOffset = 0; dayOffset < 7; dayOffset++) {
+    // Include the same weekday next week after its final window has ended.
+    for (NSInteger dayOffset = 0; dayOffset <= 7; dayOffset++) {
         SCDayOfWeek checkDay = (today + dayOffset) % 7;
         NSArray<SCTimeRange *> *windows = [self allowedWindowsForDay:checkDay];
 
@@ -308,7 +326,7 @@ static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
         for (NSInteger minute = startMinute; minute < 24 * 60; minute++) {
             BOOL allowedAtMinute = NO;
             for (SCTimeRange *window in windows) {
-                if ([window containsTimeInMinutes:minute]) {
+                if (window.startMinutes <= minute && minute < window.endMinutes) {
                     allowedAtMinute = YES;
                     break;
                 }
@@ -340,13 +358,24 @@ static BOOL SCMatchActiveEditWindow(NSUInteger proposedIndex,
 }
 
 - (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar {
+    return [self currentStatusStringAtDate:date calendar:calendar policy:SCBundlePolicyAllow];
+}
+
+- (NSString *)currentStatusStringAtDate:(NSDate *)date calendar:(NSCalendar *)calendar policy:(SCBundlePolicy)policy {
     // Returns just the "till X" part - caller adds "blocked"/"allowed"
     NSDate *nextChange = [self nextStateChangeDateAfterDate:date calendar:calendar];
     if (nextChange) {
         // When currently allowed, show the last allowed minute (subtract 1 min)
         // nextStateChangeDate returns first minute of NEXT state, but users expect
         // "allowed till X" where X is the last allowed minute, not first blocked minute
-        if ([self isAllowedAtDate:date calendar:calendar]) {
+        NSDateComponents *components = [calendar components:NSCalendarUnitWeekday | NSCalendarUnitHour | NSCalendarUnitMinute fromDate:date];
+        NSInteger minute = components.hour * 60 + components.minute;
+        BOOL insideWindow = NO;
+        for (SCTimeRange *window in [self allowedWindowsForDay:(SCDayOfWeek)(components.weekday - 1)]) {
+            if (window.startMinutes <= minute && minute < window.endMinutes) insideWindow = YES;
+        }
+        BOOL isAllowed = policy == SCBundlePolicyBlock ? !insideWindow : insideWindow;
+        if (isAllowed) {
             nextChange = [calendar dateByAddingUnit:NSCalendarUnitMinute
                                               value:-1
                                              toDate:nextChange

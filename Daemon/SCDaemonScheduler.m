@@ -222,6 +222,8 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         previousEnd = [segment[@"endMinuteOfWeek"] integerValue];
         [segmentIDs addObject:segment[@"segmentID"]];
     }
+    if (commitment[@"protectedBundles"] != nil &&
+        ![SCDaemonScheduler protectedBundles:commitment[@"protectedBundles"] areCoveredBySegments:segments]) return NO;
     return YES;
 }
 
@@ -285,6 +287,104 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
     return commitments;
 }
 
++ (BOOL)protectedBundles:(NSArray<NSDictionary<NSString *, id> *> *)profiles
+   areCoveredBySegments:(NSArray<NSDictionary<NSString *, id> *> *)segments {
+    if (![self protectedBundlesAreValid:profiles]) return NO;
+    NSMutableSet *knownIDs = [NSMutableSet set];
+    for (NSDictionary *profile in profiles) {
+        NSString *bundleID = profile[@"bundleID"];
+        [knownIDs addObject:bundleID];
+        NSSet *entries = [NSSet setWithArray:profile[@"entries"]];
+        for (NSDictionary *range in profile[@"blockedRanges"]) {
+            NSInteger cursor = [range[@"start"] integerValue];
+            NSInteger end = [range[@"end"] integerValue];
+            for (NSDictionary *segment in segments) {
+                if ([segment[@"endMinuteOfWeek"] integerValue] <= cursor) continue;
+                if ([segment[@"startMinuteOfWeek"] integerValue] > cursor ||
+                    ![segment[SCDaemonScheduleSourceBundleIDsKey] containsObject:bundleID] ||
+                    ![entries isSubsetOfSet:[NSSet setWithArray:segment[@"blocklist"]]]) return NO;
+                cursor = [segment[@"endMinuteOfWeek"] integerValue];
+                if (cursor >= end) break;
+            }
+            if (cursor < end) return NO;
+        }
+    }
+    for (NSDictionary *segment in segments) {
+        if (![[NSSet setWithArray:segment[SCDaemonScheduleSourceBundleIDsKey]] isSubsetOfSet:knownIDs]) return NO;
+    }
+    return YES;
+}
+
++ (BOOL)protectedBundlesAreValid:(NSArray<NSDictionary<NSString *, id> *> *)profiles {
+    if (![profiles isKindOfClass:[NSArray class]] || profiles.count > 512) return NO;
+    NSMutableSet *ids = [NSMutableSet set];
+    NSUInteger totalEntries = 0;
+    for (id value in profiles) {
+        if (![value isKindOfClass:[NSDictionary class]]) return NO;
+        NSDictionary *profile = value;
+        NSString *bundleID = profile[@"bundleID"];
+        if (!SCDaemonSchedulerUUIDString(bundleID) || [ids containsObject:bundleID] ||
+            ![profile[@"name"] isKindOfClass:[NSString class]] ||
+            ![profile[@"colorHex"] isKindOfClass:[NSString class]] ||
+            !SCDaemonSchedulerIntegerInRange(profile[@"policy"], 0, 1) ||
+            !SCDaemonSchedulerBoolean(profile[@"enabled"]) || ![profile[@"enabled"] boolValue] ||
+            ![profile[@"displayOrder"] isKindOfClass:[NSNumber class]] ||
+            !SCDaemonSchedulerStringArray(profile[@"entries"], NO) ||
+            [profile[@"entries"] count] == 0 ||
+            ![profile[@"blockedRanges"] isKindOfClass:[NSArray class]] ||
+            [profile[@"blockedRanges"] count] > 512) return NO;
+        totalEntries += [profile[@"entries"] count];
+        if (totalEntries > 50000) return NO;
+        NSInteger previousEnd = 0;
+        for (id rawRange in profile[@"blockedRanges"]) {
+            if (![rawRange isKindOfClass:[NSDictionary class]]) return NO;
+            NSDictionary *range = rawRange;
+            if (!SCDaemonSchedulerIntegerInRange(range[@"start"], previousEnd, 10079) ||
+                !SCDaemonSchedulerIntegerInRange(range[@"end"], [range[@"start"] integerValue] + 1, 10080)) return NO;
+            previousEnd = [range[@"end"] integerValue];
+        }
+        [ids addObject:bundleID];
+    }
+    return YES;
+}
+
++ (NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
+                                   protectingBundles:(NSArray<NSDictionary<NSString *, id> *> *)profiles {
+    if (![self protectedBundlesAreValid:profiles]) return nil;
+    NSMutableDictionary *byID = [NSMutableDictionary dictionary];
+    for (NSDictionary *profile in profiles) byID[profile[@"bundleID"]] = profile;
+    NSArray *oldProfiles = commitment[@"protectedBundles"];
+    for (NSDictionary *old in oldProfiles ?: @[]) {
+        NSDictionary *proposed = byID[old[@"bundleID"]];
+        for (NSString *key in @[@"name", @"colorHex", @"policy", @"enabled", @"displayOrder"]) {
+            if (![old[key] isEqual:proposed[key]]) return nil;
+        }
+        if (![[NSSet setWithArray:old[@"entries"]] isSubsetOfSet:[NSSet setWithArray:proposed[@"entries"] ?: @[]]]) return nil;
+        for (NSDictionary *oldRange in old[@"blockedRanges"]) {
+            NSInteger cursor = [oldRange[@"start"] integerValue];
+            NSInteger end = [oldRange[@"end"] integerValue];
+            for (NSDictionary *range in proposed[@"blockedRanges"]) {
+                if ([range[@"end"] integerValue] <= cursor) continue;
+                if ([range[@"start"] integerValue] > cursor) break;
+                cursor = MAX(cursor, [range[@"end"] integerValue]);
+                if (cursor >= end) break;
+            }
+            if (cursor < end) return nil;
+        }
+    }
+    // Legacy records have no snapshots: their source membership remains protected
+    // and retains the shipped Allow interpretation during first adoption.
+    for (NSDictionary *segment in commitment[@"segments"]) {
+        for (NSString *bundleID in segment[SCDaemonScheduleSourceBundleIDsKey]) {
+            if (byID[bundleID] == nil ||
+                (oldProfiles == nil && [byID[bundleID][@"policy"] integerValue] != 0)) return nil;
+        }
+    }
+    NSMutableDictionary *updated = [commitment mutableCopy];
+    updated[@"protectedBundles"] = [profiles copy];
+    return updated;
+}
+
 + (NSDictionary<NSString *, id> *)recurringCommitment:(NSDictionary<NSString *, id> *)commitment
                                    appendingEntries:(NSArray<NSString *> *)entries
                                         forBundleID:(NSString *)bundleID
@@ -312,8 +412,23 @@ static BOOL SCDaemonSchedulerRecurringCommitmentIsValid(NSString *commitmentID,
         aggregateEntries += count;
         [segments addObject:replacement];
     }
+    NSMutableArray *profiles = [NSMutableArray array];
+    for (NSDictionary *profile in commitment[@"protectedBundles"] ?: @[]) {
+        NSMutableDictionary *replacement = [profile mutableCopy];
+        if ([profile[@"bundleID"] isEqual:bundleID]) {
+            matched = YES;
+            NSMutableOrderedSet *unionEntries = [NSMutableOrderedSet orderedSetWithArray:profile[@"entries"]];
+            [unionEntries addObjectsFromArray:entries];
+            replacement[@"entries"] = unionEntries.array;
+        }
+        [profiles addObject:replacement];
+    }
     if (!matched) return nil;
     NSMutableDictionary *updated = [commitment mutableCopy];
+    if (commitment[@"protectedBundles"] != nil) {
+        if (![self protectedBundlesAreValid:profiles]) return nil;
+        updated[@"protectedBundles"] = profiles;
+    }
     updated[@"segments"] = [segments copy];
     return [updated copy];
 }

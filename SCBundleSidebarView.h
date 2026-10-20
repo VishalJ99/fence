@@ -41,6 +41,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether editing is locked (committed state)
 @property (nonatomic, assign) BOOL isCommitted;
 
+/// Membership remains protected until the commitment is explicitly ended.
+@property (nonatomic, copy) NSSet<NSString *> *protectedBundleIDs;
+
 /// Schedules dictionary for determining which bundles are active (bundleID -> schedule)
 @property (nonatomic, copy, nullable) NSDictionary<NSString *, SCWeeklySchedule *> *schedules;
 

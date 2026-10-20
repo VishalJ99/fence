@@ -11,6 +11,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, SCBundlePolicy) {
+    SCBundlePolicyAllow = 0,
+    SCBundlePolicyBlock = 1,
+};
+
 @interface SCBlockBundle : NSObject <NSCopying, NSSecureCoding>
 
 /// Unique identifier for this bundle (UUID string)
@@ -24,6 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// List of blocked entries: domains ("facebook.com") and apps ("app:com.bundle.id")
 @property (nonatomic, strong) NSMutableArray<NSString *> *entries;
+
+/// Allow blocks outside timetable windows; Block blocks inside them.
+@property (nonatomic) SCBundlePolicy policy;
 
 /// Whether this bundle is enabled (if NO, schedule is ignored)
 @property (nonatomic, assign) BOOL enabled;
