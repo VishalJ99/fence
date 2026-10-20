@@ -94,3 +94,56 @@ Relevant candidate source: `Brake/BrockerView.swift` lines16014,20926,20481,
 10093,8770,19948 and `FenceActiveEditPolicy.swift` lines385-408. The user requested
 an ELI5 explanation to confirm before copying this behavior to Mac; no membership
 schema or daemon changes have been implemented pending that confirmation.
+
+### iPhone visual meaning and Mac parity proposal
+
+Read-only source comparison on 2026-10-20; Mac checkout clean at `c01aa18`.
+The same TestFlight/source-linkage caveat above applies. At candidate `97d9843`:
+
+- Bundle-list red outline (red at 0.62 opacity, 1.5pt) and the legend
+  **In active session** mean membership in the protected commitment snapshot,
+  not "blocking right now." The card itself is not globally dimmed. A new
+  unadmitted bundle has no red outline and remains editable.
+- A protected bundle's editor shows a red lock icon, red text, faint red
+  background and red outline: **Bundle is being used in the current session.
+  Modifications are restricted. Content can be added.**
+- Name is disabled and rendered at 0.62 opacity. Colour choices are disabled;
+  unselected colours fade to 0.42 while the selected colour remains full
+  strength. The policy section fades to 0.62 and tapping it explains that the
+  policy cannot change. Delete is muted and tapping it explains the restriction.
+  Apps & Websites remains available for additions. Save and Cancel remain
+  available; protected content cannot be removed.
+- These membership cues persist while the bundle is temporarily allowed by its
+  timetable, during breaks, and after commitment expiry until explicitly ended.
+  They are not a live blocking indicator.
+- Calendar dimming has a different meaning: selecting one bundle fades other
+  bundles' entries to 0.44 and disables their hit testing. "Active" in calendar
+  accessibility text means selected/not dimmed, not currently blocking.
+  Calendar borders encode policy: Block is solid; Allow is dashed. Their colour
+  comes from the bundle, so a red calendar outline is not by itself a lock cue.
+- Active calendar editing says **Stricter edits only**. Newly created Allow
+  bundles have a notice that they join on Save and, without Allow entries, are
+  blocked all day; admission has its separate red warning review.
+
+Candidate source anchors in `Brake/BrockerView.swift`: bundle list `16014`,
+editor `16175`, policy border `5888`, calendar dimming `7790`, active rules
+`9382`, and warning banner `25398`. Exact function-body comparison against
+current iOS HEAD found no change in bundle create/update/delete, protection
+membership, active-calendar validation/admission, admission warning routing,
+bundle-list rendering or lock-banner rendering. Later HEAD changes exist,
+including content-removal controls; they are not evidence of build25 UI.
+
+Mac `c01aa18` currently fades committed sidebar rows to 0.6 and uses their
+outline for selection/hover, without the iPhone per-bundle red membership cue.
+Its editor disables name/delete, fades the whole colour picker to 0.45 and shows
+secondary-colour explanatory text. Sidebar creation remains disabled whenever
+committed. These are source findings, not a new deployment.
+
+Proposed parity: establish per-bundle protected membership first, then drive
+the red list outline/legend and editor warning/disabled states from that same
+membership. Keep new unadmitted bundles normal and editable. Preserve a
+separate selection cue in the Mac sidebar/calendar; never infer membership
+from selection, current blocking or timer expiry. Match the iPhone's visible
+reason for restrictions rather than dimming every bundle indiscriminately.
+This study implements no membership schema, visual changes or deployment.
+Implementation awaits the user's requested confirmation of the iPhone flow.
