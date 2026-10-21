@@ -3,8 +3,9 @@
 Parent: PER-444. Status: confirmed iPhone parity implemented by GPT-6.1 Sol
 medium, independently reviewed by Astra high; 197 tests pass. Signed and
 notarized 3.4.17/build659 is installed on the Mac mini and normal LaunchServices
-launch succeeded. Installed helper upgrade and Computer Use
-interaction/performance verification remain pending. No public release is authorized or implied. Short-block feature/skill
+launch succeeded. Installed helper upgrade remains pending normal menu-bar Repair and local
+administrator authentication. Native Computer Use action snapshots were captured
+on the Mac mini; performance capture is scoped but does not establish smoothness. No public release is authorized or implied. Short-block feature/skill
 work remains design-only and awaits separate discussion.
 
 ## Confirmed interaction and protection contract
@@ -14,7 +15,9 @@ Select one sidebar bundle first, then Shift-click its calendar entries or
 Shift-drag a rectangle over its entries. All-Up cannot select entries; changing
 bundle clears selection. An unmodified empty-space drag creates an entry for
 the selected bundle. Selection shares one snapped movement/resize delta,
-bounded by the group; delete, undo and pinch operate on the group. Other
+bounded by the group; delete and pinch operate on the group. Undo is available in ordinary
+uncommitted editing; active edits use Reset/Cancel and reject undo to avoid
+stale state. Other
 bundles' entries are dimmed and do not participate.
 
 An explicit row Edit action opens a draft with visible Cancel and Save. New
@@ -68,7 +71,12 @@ verified/failed admission, unchanged deadlines/runtime, protected versus draft
 editing, and calendar/editor interaction rules. Tests use isolated root settings
 and transport doubles, not live commitments. An internal copy of the built test
 bundle avoids the external-volume test-runner access issue. Actual hardware
-pinch and native interaction/performance traces remain unverified.
+pinch and Shift-marquee remain unverified by the supported tool. Native action
+snapshots confirm focused Shift-click selection, grouped movement/resize/deletion, draft
+Save and protected editor restrictions in a synthetic in-memory fixture. A scoped
+30-second Time Profiler capture completed; no render-latency or smoothness claim
+is made. Fixture undo lacks the production delegate registration and is not proof
+of production undo.
 
 Build from `SelfControl.xcworkspace`, scheme `SelfControl`, with explicit
 `-derivedDataPath /Users/dross/fence/build/DerivedData`, destination
@@ -124,9 +132,13 @@ complete its normal helper update/administrator authentication if requested,
 then verify helper protocol/hash and preserved state before calling the local
 deployment complete. Do not create a real commitment for verification.
 
-Computer Use remains blocked in the active chat while trusted Sky configuration
-is diagnosed. Configuration edits are not proof of a working state query. Do
-not substitute a GUI automation bypass. The test-only native fixture uses
+Computer Use was restored and actual native state queries and interactions
+succeeded. Production Add Bundle defaulted to Block and Cancel returned to the
+empty calendar. No real bundle or commitment was saved. The status-menu Repair
+action is not exposed in the supported app-scoped accessibility tree, and closing
+the main window produced a state-query timeout. Commit is not a safe upgrade probe:
+the manager call follows its final commitment confirmation. Local helper update
+therefore awaits the user choosing Repair Fence Permissions and authenticating. The test-only native fixture uses
 production views and synthetic in-memory data and proves neither daemon
 admission nor persistence. Evidence is under the chat's existing `work/`:
 `mac-parity-release-*`, `mac-parity-private-*`, and
@@ -144,6 +156,14 @@ build. Candidate source is `97d984307cb0d1a51bcd7881e4055b7c893d6722`, six minut
 before upload on 2026-08-28. Archive-to-commit linkage remains unproven; the
 physical iPhone was unavailable. Flow and visual descriptions above are source
 inferences accepted by the user, not a claimed physical TestFlight test.
+Native evidence: chat `outputs/per579-cua/index.html`, `reviewed-steps.json`,
+`verification.md`, and `reproduction.txt`. Raw trace is private under chat
+`work/private-per579-trace/`; it embeds process environment and is excluded from
+sharing. Initial ambiguous-coordinate snapshots are not counted as proof. A fresh Draft
+resize test selected Monday/Tuesday09:00–12:00; dragging the Monday bottom handle
+from[395,360]to[395,378] visibly extended both entries to13:00 with unchanged
+09:00 starts (`12-resize-before.png` / `13-resize-after.png`).
+
 Relevant candidate anchors in `Brake/BrockerView.swift`: protection/list `16014`,
 editor `16175`, policy border `5888`, calendar dimming `7790`, active rules
 `9382`, warning `25398`, and create/admit/update paths
