@@ -251,3 +251,12 @@ notary660,staple660,installed660-*} and public-artifact-safe helper-status.json.
 No release-specific Sentry upload/public tag/appcast/GitHub release occurred.
 Remote source push remains blocked by existing HTTPS credentials; the parent's
 read-only existing SSH test also found no accepted key, without credential edits.
+
+Build660 native smoke subsequently succeeded: a single Return through supported
+Computer Use loginwindow completed password-free console unlock; no credential
+was read or entered. Exact installed app showed no active schedule, empty
+calendar and disabled Commit. Add Bundle opened with Block selected; Cancel
+returned to the same empty calendar. Scoped captures14–16 are explicitly660,
+while earlier gesture captures remain659. An unlocked SystemUIServer state probe
+still timed out, leaving status-menu Repair user-operated. Last live helper check
+still matched the old hash. User's fixed660 Repair result remains pending.
