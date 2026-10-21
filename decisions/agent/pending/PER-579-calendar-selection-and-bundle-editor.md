@@ -218,3 +218,36 @@ and profile capture remain build659 evidence; they must not be relabeled660.
 Private Release660 preparation/signing/notarization and installation follow the
 existing path; capture its new embedded helper hash before normal authenticated
 Repair. No direct root helper replacement or enforcement reset is permitted.
+
+## Fixed private build660 installation
+
+Source884e4e3 Release build passed. Developer ID signing and strict deep signature
+verification passed; the release keychain was checked locked. Private Apple
+notarization5e81b693-9de4-4d0d-87f6-2b58ca4ba745 was Accepted. Staple validation
+and Gatekeeper accepted the installed app as Notarized Developer ID.
+
+Before replacement, all195 regular files of installed659 matched a preserved
+Fence-build659.app under the existing pre-update backup directory. Original645
+app/helper/private-state backups remain intact. Installed660 runs from the exact
+/Users/dross/Applications/Fence.app path as PID32115. Main executable SHA-256 is
+cf2392b249209f3e657828c9b4c6b31b729958b9b1e11571cfbeab459f913848.
+New embedded helper SHA-256 is
+c2668e8afcd6249216114b30a84032907b474e545b3b93fd166ed6da8ff47c52.
+Do not use the earlier659 helper hash as the660 target.
+
+The live helper remains old PID321/protocol6 until normal authenticated Repair.
+The user was asked to repeat Repair only after the nil-callback fix was installed
+and explained. No result from that new action has arrived yet. No direct helper
+copy/removal or real commitment was used. Signed app startup logs confirm the
+live protocol6 handshake and deliberate retention until a protected action.
+Native660 screenshot is pending: both unchanged QA and new production app had
+cgWindowNotFound. Display wake reported a console-session lock flag despite
+IOConsoleLocked=No; supported Computer Use could inspect loginwindow wallpaper
+but no visible login controls. No app restart was attempted during pending auth.
+The build659 gesture/profile evidence remains unchanged and explicitly scoped.
+
+Evidence is chatwork/mac-repair-{build-test,xctest,release-build660,sign660,
+notary660,staple660,installed660-*} and public-artifact-safe helper-status.json.
+No release-specific Sentry upload/public tag/appcast/GitHub release occurred.
+Remote source push remains blocked by existing HTTPS credentials; the parent's
+read-only existing SSH test also found no accepted key, without credential edits.
