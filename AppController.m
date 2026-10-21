@@ -350,24 +350,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
 			// Always show menu bar when block is running
 			[[SCMenuBarController sharedController] setVisible:YES];
 
-			// Set up menu bar action handlers
-			__weak typeof(self) weakSelf = self;
-			[SCMenuBarController sharedController].onShowSchedule = ^{
-				[weakSelf showWeekSchedule:weakSelf];
-			};
-			[SCMenuBarController sharedController].onShowBlocklist = ^{
-				[weakSelf showDomainList:weakSelf];
-			};
-			[SCMenuBarController sharedController].onEnterLicense = ^{
-				[weakSelf showWeekSchedule:weakSelf];
-			};
-            [SCMenuBarController sharedController].onRepairPermissions = ^{
-                [weakSelf repairFencePermissionsFromUserAction];
-            };
-            [SCMenuBarController sharedController].onSendDiagnosticReport = ^{
-                [weakSelf sendDiagnosticReportFromUserAction];
-            };
-
             // apparently, a block is running, so make sure FirstBlockStarted is true
             [defaults_ setBool: YES forKey: @"FirstBlockStarted"];
 		}
@@ -400,22 +382,6 @@ static BOOL SCFileExistsAtPath(NSString *path) {
         if ([manager isCommitted]) {
             // Committed state: show menu bar for access to schedule/settings
             [[SCMenuBarController sharedController] setVisible:YES];
-            __weak typeof(self) weakSelf = self;
-            [SCMenuBarController sharedController].onShowSchedule = ^{
-                [weakSelf showWeekSchedule:weakSelf];
-            };
-            [SCMenuBarController sharedController].onShowBlocklist = ^{
-                [weakSelf showDomainList:weakSelf];
-            };
-            [SCMenuBarController sharedController].onEnterLicense = ^{
-                [weakSelf showWeekSchedule:weakSelf];
-            };
-            [SCMenuBarController sharedController].onRepairPermissions = ^{
-                [weakSelf repairFencePermissionsFromUserAction];
-            };
-            [SCMenuBarController sharedController].onSendDiagnosticReport = ^{
-                [weakSelf sendDiagnosticReportFromUserAction];
-            };
         } else if (blockWasOn) {
             // Not committed + just transitioned off: show week schedule
             [self showWeekSchedule:self];
@@ -552,8 +518,21 @@ static BOOL SCFileExistsAtPath(NSString *path) {
     }
 }
 
+- (void)configureMenuBarActions {
+    // Maintenance actions must work before the first commitment as well.
+    SCMenuBarController *menuBar = [SCMenuBarController sharedController];
+    __weak typeof(self) weakSelf = self;
+    menuBar.onShowSchedule = ^{ [weakSelf showWeekSchedule:weakSelf]; };
+    menuBar.onShowBlocklist = ^{ [weakSelf showDomainList:weakSelf]; };
+    menuBar.onEnterLicense = ^{ [weakSelf showWeekSchedule:weakSelf]; };
+    menuBar.onRepairPermissions = ^{ [weakSelf repairFencePermissionsFromUserAction]; };
+    menuBar.onSendDiagnosticReport = ^{ [weakSelf sendDiagnosticReportFromUserAction]; };
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
 	[NSApplication sharedApplication].delegate = self;
+
+    [self configureMenuBarActions];
 
     // The app controller exists for the full login session, unlike the weekly
     // window controller. Own the location refresh wake trigger here so it also

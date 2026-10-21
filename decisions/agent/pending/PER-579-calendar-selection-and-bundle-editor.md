@@ -192,3 +192,29 @@ Sanitized evidence is chat`outputs/per579-cua/helper-status.json`. Private artif
 route is`https://drosss-mac-mini.tail8111ef.ts.net/artifacts/per579-fence-mac-qa/`,
 staged under`/Users/dross/.local/share/codex-artifacts/per579-fence-mac-qa/`. Parent
 verified HTTPS index on Mac mini and MacBook; physical iPhone not tested.
+
+## Repair action fix after the reported no-op
+
+The user clarified that choosing Repair produced neither a result nor an
+administrator prompt. Source diagnosis found a nil callback on ordinary cold
+launch without a commitment: AppController only assigned status-menu callbacks
+inside active-block/committed branches. The menu item itself had the correct
+target and selector, but repairPermissionsClicked silently skipped its nil
+onRepairPermissions callback.
+
+All five existing callback bodies now register once, unconditionally in
+applicationDidFinishLaunching. Duplicate state-conditional wiring was removed;
+visibility, enforcement guards, helper upgrade logic and authorization are
+unchanged. Astra high independently reviewed the exact move and early singleton
+initialization and found no actionable issue. Debug build-for-testing succeeded;
+the unchanged isolated 197-test suite passed again. AppController is not linked
+into that unit-test target, so those tests do not prove the callback regression;
+normal Repair on the fixed installed app remains the final runtime proof.
+
+The authorized local fix keeps marketing version3.4.17 and advances all existing
+project build configurations to660, distinguishing it from installed659. No
+public release/tag/appcast change is authorized. Historical gesture screenshots
+and profile capture remain build659 evidence; they must not be relabeled660.
+Private Release660 preparation/signing/notarization and installation follow the
+existing path; capture its new embedded helper hash before normal authenticated
+Repair. No direct root helper replacement or enforcement reset is permitted.
