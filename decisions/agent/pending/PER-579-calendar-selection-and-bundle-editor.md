@@ -171,3 +171,24 @@ editor `16175`, policy border `5888`, calendar dimming `7790`, active rules
 `FenceActiveEditPolicy.swift:385-408`. Compared current iOS function bodies were
 unchanged for these flows/cues; later content-removal changes do not establish
 build25 appearance.
+
+## Post-authentication verification
+
+The user reported Repair complete. Read-only verification still found old helper
+PID321/hashc61eb91a4c285cba41117be713d0797e83b6eaa7122b2fb2e6c1a2e68ea6a6e0.
+A normal restart of only the exact installed app restored the main window,
+version3.4.17/build659 PID13509. Its fresh compatibility handshake logged
+`Retaining legacy recurring daemon until a protected user action (protocol=6)`;
+protocol12 remains required. No matching installer outcome was established in
+the preceding app logs. Do not infer failed authentication or a source installer
+bug from this gap; the actual Repair destination/result needs clarification.
+
+The private root settings and LaunchDaemon plist remain byte-identical to the
+pre-update backup. Effective SelfControl defaults and Fence recurring schedule
+and migration values are unchanged. Changed Fence preference keys are limited to
+telemetry consent generation, preferences-window/pane state, break-credit day
+rollover and Sparkle check/profile timestamps. No real commitment was created.
+Sanitized evidence is chat`outputs/per579-cua/helper-status.json`. Private artifact
+route is`https://drosss-mac-mini.tail8111ef.ts.net/artifacts/per579-fence-mac-qa/`,
+staged under`/Users/dross/.local/share/codex-artifacts/per579-fence-mac-qa/`. Parent
+verified HTTPS index on Mac mini and MacBook; physical iPhone not tested.
