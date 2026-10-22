@@ -4,7 +4,7 @@ Parent: PER-444. Status: implementation and authorized Mac mini local deployment
 complete; archived at closeout. Source884e4e3 is installed as private
 3.4.17/build660. Astra high reviewed the changes;197 tests passed. Actual signed
 app compatibility and consistency handshakes verified protocol12/divergence none.
-No public release occurred. Physical pinch/Shift-marquee and animation smoothness
+The private-install closeout below predates the public release recorded at the end. Physical pinch/Shift-marquee and animation smoothness
 remain unverified. Short-block feature/skill remains a separate pending design.
 
 ## Confirmed interaction and protection contract
@@ -182,3 +182,33 @@ editor `16175`, policy border `5888`, calendar dimming `7790`, active rules
 unchanged for these flows/cues; later content-removal changes do not establish
 build25 appearance.
 
+
+## Public macOS release — 2026-10-22
+
+The user authorized publishing the new Fence with the bundle edit flow and no
+automatic startup safety-check walkthrough. Published **3.4.17/build661** from
+`1d15b08` (tag `v3.4.17`), a metadata-only increment from private660. Existing
+PER-579 implementation had independent Astra-high review; fresh Debug
+build-for-testing and all197 XCTest tests passed. Release build, strict signing,
+matching embedded Direct Distribution profile, app/DMG notarization and stapling,
+Gatekeeper and exact executable eight-second launch smoke passed on the Mac mini.
+The release signing Keychain was verified locked afterward.
+
+Public release: https://github.com/VishalJ99/fence/releases/tag/v3.4.17 .
+Website commit `1ab0d77` updates both appcasts and all four homepage DMG targets.
+Ordinary and cache-busted HTTPS requests verified both live feeds at661 with the
+exact final ZIP signature/length, plus all homepage targets. Fresh anonymous ZIP
+and DMG downloads match local bytes and SHA256. App notarization
+`7236f6d0-a46d-4252-819c-0dffd01e2a82`; DMG notarization
+`d463086d-d9b6-4627-bff2-05240820b569` (both Accepted).
+
+Reproduction, final hashes/signature and receipts remain in the established
+ignored `dist/` release directory; logs are under `work/release-3.4.17/`.
+GitHub credentials now work; source master, feature branch and version tag were
+pushed successfully. Pre-existing untracked app `work/` and website `.DS_Store`
+remain. No personal commitment, persisted test bundle, helper replacement or
+MacBook/iPhone install was performed for public release validation. Physical
+gesture and real updater-install proof limits above remain. Manual Test Block,
+Apple signing and helper compatibility/authorization remain separate from the
+removed automatic startup walkthrough. The short-block proposal remains design
+only and unimplemented.
